@@ -111,7 +111,11 @@ test('initial package publishing is explicit and guarded', async () => {
   ]);
   assert.ok(remoteAccessRequirements.requiredSurfaces?.includes('preview-websocket'));
   assert.match(acceptance, /releaseSetSha256/);
-  assert.match(await readFile(join(root, 'scripts/publish-candidate.mjs'), 'utf8'), /Supported publication requires a signed release set/);
+  const publisher = await readFile(join(root, 'scripts/publish-candidate.mjs'), 'utf8');
+  assert.match(publisher, /v0\.2 or later publication require a signed release set/);
+  assert.match(publisher, /requiresClientConformance\(candidate\.version\)/);
+  assert.match(await readFile(join(root, 'scripts/candidate-evidence.mjs'), 'utf8'),
+    /Trivy binding schemaVersion.*required for v0\.2 and later candidates/);
 
 });
 

@@ -481,6 +481,12 @@ test('Trivy scanner evidence requires an identified scanner and a fresh exact da
   };
   assert.doesNotThrow(() => assertTrivyScannerIdentity(bindings, '2026-08-23T13:00:00.000Z'));
   assert.doesNotThrow(() => assertTrivyScannerIdentity({ ...bindings, schemaVersion: 2 }, '2026-08-23T13:00:00.000Z'));
+  assert.throws(() => assertTrivyScannerIdentity(bindings, '2026-08-23T13:00:00.000Z', {
+    requiredSchemaVersion: 2,
+  }), /schemaVersion 2 is required for v0\.2/);
+  assert.doesNotThrow(() => assertTrivyScannerIdentity({ ...bindings, schemaVersion: 2 }, '2026-08-23T13:00:00.000Z', {
+    requiredSchemaVersion: 2,
+  }));
   const stale = structuredClone(bindings);
   stale.scanner.vulnerabilityDatabase.UpdatedAt = '2026-08-20T11:00:00.000Z';
   assert.throws(() => assertTrivyScannerIdentity(stale, '2026-08-23T13:00:00.000Z'), /stale/);

@@ -7,17 +7,19 @@ import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { IMAGE_NAMES, verifyCandidateDirectory } from './candidate-evidence.mjs';
+import { requiresClientConformance } from './client-conformance.mjs';
 import { verifyCandidateSignature } from './sign-candidate.mjs';
 import { verifyAcceptanceBundle } from './acceptance-evidence.mjs';
 
 const exec = promisify(execFile);
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 
-export function buildPublishPlan(candidate, catalog, candidateDirectory, supportedEvidence) {
+export function buildPublishPlan(candidate, catalog, candidateDirectory, releaseEvidence) {
   assert(['initial', 'supported'].includes(candidate.releaseTier), 'Only initial or supported candidates may be published.');
-  assert(candidate.releaseTier !== 'supported' || supportedEvidence, 'Supported publication requires a signed release set and signed acceptance evidence.');
   assert(candidate.modes?.images === true && candidate.modes?.scans === true && candidate.modes?.exactArtifactAcceptance === true, 'Publishing requires a complete scanned exact-artifact candidate.');
   assert(candidate.modes?.binaryOnly === false, 'Publishing requires the npm artifact from a complete candidate.');
+  const acceptanceRequired = candidate.releaseTier === 'supported' || requiresClientConformance(candidate.version);
+  assert(!acceptanceRequired || releaseEvidence, 'Supported releases and v0.2 or later publication require a signed release set and signed acceptance evidence.');
   const images = IMAGE_NAMES.map((name) => {
     const image = name === 'gateway' ? catalog.gateway : catalog.presets[name].image;
     const registry = parseGhcrReference(image.requested);
@@ -30,17 +32,17 @@ export function buildPublishPlan(candidate, catalog, candidateDirectory, support
       registry,
     };
   });
-  const nativeAssets = supportedEvidence
-    ? supportedEvidence.set.document.members.flatMap((member) => [
-      join(supportedEvidence.set.directory, member.directory, member.nativeArchive.name),
-      join(supportedEvidence.set.directory, member.directory, member.nativeSbom.name),
+  const nativeAssets = releaseEvidence
+    ? releaseEvidence.set.document.members.flatMap((member) => [
+      join(releaseEvidence.set.directory, member.directory, member.nativeArchive.name),
+      join(releaseEvidence.set.directory, member.directory, member.nativeSbom.name),
     ])
     : [
       join(candidateDirectory, `qubicl-${candidate.version}-${candidate.host.target}.tar.gz`),
       join(candidateDirectory, `qubicl-${candidate.version}-${candidate.host.target}.spdx.json`),
     ];
-  const trustAssets = supportedEvidence
-    ? [supportedEvidence.set.path, supportedEvidence.releaseSetSignature, supportedEvidence.acceptance, supportedEvidence.acceptanceSignature, ...supportedEvidence.evidenceFiles]
+  const trustAssets = releaseEvidence
+    ? [releaseEvidence.set.path, releaseEvidence.releaseSetSignature, releaseEvidence.acceptance, releaseEvidence.acceptanceSignature, ...releaseEvidence.evidenceFiles]
     : [];
   return {
     version: candidate.version,
@@ -70,9 +72,10 @@ async function main(args) {
 Without --publish, verify the candidate and print the exact publication plan.
 Publishing requires a clean checkout at the candidate revision, npm and GitHub
 authentication, Skopeo, and an explicit version-matching approval variable.
-Supported releases additionally require --release-set, --release-set-signature,
---acceptance, and --acceptance-signature. Initial pre-1.0 releases retain their
-documented explicit acceptance exemption.
+Supported releases and every v0.2-or-later publication additionally require
+--release-set, --release-set-signature, --acceptance, and
+--acceptance-signature. Only the documented v0.1 initial series retains its
+acceptance exemption.
 It copies tested OCI archives, publishes the tested npm tarball, verifies remote
 digests, creates vVERSION and an immutable GitHub release, then moves latest.`);
     return;
@@ -82,22 +85,22 @@ digests, creates vVERSION and an immutable GitHub release, then moves latest.`);
   const { candidate, catalog } = await verifyCandidateDirectory(candidateDirectory, { root });
   const publicKey = await readFile(resolve(options.publicKey));
   const signatureDocument = await verifyCandidateSignature(candidateDirectory, candidate, publicKey, resolve(options.signature));
-  let supportedEvidence;
-  if (candidate.releaseTier === 'supported') {
-    for (const [option, value] of [['--release-set', options.releaseSet], ['--release-set-signature', options.releaseSetSignature], ['--acceptance', options.acceptance], ['--acceptance-signature', options.acceptanceSignature]]) assert(value, `${option} is required for supported releases.`);
+  let releaseEvidence;
+  if (candidate.releaseTier === 'supported' || requiresClientConformance(candidate.version)) {
+    for (const [option, value] of [['--release-set', options.releaseSet], ['--release-set-signature', options.releaseSetSignature], ['--acceptance', options.acceptance], ['--acceptance-signature', options.acceptanceSignature]]) assert(value, `${option} is required for supported releases and v0.2 or later publication.`);
     const verified = await verifyAcceptanceBundle(options.releaseSet, options.acceptance, options.publicKey, options.releaseSetSignature, options.acceptanceSignature);
-    assert(verified.set.document.version === candidate.version && verified.set.document.revision === candidate.revision, 'Supported evidence targets another candidate.');
+    assert(verified.set.document.version === candidate.version && verified.set.document.revision === candidate.revision, 'Release evidence targets another candidate.');
     const complete = verified.set.document.members.find(({ complete }) => complete);
     assert(complete?.target === candidate.host.target, 'The published candidate is not the release set complete candidate.');
     assert(complete.candidateJsonSha256 === await sha256(candidateDirectory, 'candidate.json'), 'The release set does not bind the published candidate.json.');
-    supportedEvidence = {
+    releaseEvidence = {
       ...verified,
       releaseSetSignature: resolve(options.releaseSetSignature),
       acceptance: resolve(options.acceptance),
       acceptanceSignature: resolve(options.acceptanceSignature),
     };
   }
-  const plan = buildPublishPlan(candidate, catalog, candidateDirectory, supportedEvidence);
+  const plan = buildPublishPlan(candidate, catalog, candidateDirectory, releaseEvidence);
   plan.releaseAssets.push(resolve(options.publicKey), resolve(options.signature));
   assert(new Set(plan.releaseAssets.map((path) => basename(path))).size === plan.releaseAssets.length, 'Release evidence and artifact filenames must be unique.');
   await assertCheckout(candidate);

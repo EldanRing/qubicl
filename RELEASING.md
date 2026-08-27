@@ -11,6 +11,9 @@ Desktop, and Windows 11 x64 through Ubuntu 24.04 on WSL 2 with Docker Desktop
 are directly exercised hosts. Native Windows and WSL 1 are unsupported; Linux
 ARM64, Intel macOS, Windows on ARM, and other WSL distributions are best-effort.
 Missing external client or best-effort hardware coverage does not block 0.1.
+That exception ends with the v0.1 series: every v0.2-or-later publication,
+including one built with the `initial` candidate tier, requires the signed
+schema-4 release-set acceptance bundle.
 The versioned [platform support matrix](conformance/platform-support-v1.json)
 is the source of truth for these support and evidence classifications.
 
@@ -223,8 +226,9 @@ node scripts/acceptance-evidence.mjs sign \
   /secure/offline/qubicl-release.private.pem /path/to/acceptance-signature.json
 ```
 
-The supported publisher requires all four extra paths through `--release-set`,
-`--release-set-signature`, `--acceptance`, and `--acceptance-signature`. The
+The publisher requires all four extra paths through `--release-set`,
+`--release-set-signature`, `--acceptance`, and `--acceptance-signature` for a
+supported release or any v0.2-or-later publication. The
 versioned acceptance schema hashes every referenced report, records concrete
 tool/platform versions and UTC timestamps, requires upgrade, crash-safe backup,
 restart, reboot, full-topology performance, multi-computer, and sustained-use

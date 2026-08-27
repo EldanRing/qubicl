@@ -76,6 +76,15 @@ test('supported publication cannot bypass release-set acceptance evidence', asyn
   }, {}, '/candidate'), /signed release set/);
 });
 
+test('v0.2 initial publication cannot use the v0.1 acceptance exemption', async () => {
+  const { buildPublishPlan } = await import(moduleUrl);
+  assert.throws(() => buildPublishPlan({
+    version: '0.2.0',
+    releaseTier: 'initial',
+    modes: { images: true, scans: true, exactArtifactAcceptance: true, binaryOnly: false },
+  }, {}, '/candidate'), /v0\.2 or later publication/);
+});
+
 test('existing GitHub release metadata rejects stale or surplus assets', async () => {
   const { assertReleaseMetadata } = await import(moduleUrl);
   const expected = {

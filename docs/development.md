@@ -127,6 +127,9 @@ The builder creates five multi-architecture OCI archives (gateway plus four
 presets), checks contracts/provenance/SBOM, and scans independently filtered
 amd64 and arm64 OCI views. Each retained Trivy report must match the selected
 manifest, configuration, compressed layers, and rootfs diff IDs. The builder
+records those platform-view bindings as schema 2, which is mandatory when a
+v0.2-or-later candidate is verified; legacy schema-1 bindings remain readable
+only for v0.1 candidate evidence. The builder
 then generates exact digest/size catalog data and builds/tests the npm and native
 artifacts against those exact bytes. Output remains ignored under
 `release/candidates/`; there is no push, publish, tag, release, or visibility

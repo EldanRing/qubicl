@@ -10,6 +10,7 @@ import {
   assertNpmArtifact,
   extractReleaseArchive,
 } from './artifact-evidence.mjs';
+import { requiresClientConformance } from './client-conformance.mjs';
 import { inspectOciArchive } from './oci-evidence.mjs';
 export const IMAGE_NAMES = ['gateway', 'file-system', 'browser', 'computer', 'workstation'];
 export const PLATFORMS = ['linux/amd64', 'linux/arm64'];
@@ -525,7 +526,9 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
         const name = `trivy-${image}-${platform.replace('/', '-')}.json`;
         return { name, document: await jsonFile(join(candidateDirectory, name)) };
       })));
-      assertTrivyScannerIdentity(bindings, now);
+      assertTrivyScannerIdentity(bindings, now, {
+        requiredSchemaVersion: requiresClientConformance(candidate.version) ? 2 : undefined,
+      });
       assert(Array.isArray(bindings.scans) && bindings.scans.length === reportEntries.length, 'trivy-bindings.json has incomplete scan coverage.');
       for (const report of reportEntries) {
         const identity = reportIdentity(report.name);
@@ -643,10 +646,14 @@ export function assertTrivyScanBinding(binding, report, expected) {
   }
 }
 
-export function assertTrivyScannerIdentity(bindings, now) {
+export function assertTrivyScannerIdentity(bindings, now, { requiredSchemaVersion } = {}) {
   const scanner = bindings?.scanner;
   const database = scanner?.vulnerabilityDatabase;
   assert([1, 2].includes(bindings?.schemaVersion) && isoDate(bindings.createdAt), 'trivy-bindings.json has an invalid schema or creation time.');
+  if (requiredSchemaVersion !== undefined) {
+    assert(bindings.schemaVersion === requiredSchemaVersion,
+      `Trivy binding schemaVersion ${requiredSchemaVersion} is required for v0.2 and later candidates.`);
+  }
   assert(scanner?.name === 'trivy' && /^\d+\.\d+\.\d+$/u.test(scanner.version ?? '')
     && /^[a-f0-9]{64}$/u.test(scanner.versionOutputSha256 ?? ''), 'trivy-bindings.json has an invalid scanner identity.');
   assert(Number.isInteger(database?.Version) && isoDate(database?.UpdatedAt) && isoDate(database?.DownloadedAt)

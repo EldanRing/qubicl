@@ -64,6 +64,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- v0.2 publication can no longer inherit the v0.1 initial-tier acceptance
+  exemption, and v0.2 candidate verification now requires schema-2 Trivy
+  evidence bound to independently filtered platform views.
 - Multi-platform release candidates now scan independently filtered amd64 and
   arm64 OCI views and reject retained Trivy reports whose image configuration,
   compressed layers, or rootfs diff IDs do not match the selected platform.
