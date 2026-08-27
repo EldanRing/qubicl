@@ -118,6 +118,16 @@ test('repository does not define GitHub Actions workflows', async () => {
   assert.deepEqual(workflows, []);
 });
 
+test('routine dependency review stays manual and local', async () => {
+  await assert.rejects(
+    readFile(join(root, '.github/dependabot.yml'), 'utf8'),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT',
+  );
+  const development = await readFile(join(root, 'docs/development.md'), 'utf8');
+  assert.match(development, /Dependency review is manual and local/u);
+  assert.match(development, /Hosted security\s+alerts are a separate repository setting/u);
+});
+
 test('brand marks are deterministic vector assets with light and dark README variants', async () => {
   const names = [
     'qubicl-mark.svg',

@@ -46,6 +46,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   inventory and reinspects every candidate before deletion. Daemon-global
   images and mutable-name volumes remain manual because one Qubicl state root
   cannot prove exclusive ownership.
+- Routine dependency review is manual and local; the repository no longer
+  configures Dependabot to create public dependency-update pull requests.
 
 ### Fixed
 

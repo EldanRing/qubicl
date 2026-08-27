@@ -55,6 +55,13 @@ npm run scan:secrets
 
 The command scans reachable history and worktree with redacted findings. Before public cutover, also scan every retained remote branch/PR ref in a temporary bare clone; worktree checks cannot remove GitHub-owned PR refs. Run `npm audit signatures` and review Trivy reports in candidate output.
 
+Dependency review is manual and local. The repository does not configure
+Dependabot or another bot to open routine public update pull requests. Review
+proposed package changes against exact lockfile bytes, licenses, bundled output,
+offline/online audit evidence, and the focused tests they invalidate before
+including them in an ordinary maintainer-reviewed branch. Hosted security
+alerts are a separate repository setting, not an automated update-PR workflow.
+
 ## Physical reboot acceptance
 
 Reboot remains a separate operator-controlled gate:
