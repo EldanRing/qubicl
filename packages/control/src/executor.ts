@@ -23,7 +23,7 @@ import { BrowserManager, type BrowserComputerAction, type BrowserMouseButton, ty
 import { desktopHelperEnvironment } from './environments.js';
 import { RemoteBrokerManager, RemoteBrowserManager, RemoteDesktopApplicationManager, RemoteDesktopManager, RemotePortManager, RemoteProcessManager, RemoteWebManager, type RemoteProcessStatus } from './remote-runners.js';
 import { discoverListeningPorts } from './ports.js';
-import { PreviewManager, type PortSource } from './previews.js';
+import { PreviewManager, previewAccessFileSource, type PortSource } from './previews.js';
 import { AuditLog, contentAuditMetadata, toolAuditMetadata } from './audit.js';
 import { SkillManager } from './skills.js';
 import { RuntimePolicy } from './policy.js';
@@ -140,9 +140,14 @@ export class ToolExecutor {
       : undefined);
     this.leases.setRevocationHandler(async (proof) => {
       this.viewerPointers.clear();
-      const result = await this.processes.terminateOwner(proof);
-      this.previews.clear();
-      return result;
+      try {
+        return await this.processes.terminateOwner(proof);
+      } finally {
+        // Capability URLs must be invalidated even if process fencing fails.
+        // Lease acquisition remains fail-closed through LeaseManager's
+        // rejected revocation state.
+        this.previews.clear();
+      }
     });
   }
 
@@ -751,6 +756,8 @@ function configuredPreviewManager(): PreviewManager {
     process.env.QUBICL_EXECUTOR_HOST ?? '127.0.0.1',
     process.env.QUBICL_PUBLIC_PREVIEW_BASE ?? `http://127.0.0.1:3211/computers/${id}/previews`,
     process.env.QUBICL_INTERNAL_PREVIEW_BASE ?? `http://127.0.0.1:3211/computers/${id}/previews`,
+    process.env.QUBICL_REMOTE_PREVIEW_BASE,
+    process.env.QUBICL_PREVIEW_ACCESS_PATH ? previewAccessFileSource(process.env.QUBICL_PREVIEW_ACCESS_PATH) : undefined,
   );
 }
 

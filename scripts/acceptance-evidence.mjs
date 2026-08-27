@@ -18,12 +18,20 @@ import {
   loadPlatformSupportRequirements,
   validatePlatformConformance,
 } from './platform-support.mjs';
+import {
+  REMOTE_ACCESS_REQUIREMENTS_NAME,
+  REMOTE_ACCESS_REQUIREMENTS_PATH,
+  loadRemoteAccessRequirements,
+  remoteAccessEvidenceReferences,
+  validateRemoteAccessConformance,
+} from './remote-access-conformance.mjs';
 import { verifyReleaseSet } from './release-set.mjs';
 
 const root = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const LEGACY_CLIENTS = ['codex', 'claude-code', 'claude-desktop', 'cursor', 'vscode', 'open-webui', 'mcp-stdio', 'mcp-http', 'openapi'];
 const LEGACY_PLATFORMS = ['linux-x64', 'linux-arm64', 'macos-intel', 'macos-apple-silicon', 'windows-wsl2-x64'];
 const WORKFLOWS = ['upgrade', 'backupRestoreInterruption', 'restart', 'physicalReboot', 'fullTopologyPerformance', 'multipleComputers', 'sustainedDogfooding'];
+const REMOTE_ACCESS_WORKFLOW = 'remoteGateway';
 
 export async function validateAcceptanceEvidence(evidence, context) {
   const { releaseSet, releaseSetSha256, evidenceDirectory, signatureFingerprint, now = new Date().toISOString() } = context;
@@ -71,23 +79,35 @@ export async function validateAcceptanceEvidence(evidence, context) {
       validateResult(result, label, evidenceDirectory, releaseSet.createdAt, now)
     ));
   }
+  let remoteSummary = {};
+  if (evidence.schemaVersion === 4) {
+    const requirements = await verifyRemoteAccessRequirements(evidence, evidenceDirectory);
+    remoteSummary = await validateRemoteAccessConformance(evidence, requirements, (result, label) => (
+      validateResult(result, label, evidenceDirectory, releaseSet.createdAt, now)
+    ));
+  }
   assert(evidence.workflows && typeof evidence.workflows === 'object', 'Acceptance workflows are required.');
-  for (const id of WORKFLOWS) await validateResult(evidence.workflows[id], `workflow ${id}`, evidenceDirectory, releaseSet.createdAt, now);
+  const workflows = evidence.schemaVersion === 4 ? [...WORKFLOWS, REMOTE_ACCESS_WORKFLOW] : WORKFLOWS;
+  for (const id of workflows) await validateResult(evidence.workflows[id], `workflow ${id}`, evidenceDirectory, releaseSet.createdAt, now);
 
   for (const [name, review] of [['security', evidence.securityReview], ['vulnerability', evidence.vulnerabilityReview], ['privacy', evidence.privacyReview]]) {
     await validateReview(review, `${name} review`, evidence, evidenceDirectory, releaseSet.createdAt, now);
   }
-  for (const topic of ['processBoundary', 'internalAuthentication', 'browserSurface', 'filesystemRaces', 'networkReconciliation', 'releaseIntegrity']) {
+  const securityTopics = ['processBoundary', 'internalAuthentication', 'browserSurface', 'filesystemRaces', 'networkReconciliation', 'releaseIntegrity'];
+  if (evidence.schemaVersion === 4) securityTopics.push('remoteExposure');
+  for (const topic of securityTopics) {
     assert(evidence.securityReview.topics?.[topic] === true, `Security review lacks ${topic}.`);
   }
-  return { schemaVersion: evidence.schemaVersion, ...conformance, ...platformSummary, workflows: WORKFLOWS.length };
+  return { schemaVersion: evidence.schemaVersion, ...conformance, ...platformSummary, ...remoteSummary, workflows: workflows.length };
 }
 
 export function acceptanceEvidenceFiles(evidence, directory) {
   const references = [
     evidence.conformance?.requirements,
     evidence.platformConformance?.requirements,
+    evidence.remoteAccessConformance?.requirements,
     ...clientConformanceEvidenceReferences(evidence),
+    ...remoteAccessEvidenceReferences(evidence),
     ...(evidence.platforms ?? []).map(({ evidence: value }) => value),
     ...Object.values(evidence.workflows ?? {}).map((value) => value?.evidence),
     evidence.securityReview?.evidence,
@@ -115,6 +135,16 @@ async function verifyPlatformSupportRequirements(evidence, directory) {
   assert(reference.sha256 === await sha256(PLATFORM_SUPPORT_REQUIREMENTS_PATH),
     'Platform conformance evidence does not bind the exact reviewed requirements.');
   return loadPlatformSupportRequirements(join(directory, reference.path));
+}
+
+async function verifyRemoteAccessRequirements(evidence, directory) {
+  const reference = evidence.remoteAccessConformance?.requirements;
+  assert(reference?.path === REMOTE_ACCESS_REQUIREMENTS_NAME,
+    `Remote-access requirements must use ${REMOTE_ACCESS_REQUIREMENTS_NAME}.`);
+  await validateEvidenceFile(reference, directory, 'remote-access requirements');
+  assert(reference.sha256 === await sha256(REMOTE_ACCESS_REQUIREMENTS_PATH),
+    'Remote-access evidence does not bind the exact reviewed requirements.');
+  return loadRemoteAccessRequirements(join(directory, reference.path));
 }
 
 async function requiredRows(rows, ids, label, directory, notBefore, now, extra) {

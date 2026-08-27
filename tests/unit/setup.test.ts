@@ -7,6 +7,7 @@ import { IMAGE_CATALOG, defaultConfig, defaultSecrets, imageIdentity, presetDefa
 import { parseArgs } from '../../packages/cli/dist/args.js';
 import { addConfiguredComputer } from '../../packages/cli/dist/computers.js';
 import { localDockerEndpoint, portAvailable } from '../../packages/cli/dist/docker.js';
+import { buildGatewayExposureConfig } from '../../packages/cli/dist/gateway-access.js';
 import { SetupCancelledError, choosePreset, confirm, presetComparison, type SetupPrompt } from '../../packages/cli/dist/prompts.js';
 import { runImagePreflight, runSetupPreflight, validateStatePath, type PreflightServices } from '../../packages/cli/dist/preflight.js';
 import { statePaths } from '../../packages/cli/dist/state.js';
@@ -304,6 +305,26 @@ test('setup preview, result, handoff, and flag adapters remain complete and secr
   assert.match(handoff.join('\n'), /qubicl mcp research/);
   assert.match(handoff.join('\n'), /qubicl token show research/);
   assert.match(handoff.join('\n'), /Only \/home is durable/);
+
+  state.config.gateway.exposure = buildGatewayExposureConfig({
+    bindAddress: '0.0.0.0',
+    port: 443,
+    hostname: 'gateway.example.test',
+    allowedNetworks: ['192.0.2.0/24'],
+    tls: {
+      id: '1'.repeat(64),
+      certificateSha256: `sha256:${'2'.repeat(64)}`,
+      privateKeySha256: `sha256:${'3'.repeat(64)}`,
+      certificateFingerprint256: `sha256:${'4'.repeat(64)}`,
+      certificateNotBefore: '2026-01-01T00:00:00.000Z',
+      certificateNotAfter: '2126-01-01T00:00:00.000Z',
+    },
+  });
+  const remoteResult = buildSetupResult(state, computer, true, []);
+  assert.equal(remoteResult.computer?.remote?.origin, 'https://gateway.example.test');
+  const remoteHandoff: string[] = [];
+  printHandoff(remoteResult, (line) => remoteHandoff.push(line));
+  assert.match(remoteHandoff.join('\n'), /Remote HTTPS: https:\/\/gateway\.example\.test/);
 
   const empty = buildSetupResult(state, undefined, false, []);
   assert.equal(empty.computer, null);

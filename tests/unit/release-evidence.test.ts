@@ -97,6 +97,7 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
   const acceptance = await import(pathToFileURL(join(root, 'scripts', 'acceptance-evidence.mjs')).href);
   const conformance = await import(pathToFileURL(join(root, 'scripts', 'client-conformance.mjs')).href);
   const platformSupport = await import(pathToFileURL(join(root, 'scripts', 'platform-support.mjs')).href);
+  const remoteAccess = await import(pathToFileURL(join(root, 'scripts', 'remote-access-conformance.mjs')).href);
   const directory = await mkdtemp(join(tmpdir(), 'qubicl-conformance-acceptance-'));
   try {
     const reportPath = join(directory, 'conformance-results.json');
@@ -108,6 +109,9 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
     const platformRequirements = await platformSupport.loadPlatformSupportRequirements();
     const platformRequirementsPath = join(directory, platformSupport.PLATFORM_SUPPORT_REQUIREMENTS_NAME);
     await copyFile(platformSupport.PLATFORM_SUPPORT_REQUIREMENTS_PATH, platformRequirementsPath);
+    const remoteRequirements = await remoteAccess.loadRemoteAccessRequirements();
+    const remoteRequirementsPath = join(directory, remoteAccess.REMOTE_ACCESS_REQUIREMENTS_NAME);
+    await copyFile(remoteAccess.REMOTE_ACCESS_REQUIREMENTS_PATH, remoteRequirementsPath);
     const checked = {
       passed: true,
       testedAt: '2026-08-23T12:30:00.000Z',
@@ -157,6 +161,34 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
       ...platformVersions[profile.id],
       ...Object.fromEntries(profile.requiredChecks.map((check) => [check, true])),
     }));
+    const remoteRows = remoteRequirements.profiles.map((profile: {
+      id: string;
+      platformId: string;
+      networkPath: string;
+      clientPath: string;
+      allowedPeerAddressBehaviors: string[];
+    }, index: number) => ({
+      id: profile.id,
+      platformId: profile.platformId,
+      protocol: remoteRequirements.protocol,
+      preset: remoteRequirements.requiredPreset,
+      networkPath: profile.networkPath,
+      clientPath: profile.clientPath,
+      peerAddressBehavior: profile.allowedPeerAddressBehaviors.at(-1),
+      sourceAddressFamily: 'ipv4',
+      observedAddressFamily: 'ipv4',
+      sourceAddressScope: 'non-loopback',
+      observedAddressScope: 'non-loopback',
+      peerAddressComparison: index === 0 ? 'same' : 'different',
+      hostname: 'gateway.example.test',
+      externalPort: 8443,
+      tlsProtocol: 'TLSv1.3',
+      certificateFingerprint256: `sha256:${'9'.repeat(64)}`,
+      clientVersions: Object.fromEntries(remoteRequirements.requiredClientVersionFields.map((field: string) => [field, `${field} 1.2.3`])),
+      checks: Object.fromEntries(remoteRequirements.requiredChecks.map((check: string) => [check, true])),
+      surfaces: Object.fromEntries(remoteRequirements.requiredSurfaces.map((surface: string) => [surface, { ...checked }])),
+      ...checked,
+    }));
     const review = (reviewedBy: string) => ({
       passed: true,
       reviewedAt: '2026-08-23T12:35:00.000Z',
@@ -185,16 +217,24 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
           sha256: await sha256(platformRequirementsPath),
         },
       },
+      remoteAccessConformance: {
+        schemaVersion: 1,
+        requirements: {
+          path: remoteAccess.REMOTE_ACCESS_REQUIREMENTS_NAME,
+          sha256: await sha256(remoteRequirementsPath),
+        },
+      },
       owner: 'release-owner',
       approvedBy: 'final-approver',
       approvedAt: '2026-08-23T12:45:00.000Z',
       clients: rows(requirements.clients),
       protocols: rows(requirements.protocols),
       platforms,
-      workflows: Object.fromEntries(['upgrade', 'backupRestoreInterruption', 'restart', 'physicalReboot', 'fullTopologyPerformance', 'multipleComputers', 'sustainedDogfooding'].map((id) => [id, platformResult])),
+      remoteAccess: remoteRows,
+      workflows: Object.fromEntries(['upgrade', 'backupRestoreInterruption', 'restart', 'physicalReboot', 'fullTopologyPerformance', 'multipleComputers', 'sustainedDogfooding', 'remoteGateway'].map((id) => [id, platformResult])),
       securityReview: {
         ...review('security-reviewer'),
-        topics: Object.fromEntries(['processBoundary', 'internalAuthentication', 'browserSurface', 'filesystemRaces', 'networkReconciliation', 'releaseIntegrity'].map((topic) => [topic, true])),
+        topics: Object.fromEntries(['processBoundary', 'internalAuthentication', 'browserSurface', 'filesystemRaces', 'networkReconciliation', 'releaseIntegrity', 'remoteExposure'].map((topic) => [topic, true])),
       },
       vulnerabilityReview: review('vulnerability-reviewer'),
       privacyReview: review('privacy-reviewer'),
@@ -214,11 +254,13 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
       surfaces: [...requirements.clients, ...requirements.protocols]
         .reduce((count, profile) => count + profile.requiredSurfaces.length, 0),
       platforms: 5,
-      workflows: 7,
+      remoteProfiles: remoteRequirements.profiles.length,
+      remoteSurfaces: remoteRequirements.profiles.length * remoteRequirements.requiredSurfaces.length,
+      workflows: 8,
     });
     assert.deepEqual(
       acceptance.acceptanceEvidenceFiles(evidence, directory).sort(),
-      [requirementsPath, platformRequirementsPath, reportPath].sort(),
+      [requirementsPath, platformRequirementsPath, remoteRequirementsPath, reportPath].sort(),
     );
 
     const missingClient = structuredClone(evidence);
@@ -257,6 +299,43 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
     const missingDesktopRestart = structuredClone(evidence);
     missingDesktopRestart.platforms[2]!.dockerDesktopRestartPassed = false;
     await assert.rejects(acceptance.validateAcceptanceEvidence(missingDesktopRestart, context), /dockerDesktopRestartPassed/);
+
+    const missingRemoteContract: Partial<typeof evidence> = structuredClone(evidence);
+    delete missingRemoteContract.remoteAccessConformance;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(missingRemoteContract, context), /remote-access-v1\.json/);
+    const wrongRemoteClientPath = structuredClone(evidence);
+    wrongRemoteClientPath.remoteAccess[1]!.clientPath = 'local-loopback-client';
+    await assert.rejects(acceptance.validateAcceptanceEvidence(wrongRemoteClientPath, context), /must record client path/);
+    const mislabeledDirectPeer = structuredClone(evidence);
+    mislabeledDirectPeer.remoteAccess[0]!.peerAddressComparison = 'different';
+    await assert.rejects(acceptance.validateAcceptanceEvidence(mislabeledDirectPeer, context), /must record same peer-address comparison for direct/);
+    const crossFamilyDirectPeer = structuredClone(evidence);
+    crossFamilyDirectPeer.remoteAccess[0]!.observedAddressFamily = 'ipv6';
+    await assert.rejects(acceptance.validateAcceptanceEvidence(crossFamilyDirectPeer, context), /cannot record the same peer across different address families/);
+    const mislabeledNatPeer = structuredClone(evidence);
+    mislabeledNatPeer.remoteAccess[1]!.peerAddressComparison = 'same';
+    await assert.rejects(acceptance.validateAcceptanceEvidence(mislabeledNatPeer, context), /must record different peer-address comparison for nat-translated/);
+    const loopbackRemotePeer = structuredClone(evidence);
+    loopbackRemotePeer.remoteAccess[0]!.observedAddressScope = 'loopback';
+    await assert.rejects(acceptance.validateAcceptanceEvidence(loopbackRemotePeer, context), /must use non-loopback source and observed peer paths/);
+    const missingRemoteSurface = structuredClone(evidence);
+    delete missingRemoteSurface.remoteAccess[0]!.surfaces['preview-websocket'];
+    await assert.rejects(acceptance.validateAcceptanceEvidence(missingRemoteSurface, context), /required remote surfaces/);
+    const failedRemoteNetworkBoundary = structuredClone(evidence);
+    failedRemoteNetworkBoundary.remoteAccess[0]!.checks.clientNetworkDenyPassed = false;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(failedRemoteNetworkBoundary, context), /clientNetworkDenyPassed/);
+    const missingRemoteWorkflow = structuredClone(evidence);
+    delete missingRemoteWorkflow.workflows.remoteGateway;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(missingRemoteWorkflow, context), /remoteGateway/);
+    const missingRemoteSecurityReview = structuredClone(evidence);
+    delete missingRemoteSecurityReview.securityReview.topics.remoteExposure;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(missingRemoteSecurityReview, context), /remoteExposure/);
+
+    await writeFile(remoteRequirementsPath, `${JSON.stringify({ ...remoteRequirements, id: 'weakened-remote-access' }, null, 2)}\n`);
+    const weakenedRemoteRequirements = structuredClone(evidence);
+    weakenedRemoteRequirements.remoteAccessConformance.requirements.sha256 = await sha256(remoteRequirementsPath);
+    await assert.rejects(acceptance.validateAcceptanceEvidence(weakenedRemoteRequirements, context), /exact reviewed requirements/);
+    await copyFile(remoteAccess.REMOTE_ACCESS_REQUIREMENTS_PATH, remoteRequirementsPath);
 
     await writeFile(platformRequirementsPath, `${JSON.stringify({ ...platformRequirements, id: 'weakened-platform-support' }, null, 2)}\n`);
     const weakenedPlatformRequirements = structuredClone(evidence);

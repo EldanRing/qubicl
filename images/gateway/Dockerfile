@@ -6,7 +6,7 @@ ARG QUBICL_CREATED=unknown
 ARG QUBICL_SOURCE=https://github.com/EldanRing/qubicl
 
 LABEL org.opencontainers.image.title="Qubicl gateway" \
-      org.opencontainers.image.description="Authenticated local gateway for Qubicl computers" \
+      org.opencontainers.image.description="Authenticated local and optional TLS gateway for Qubicl computers" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.source="$QUBICL_SOURCE" \
       org.opencontainers.image.url="$QUBICL_SOURCE" \
@@ -14,6 +14,7 @@ LABEL org.opencontainers.image.title="Qubicl gateway" \
       org.opencontainers.image.revision="$QUBICL_REVISION" \
       org.opencontainers.image.created="$QUBICL_CREATED" \
       dev.qubicl.gateway-protocol-version="2" \
+      dev.qubicl.gateway-exposure="direct-tls-v1" \
       dev.qubicl.viewer-authentication="header-v1"
 
 WORKDIR /app
@@ -34,5 +35,5 @@ COPY --chown=node:node gateway.mjs /app/gateway.mjs
 COPY LICENSE THIRD_PARTY_NOTICES.txt /usr/share/doc/qubicl/
 
 USER node
-EXPOSE 3211
+EXPOSE 3211 3216
 ENTRYPOINT ["node", "/app/gateway.mjs"]

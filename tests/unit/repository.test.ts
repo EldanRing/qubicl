@@ -94,6 +94,22 @@ test('initial package publishing is explicit and guarded', async () => {
   const acceptance = await readFile(join(root, 'scripts/acceptance-evidence.mjs'), 'utf8');
   assert.match(acceptance, /Acceptance schemaVersion must be 3 or 4/);
   assert.match(acceptance, /schemaVersion 4 is required for v0\.2/);
+  assert.match(acceptance, /remote-access-v1\.json|REMOTE_ACCESS_REQUIREMENTS_NAME/);
+  assert.match(acceptance, /remoteGateway/);
+  const remoteAccessRequirements = JSON.parse(await readFile(join(root, 'conformance/remote-access-v1.json'), 'utf8')) as {
+    schemaVersion?: number;
+    protocol?: string;
+    profiles?: Array<{ platformId?: string }>;
+    requiredSurfaces?: string[];
+  };
+  assert.equal(remoteAccessRequirements.schemaVersion, 1);
+  assert.equal(remoteAccessRequirements.protocol, 'direct-tls-v1');
+  assert.deepEqual(remoteAccessRequirements.profiles?.map(({ platformId }) => platformId), [
+    'linux-x64',
+    'macos-apple-silicon',
+    'windows-wsl2-x64',
+  ]);
+  assert.ok(remoteAccessRequirements.requiredSurfaces?.includes('preview-websocket'));
   assert.match(acceptance, /releaseSetSha256/);
   assert.match(await readFile(join(root, 'scripts/publish-candidate.mjs'), 'utf8'), /Supported publication requires a signed release set/);
 

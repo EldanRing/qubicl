@@ -8,8 +8,26 @@ lifecycle tool, and destructive or remote mutations require explicit flags.
 Agents can discover only listeners owned by the computer user, then explicitly
 publish one with `publish_port`. The returned unguessable URL is routed through
 the existing localhost gateway, supports HTTP and WebSocket upgrades, expires,
-and is revoked on lease loss. There is no LAN mode; refusing non-loopback
-publication is stricter than accepting an ambiguous bind.
+and is revoked on lease loss. If the operator has configured an isolated remote
+preview domain, the tool adds a `remoteUrl` while retaining the existing local
+`url`; it never binds a computer port to the host.
+
+## Optional remote gateway
+
+```sh
+qubicl gateway status
+qubicl gateway expose --bind 192.168.1.20 --port 8443 \
+  --hostname qubicl.example.net --cert /secure/chain.pem \
+  --key /secure/key.pem --allow-networks 192.168.1.0/24
+qubicl gateway revoke
+```
+
+Remote access is off by default and uses a second TLS listener in the existing
+gateway container. The expose/revoke preview preserves the loopback listener,
+computer data, and prior running/stopped/absent state. All-interface binds and
+allow-all CIDRs need independent safety flags. Qubicl does not manage DNS,
+certificate issuance, firewalls, routers, or tunnels. Review
+[Optional remote access](remote-access.md) before enabling it.
 
 ## Backup, checkpoint, clone
 

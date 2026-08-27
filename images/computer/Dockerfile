@@ -12,9 +12,11 @@ LABEL org.opencontainers.image.title="Qubicl computer" \
       org.opencontainers.image.url="$QUBICL_SOURCE" \
       org.opencontainers.image.version="$QUBICL_VERSION" \
       org.opencontainers.image.revision="$QUBICL_REVISION" \
-      org.opencontainers.image.created="$QUBICL_CREATED"
+      org.opencontainers.image.created="$QUBICL_CREATED" \
+      dev.qubicl.preview-access="dynamic-v1"
 
-ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive \
+    QUBICL_IMAGE_PREVIEW_ACCESS=dynamic-v1
 RUN apt-get update \
  && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends \

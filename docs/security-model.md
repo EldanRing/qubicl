@@ -11,12 +11,32 @@ Do not place secrets in a Qubicl home that you would not give to container-root 
 ## Enforced boundaries
 
 - Setup accepts only a local Docker endpoint and Linux daemon; remote `tcp://`/`ssh://` contexts fail closed.
-- The gateway publishes only on `127.0.0.1`.
+- The gateway publishes only on `127.0.0.1` by default. An operator can add a
+  distinct HTTPS/WSS publication through the explicit, confirmed
+  `qubicl gateway expose` workflow. It stays in the same gateway container;
+  computer ports are never published directly, and the local listener remains
+  loopback-only.
 - Each computer is one resource-bounded container. Its controller, command runner, local web extractor, optional display/browser/desktop session, and optional SSH endpoint share that container's PID and network namespaces. Internal runner processes receive independently derived localhost-only credentials through explicit allowlists; model-controlled command environments exclude all `QUBICL_*` control variables and inherited credentials.
 - Computers are unprivileged and receive no Docker socket, host network/PID/IPC namespace, devices, or unrelated mounts. They receive no added capability, `SYS_ADMIN`, privileged mode, or unconfined security profile.
-- The only writable host mount in a computer is its `/home`, plus its bounded audit file. Operator policy is mounted read-only. The shared gateway receives the read-only generated runtime directory and one writable audit-file mount per computer so it can enforce egress and broker policy without mounting computer homes or protected state.
+- The only writable host mount in a computer is its `/home`, plus its bounded audit file. Operator policy and the per-computer dynamic preview-access directory are mounted read-only. The latter contains only local and optional remote preview base URLs, allowing expose/revoke to update retained computers without recreating them. The shared gateway receives the read-only generated runtime directory and one writable audit-file mount per computer so it can enforce egress and broker policy without mounting computer homes or protected state.
 - External bearer tokens remain in mode-`0600` host state. Routes contain hashes; a computer gets an independent internal credential.
-- Browser OpenAPI/Open Terminal calls require the same per-computer bearer token. CORS is reflected only for HTTP loopback origins on the isolated discovery/tool/file routes, and preflight permits only each route's required method and bounded headers.
+- Browser OpenAPI/Open Terminal calls require the same per-computer bearer
+  token. Local CORS is reflected only for HTTP loopback origins. On the optional
+  TLS listener it is reflected only for exact configured HTTPS origins; wildcard,
+  null, path-bearing, and unlisted origins fail closed. Preflight permits only
+  each route's required method and bounded headers.
+- Remote gateway configuration stores only bind/origin/network policy and
+  immutable TLS metadata in config; the validated certificate/key snapshot is
+  paired in mode-`0600` protected secrets and transaction state. Compose and
+  routes contain fixed runtime paths, never PEM bytes or source key paths. The
+  gateway revalidates hashes, key match, dates, SANs, and private modes before
+  opening its TLS 1.2+ listener. The external surface enforces the actual socket
+  peer CIDR, exact TLS SNI/Host, per-computer bearer isolation, bounded requests,
+  connections, tickets, sessions, and rate buckets, while ignoring forwarded
+  address headers. Operator routes remain local. Remote viewer cookies are
+  host-only `__Host-` cookies with Secure, HttpOnly, SameSite=Strict, and
+  `Path=/`; preview content requires a separate wildcard-isolated origin, and a
+  different registrable site is recommended for defense in depth.
 - Tool calls require authentication and a current fenced lease. The local stdio bridge and Open Terminal compatibility own that proof outside model-visible calls; direct HTTP MCP/OpenAPI callers provide it explicitly. Human takeover makes the old proof stale immediately, terminates tracked managed process groups, and leaves agent tools fenced until release and a fresh lease. In the single-container architecture this is a cooperative process fence, not a cgroup or hostile-code boundary: a deliberately daemonized/reparented process can evade tracked process-group termination and requires a computer restart to clear reliably.
 - Only applications opened through the capability-gated desktop-session tools can survive takeover. Their executable and arguments come from a fixed allowlist; input paths must already exist and resolve below `/home/qubicl`; URLs, shell input, arbitrary executable/argument/environment input, and internal control credentials are excluded. Tracked application count is bounded. Human control belongs to the live controlling viewer connection, permits a 10-second reconnect grace period, and is then released automatically; the authenticated local operator may also release it explicitly.
 - Browser-capable images use a dedicated persistent Chromium profile and a bounded Playwright controller. Chromium remains the unprivileged `qubicl` user and its Linux user/PID/network-namespace plus renderer seccomp-BPF sandboxes stay enabled. The browser-capable computer container receives a default-deny seccomp profile derived from Docker 24.0's default profile: it preserves the default restrictions (including the later `io_uring` denial) while admitting only Chromium's exact unprivileged namespace `clone`/`unshare` flag combinations. The computer also enables `no-new-privileges`, receives no `SYS_ADMIN`, added capability, privileged mode, host namespace, or unconfined profile, and has a dedicated 1 GiB `/dev/shm`; `--no-sandbox` and `--disable-dev-shm-usage` are not used. Operations are serialized, tabs and semantic refs are capped, URLs are limited to HTTP(S) without embedded credentials, screenshot payloads are capped, and webpage content is explicitly untrusted. The managed browser and its profile survive takeover, restart, and supported upgrade; the viewer discloses that durability, while browser tools remain lease-fenced.
@@ -62,7 +82,21 @@ State directories are real, private, user-owned paths. Setup rejects symlink com
 - Internal control services and agent workloads share one computer PID namespace. The controller credential is excluded from model-command environments, but the one-container design is not a secret boundary against deliberately hostile same-container code, process inspection, or a malicious custom image. Human takeover is dependable for Qubicl-managed cooperative processes, not an adversarial workload guarantee.
 - A process controlling the operator account can read Qubicl state, replace the CLI, or control Docker.
 - Localhost is not a boundary against other processes under that account.
-- Qubicl does not configure remote TLS, tunnels, mesh VPNs, or LAN access. Port previews and optional SSH bind to loopback only. Open Terminal `/ports` and `/proxy/{port}` compatibility is fail-closed: it projects only live ports with an unexpired explicit Qubicl publication and does not turn arbitrary computer listeners into previews.
-- Direct browser integration works only when the client page is itself opened over loopback HTTP. The recommended Dockerized Open WebUI admin connection instead uses Docker Desktop's host gateway to reach the still-loopback-bound Qubicl gateway; other container runtimes may require an explicit equivalent host mapping.
+- Qubicl can configure a direct TLS listener but does not create DNS records,
+  issue or renew certificates, configure routers/firewalls, or install a tunnel
+  or mesh VPN. Docker Desktop/NAT may obscure the original socket peer, so CIDR
+  enforcement can fail closed or be unsuitable as the primary client boundary;
+  interface selection, TLS, per-computer bearer authentication, and optional
+  client certificates remain authoritative. Verify the host firewall manually.
+  Port previews and optional SSH remain loopback-only unless a preview is
+  explicitly projected through the isolated remote gateway origin. Open
+  Terminal `/ports` and `/proxy/{port}` remains fail-closed: it projects only
+  live ports with an unexpired explicit Qubicl publication and does not turn an
+  arbitrary listener into a preview.
+- Direct browser integration uses loopback HTTP by default. When remote access
+  is configured, browser API origins must be exact trusted HTTPS origins and
+  remote previews require separate wildcard DNS/certificate coverage. The
+  recommended same-host Dockerized Open WebUI path can continue using Docker
+  Desktop's host gateway and local listener.
 
 Use Qubicl for capable operator-supervised work, not deliberately hostile samples or mutually untrusted users on one host. Report vulnerabilities through [SECURITY.md](../SECURITY.md).

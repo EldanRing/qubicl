@@ -1,7 +1,9 @@
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import {
+  COMPUTER_PREVIEW_ACCESS_PROTOCOL,
   ConfigSchema,
+  GATEWAY_EXPOSURE_PROTOCOL,
   IMAGE_CATALOG,
   catalogImageIdentity,
   formatBytes,
@@ -15,7 +17,7 @@ import type { ParsedArgs } from './args.js';
 import { flag } from './args.js';
 import { printBrowserProfileDisclosure } from './browser-profile-disclosures.js';
 import {
-  acquireCatalogGateway,
+  acquireCatalogGatewayContract,
   acquireCatalogPreset,
   imageDrift,
   imageExists,
@@ -182,7 +184,13 @@ async function acquireAndInspectExactTarget(
   platform: DockerPlatform,
   offline: boolean,
 ): Promise<AcquiredUpgradeTarget> {
-  const inspections = new Map<string, { contentId: `sha256:${string}`; consumerIds: string[] }>();
+  const inspections = new Map<string, {
+    contentId: `sha256:${string}`;
+    consumerIds: string[];
+    computer: boolean;
+    previewAccessProtocol?: typeof COMPUTER_PREVIEW_ACCESS_PROTOCOL;
+    gatewayExposureProtocol?: typeof GATEWAY_EXPOSURE_PROTOCOL;
+  }>();
   for (const consumer of target.consumers) {
     const key = consumer.kind === 'gateway' ? 'gateway' : `preset:${consumer.preset}`;
     const existing = inspections.get(key);
@@ -191,11 +199,15 @@ async function acquireAndInspectExactTarget(
       continue;
     }
     if (consumer.kind === 'gateway') {
-      const identity = await acquireCatalogGateway({ catalog: IMAGE_CATALOG, platform, offline, stderr: true });
-      assertAcquiredIdentity(target, identity.resolved);
+      const inspection = await acquireCatalogGatewayContract({ catalog: IMAGE_CATALOG, platform, offline, stderr: true });
+      assertAcquiredIdentity(target, inspection.identity.resolved);
       inspections.set(key, {
-        contentId: requiredContentId(identity.contentId, target.exactTarget),
+        contentId: requiredContentId(inspection.identity.contentId, target.exactTarget),
         consumerIds: [consumer.id],
+        computer: false,
+        ...(inspection.compatibility.gatewayExposureProtocol
+          ? { gatewayExposureProtocol: inspection.compatibility.gatewayExposureProtocol }
+          : {}),
       });
       continue;
     }
@@ -205,15 +217,31 @@ async function acquireAndInspectExactTarget(
     inspections.set(key, {
       contentId: requiredContentId(inspection.identity.contentId, target.exactTarget),
       consumerIds: [consumer.id],
+      computer: true,
+      ...(inspection.compatibility.previewAccessProtocol
+        ? { previewAccessProtocol: inspection.compatibility.previewAccessProtocol }
+        : {}),
     });
   }
   const contentIds = new Set([...inspections.values()].map(({ contentId }) => contentId));
   if (contentIds.size !== 1) throw new Error(`Exact target ${target.exactTarget} produced inconsistent content IDs across contract inspections.`);
   const contentId = [...contentIds][0]!;
+  const computerInspections = [...inspections.values()].filter(({ computer }) => computer);
+  const previewAccessProtocol = computerInspections.length > 0
+    && computerInspections.every((inspection) => inspection.previewAccessProtocol === COMPUTER_PREVIEW_ACCESS_PROTOCOL)
+    ? COMPUTER_PREVIEW_ACCESS_PROTOCOL
+    : undefined;
+  const gatewayInspections = [...inspections.values()].filter(({ computer }) => !computer);
+  const gatewayExposureProtocol = gatewayInspections.length > 0
+    && gatewayInspections.every((inspection) => inspection.gatewayExposureProtocol === GATEWAY_EXPOSURE_PROTOCOL)
+    ? GATEWAY_EXPOSURE_PROTOCOL
+    : undefined;
   return {
     exactTarget: target.exactTarget,
     contentId,
     inspectedConsumers: [...inspections.values()].flatMap(({ consumerIds }) => consumerIds).sort(),
+    ...(previewAccessProtocol ? { previewAccessProtocol } : {}),
+    ...(gatewayExposureProtocol ? { gatewayExposureProtocol } : {}),
   };
 }
 

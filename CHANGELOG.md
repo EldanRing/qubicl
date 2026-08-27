@@ -27,6 +27,16 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 - Open Terminal compatibility now includes bounded non-PTY process execution,
   listing, attachment, stdin, output pagination, and cleanup plus bounded
   multi-path ZIP download for regular files and directories.
+- Optional remote access can be enabled explicitly with `qubicl gateway
+  expose`. The existing gateway container keeps its loopback HTTP endpoint and
+  adds a separate TLS-only HTTPS/WSS listener; `gateway status` reports the
+  local and remote endpoints while refusing to call a stale or recovering
+  listener active, and `gateway revoke` removes the external
+  publication without changing computers or durable homes.
+- Versioned remote-access conformance requirements now prevent schema-4 v0.2
+  acceptance from passing without post-freeze native-Linux and Docker
+  Desktop/NAT evidence for the remote client surfaces, security boundaries,
+  lifecycle transitions, and local-loopback preservation.
 
 ### Changed
 
@@ -48,6 +58,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   cannot prove exclusive ownership.
 - Routine dependency review is manual and local; the repository no longer
   configures Dependabot to create public dependency-update pull requests.
+- Published previews retain their local `.localhost` URL and add a remote URL
+  only when an isolated wildcard preview domain and matching certificate were
+  explicitly configured.
 
 ### Fixed
 
@@ -91,6 +104,14 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   substitution, excess archive concurrency, and disconnected transfers fail
   closed. Native responses for HTML, HTM, JavaScript, TypeScript, and SVG files
   are forced to download instead of rendering inline.
+- Remote gateway exposure is absent by default and requires a reviewed bind
+  address, distinct external port, matching certificate and private key,
+  allowed client networks, exact HTTPS browser origins, and explicit consent
+  for all-interface or allow-all-client policies. External requests use the
+  socket peer rather than forwarded headers, preserve per-computer bearer
+  isolation, deny operator-only routes, enforce listener-specific Host, SNI,
+  CORS, cookie, timeout, connection, and rate boundaries, and never publish a
+  computer container directly.
 
 ## 0.1.1 - 2026-08-27
 

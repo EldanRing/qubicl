@@ -80,6 +80,18 @@ test('resetting the server epoch fences old proofs and revokes their processes',
   assert.equal(leases.acquire(60).generation, 1);
 });
 
+test('resetting the server epoch invokes capability revocation without an active lease', async () => {
+  const leases = new LeaseManager();
+  const revoked: Array<string | undefined> = [];
+  leases.setRevocationHandler((proof) => {
+    revoked.push(proof?.id);
+  });
+
+  await leases.resetEpoch();
+
+  assert.deepEqual(revoked, [undefined]);
+});
+
 test('new controllers cannot acquire while the previous process group is being fenced', async () => {
   const leases = new LeaseManager();
   let finishRevocation!: () => void;

@@ -1,4 +1,4 @@
-import { access, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, lstat, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
@@ -6,8 +6,11 @@ import { join, resolve } from 'node:path';
 import YAML from 'yaml';
 import {
   ComputerDefaultsSchema,
+  COMPUTER_PREVIEW_ACCESS_PROTOCOL,
   CORE_SKILL_IDS,
   ConfigSchema,
+  GATEWAY_EXTERNAL_CONTAINER_PORT,
+  GatewayExposureRuntimeSchema,
   IMAGE_CATALOG,
   MIN_DOCKER_COMPOSE_VERSION,
   MIN_DOCKER_ENGINE_VERSION,
@@ -18,6 +21,8 @@ import {
   ToolProfileSchema,
   SUPPORTED_NODE_RANGE,
   assertValidName,
+  gatewayExposureRuntime,
+  gatewayExposureRuntimeId,
   parseManifestDocument,
   presetDefaults,
   memoryBytes,
@@ -48,6 +53,7 @@ import {
   ensureRuntimeImages,
   ensureSystemImages,
   gatewayStatus,
+  gatewayExternalPublicationFromInspection,
   imageExists,
   imageDrift,
   legacyRuntimeMigrationNeeded,
@@ -68,7 +74,7 @@ import {
 } from './docker.js';
 import { serveMcpBridge } from './mcp.js';
 import { ensureCurrentState, inspectStateFormat, recoverStateMigration } from './migrations.js';
-import { LEGACY_SPLIT_CONTROL_PROTOCOL_VERSION, computerContainerName, computerEgressContainerName, computerEgressServiceName, computerExecutorContainerName, computerExecutorServiceName, computerResourceEnvelope, computerRuntimeContainerNames, computerServiceName, computerSessionContainerName, computerSessionServiceName, computerSshContainerName, computerSshServiceName, computerWebContainerName, controlNetwork, displaySocketVolume, gatewayContainerName, GATEWAY_PIDS_LIMIT, gatewayNetworkName, hostIdentity, isPrimaryRuntimeRoot, projectName, renderRuntime, usesUnifiedComputerRuntime, workspaceNetwork } from './runtime.js';
+import { LEGACY_SPLIT_CONTROL_PROTOCOL_VERSION, PREVIEW_ACCESS_CONTAINER_PATH, computerContainerName, computerEgressContainerName, computerEgressServiceName, computerExecutorContainerName, computerExecutorServiceName, computerResourceEnvelope, computerRuntimeContainerNames, computerServiceName, computerSessionContainerName, computerSessionServiceName, computerSshContainerName, computerSshServiceName, computerWebContainerName, controlNetwork, displaySocketVolume, gatewayContainerName, GATEWAY_PIDS_LIMIT, gatewayNetworkName, hostIdentity, isPrimaryRuntimeRoot, projectName, renderRuntime, usesUnifiedComputerRuntime, workspaceNetwork } from './runtime.js';
 import {
   auditState,
   atomicWrite,
@@ -104,13 +110,27 @@ import { browserProfileCommand } from './browser-profile.js';
 import { printBrowserProfileDisclosure } from './browser-profile-disclosures.js';
 import { cleanupCommand } from './cleanup-command.js';
 import { lifecycleUpdateStatus, upgradeAllCommand, validateUpgradeInvocation } from './lifecycle-command.js';
-import { computerUpgradeRuntimePlan, requirePreservedRuntimeState } from './lifecycle-update.js';
+import {
+  assertRemotePreviewUpgradeCompatibility,
+  computerUpgradeRuntimePlan,
+  requirePreservedRuntimeState,
+} from './lifecycle-update.js';
 import {
   maybePrintLocalUpdateNotification,
   parseUpdateNotificationPreference,
   readLocalPreferences,
   writeUpdateNotificationPreference,
 } from './update-notifications.js';
+import { gatewayCommand } from './gateway-command.js';
+import {
+  GatewayExposureManualProbeRequiredError,
+  gatewayBindAddressPresent,
+  gatewayEndpointSet,
+  gatewayExposurePaths,
+  probeGatewayExposure,
+  validateConfiguredGatewayTls,
+  validateGatewayExposureRuntimeSnapshot,
+} from './gateway-access.js';
 
 export async function execute(command: string | undefined, args: ParsedArgs): Promise<void> {
   validateInvocation(command, args);
@@ -130,6 +150,7 @@ export async function execute(command: string | undefined, args: ParsedArgs): Pr
       return;
     case 'setup': return setupCommand(args);
     case 'config': return config(args);
+    case 'gateway': return gatewayCommand(args);
     case 'up': return up();
     case 'down': return down();
     case 'create': return create(args);
@@ -161,7 +182,7 @@ export async function execute(command: string | undefined, args: ParsedArgs): Pr
     case 'delete': return deleteComputer(required(args.positionals[0], 'computer name'));
     case 'restore': return restoreComputer(required(args.positionals[0], 'computer name or ID'));
     case 'purge': return purge(required(args.positionals[0], 'computer name or ID'), flag(args, 'yes'));
-    case 'view': return view(required(args.positionals[0], 'computer name'), flag(args, 'no-open'));
+    case 'view': return view(required(args.positionals[0], 'computer name'), flag(args, 'no-open'), stringOption(args, 'access'));
     case 'connect': return connectClient(
       required(args.positionals[0], 'computer name'),
       stringOption(args, 'client') ?? 'generic',
@@ -169,6 +190,7 @@ export async function execute(command: string | undefined, args: ParsedArgs): Pr
       stringOption(args, 'profile'),
       stringOption(args, 'result-mode'),
       stringOption(args, 'client-host'),
+      stringOption(args, 'access'),
     );
     case 'mcp': return mcp(
       required(args.positionals[0], 'computer name'),
@@ -370,7 +392,7 @@ async function create(args: ParsedArgs): Promise<void> {
       runtime: { ensureImages: false, startIds: startNow ? [computer.id] : [] },
     }));
     if (startNow) await synchronizeStartedSkillPolicies(state, [computer]);
-    const result = buildComputerConnectionResult(state.config.gateway.port, computer, startNow);
+    const result = buildComputerConnectionResult(state.config.gateway.port, computer, startNow, state.config.gateway.exposure);
     if (flag(args, 'json')) console.log(JSON.stringify(result, null, 2));
     else printComputerHandoff(result, console.log);
   });
@@ -408,6 +430,7 @@ async function upgradeComputer(args: ParsedArgs): Promise<void> {
     if (presetValue && image) throw new Error('--preset and --image are mutually exclusive.');
 
     let imageDefaults: ComputerDefaults;
+    let targetPreviewAccessProtocol: typeof COMPUTER_PREVIEW_ACCESS_PROTOCOL | undefined;
     const targetPreset = presetValue ?? (image || current.preset === 'custom' ? undefined : current.preset);
     if (targetPreset) {
       const preset = PresetSchema.parse(targetPreset);
@@ -415,6 +438,7 @@ async function upgradeComputer(args: ParsedArgs): Promise<void> {
         offline: flag(args, 'offline'),
         platform: host.platform,
       });
+      targetPreviewAccessProtocol = acquired.compatibility.previewAccessProtocol;
       imageDefaults = ComputerDefaultsSchema.parse({
         ...presetDefaults(preset, host.platform),
         image: acquired.identity,
@@ -425,6 +449,7 @@ async function upgradeComputer(args: ParsedArgs): Promise<void> {
         offline: flag(args, 'offline'),
         platform: host.platform,
       });
+      targetPreviewAccessProtocol = acquired.compatibility.previewAccessProtocol;
       const recommendation = IMAGE_CATALOG.presets[acquired.manifest.compatibility];
       imageDefaults = ComputerDefaultsSchema.parse({
         preset: 'custom',
@@ -436,6 +461,11 @@ async function upgradeComputer(args: ParsedArgs): Promise<void> {
         memory: recommendation.recommendedMemory,
       });
     }
+    assertRemotePreviewUpgradeCompatibility(
+      state.config.gateway.exposure?.previewDomain,
+      current.name,
+      targetPreviewAccessProtocol,
+    );
 
     const replacement = upgradedComputer(current, imageDefaults);
     const recommendation = PRESET_DEFINITIONS[replacement.compatibility];
@@ -637,6 +667,7 @@ async function doctor(args: ParsedArgs): Promise<void> {
         checks.push({ status: 'fail', check: 'state-home-access', detail: message(error), repair: `Restore read/write ownership of ${state.paths.root} to the current user.` });
       }
       checks.push(...(await auditState(state)).map(({ check, ok, detail }) => ({ status: ok ? 'ok' as const : 'fail' as const, check, detail })));
+      checks.push(...await gatewayExposureStateChecks(state));
     } catch (error) {
       checks.push({ status: 'fail', check: 'state', detail: message(error) });
     }
@@ -664,11 +695,57 @@ async function doctor(args: ParsedArgs): Promise<void> {
     checks.push(runtimeCheck('gateway-runtime', gateway));
     if (gateway.status === 'running') {
       const response = await fetch(`http://127.0.0.1:${state.config.gateway.port}/health`).catch(() => undefined);
+      let gatewayHealthDocument: unknown;
+      if (response?.ok) {
+        try { gatewayHealthDocument = await response.json(); }
+        catch { gatewayHealthDocument = undefined; }
+      }
       checks.push({
         status: response?.ok ? 'ok' : 'fail',
         check: 'gateway-health',
         detail: response ? `HTTP ${response.status} on 127.0.0.1:${state.config.gateway.port}` : `not reachable on 127.0.0.1:${state.config.gateway.port}`,
       });
+      if (state.config.gateway.exposure) {
+        const exposure = state.config.gateway.exposure;
+        const readiness = gatewayExternalReadinessCheck(
+          gatewayHealthDocument,
+          gatewayExposureRuntimeId(gatewayExposureRuntime(exposure)),
+        );
+        checks.push(readiness);
+        try {
+          if (readiness.status !== 'ok') {
+            // The local health contract is authoritative even when a raw TLS
+            // socket happens to accept a connection during partial startup.
+          } else if (state.secrets.gateway?.tls.clientCertificateAuthorityPem) {
+            checks.push({
+              status: 'warning',
+              check: 'gateway-external-tls',
+              detail: 'The direct TLS listener reports ready locally; an authenticated end-to-end probe requires an operator-provided client certificate',
+            });
+          } else {
+            const probe = await probeGatewayExposure(exposure);
+            checks.push({
+              status: 'ok',
+              check: 'gateway-external-tls',
+              detail: `${probe.protocol}; HTTP ${probe.statusCode}; ${probe.fingerprint256}`,
+            });
+          }
+        } catch (error) {
+          checks.push({
+            status: error instanceof GatewayExposureManualProbeRequiredError ? 'warning' : 'fail',
+            check: 'gateway-external-tls',
+            detail: message(error),
+            ...(error instanceof GatewayExposureManualProbeRequiredError
+              ? {}
+              : { repair: 'Verify the configured bind address and certificate, then re-run qubicl gateway expose with the intended TLS material.' }),
+          });
+        }
+        checks.push({
+          status: 'warning',
+          check: 'gateway-external-firewall',
+          detail: 'Qubicl does not manage or prove the host firewall, router, DNS, or Docker Desktop client-IP forwarding; verify those boundaries separately',
+        });
+      }
       checks.push(...await gatewaySecurityChecks(state));
     } else {
       const available = await portAvailable(state.config.gateway.port);
@@ -725,6 +802,27 @@ async function doctor(args: ParsedArgs): Promise<void> {
     }
   }
   if (checks.some(({ status }) => status === 'fail')) throw new Error('One or more doctor checks failed.');
+}
+
+export function gatewayExternalReadinessCheck(value: unknown, expectedConfigurationId?: string): DoctorCheck {
+  const external = (value as { external?: unknown } | null)?.external as {
+    configured?: unknown;
+    ready?: unknown;
+    protocol?: unknown;
+    configurationId?: unknown;
+  } | undefined;
+  const ok = external?.configured === true
+    && external.ready === true
+    && external.protocol === 'direct-tls-v1'
+    && (expectedConfigurationId === undefined || external.configurationId === expectedConfigurationId);
+  return ok
+    ? { status: 'ok', check: 'gateway-external-readiness', detail: 'local gateway health confirms direct-tls-v1 is configured and ready' }
+    : {
+      status: 'fail',
+      check: 'gateway-external-readiness',
+      detail: 'local gateway health did not confirm configured, ready direct-tls-v1 exposure',
+      repair: 'Inspect the managed TLS snapshot and external bind, then re-run qubicl gateway expose or revoke the exposure.',
+    };
 }
 
 async function repair(args: ParsedArgs): Promise<void> {
@@ -971,16 +1069,19 @@ async function purge(name: string, yes: boolean): Promise<void> {
   });
 }
 
-async function view(name: string, noOpen: boolean): Promise<void> {
+async function view(name: string, noOpen: boolean, accessValue?: string): Promise<void> {
   const state = await loadState();
   const computer = findComputer(state, name);
   if (!computer.capabilities.includes('viewer')) throw new Error(`${computer.name} uses the ${computer.compatibility} capability contract, which does not provide a viewer. Choose browser, computer, or workstation for desktop viewing.`);
   const secret = state.secrets.computers[computer.id]!;
-  const base = `http://127.0.0.1:${state.config.gateway.port}`;
-  const response = await fetch(`${base}/computers/${computer.id}/view-ticket`, { method: 'POST', headers: { authorization: `Bearer ${secret.token}` } });
+  const access = parseGatewayAccess(accessValue);
+  const local = gatewayEndpointSet(state.config.gateway, computer, 'local')!;
+  const selected = gatewayEndpointSet(state.config.gateway, computer, access);
+  if (!selected) throw new Error('Remote gateway access is off. Run qubicl gateway expose before requesting --access remote.');
+  const response = await fetch(`${local.origin}/computers/${computer.id}/view-ticket`, { method: 'POST', headers: { authorization: `Bearer ${secret.token}` } });
   const value = await response.json() as { url?: string; error?: { message?: string } };
   if (!response.ok || !value.url) throw new Error(value.error?.message ?? `Gateway returned ${response.status}.`);
-  const url = `${base}${value.url}`;
+  const url = `${selected.origin}${value.url}`;
   console.log(url);
   if (!noOpen) await openBrowser(url);
 }
@@ -992,22 +1093,29 @@ async function connectClient(
   profile: string | undefined,
   resultMode: string | undefined,
   clientHost: string | undefined,
+  accessValue: string | undefined,
 ): Promise<void> {
   if (profile) ToolProfileSchema.parse(profile);
   if (resultMode) McpResultModeSchema.parse(resultMode);
   const state = await loadState();
   const computer = findComputer(state, name);
+  const access = parseGatewayAccess(accessValue);
+  const selectedEndpoints = gatewayEndpointSet(state.config.gateway, computer, access);
+  if (!selectedEndpoints) throw new Error('Remote gateway access is off. Run qubicl gateway expose before requesting --access remote.');
   const host = clientHost === 'windows' ? await inspectHostPlatform() : undefined;
   const snippet = connectionSnippet({
     client,
     computerName: computer.name,
-    endpoints: endpoints(state, computer),
+    endpoints: { mcp: selectedEndpoints.mcp, openapi: selectedEndpoints.openapi },
     ...(transport === undefined ? {} : { transport }),
     ...(profile === undefined ? {} : { profile }),
     ...(resultMode === undefined ? {} : { resultMode }),
     ...(clientHost === undefined ? {} : { clientHost }),
     ...(host === undefined ? {} : { stdioLauncher: windowsWslStdioLauncher(host) }),
   });
+  if (access === 'remote' && snippet.transport === 'stdio') {
+    throw new Error('--access remote requires an HTTP or OpenAPI connection; token-free stdio remains local.');
+  }
   const instructions = connectionInstructions(snippet);
   for (const line of instructions.before) console.error(line);
   console.log(snippet.content);
@@ -1053,7 +1161,7 @@ async function exportManifest(output: string): Promise<void> {
   const state = await loadState();
   const manifest: QubiclManifest = {
     version: 2,
-    gateway: state.config.gateway,
+    gateway: { port: state.config.gateway.port, image: state.config.gateway.image },
     defaults: state.config.defaults,
     computers: state.config.computers.map(({ name, preset, compatibility, image, capabilityContractVersion, capabilities, cpus, memory }) => ({
       name, preset, compatibility, image, capabilityContractVersion, capabilities, cpus, memory,
@@ -1075,13 +1183,18 @@ async function applyManifest(path: string, dryRun: boolean, prune: boolean): Pro
     if (dryRun) return;
     await validateDocker();
 
+    const localExposure = state.config.gateway.exposure;
+    const targetGateway = {
+      ...structuredClone(manifest.gateway),
+      ...(localExposure ? { exposure: structuredClone(localExposure) } : {}),
+    };
     if (reconciliation.gatewayChanged && state.config.gateway.port !== manifest.gateway.port) {
       const priorGateway = state.config.gateway;
-      state.config.gateway = manifest.gateway;
+      state.config.gateway = targetGateway;
       try { await assertGatewayPort(state); }
       catch (error) { state.config.gateway = priorGateway; throw error; }
     }
-    state.config.gateway = structuredClone(manifest.gateway);
+    state.config.gateway = targetGateway;
     state.config.defaults = structuredClone(manifest.defaults);
     for (const declared of manifest.computers) {
       const current = state.config.computers.find(({ name }) => name === declared.name);
@@ -1124,6 +1237,7 @@ async function prepareStateBeforeCommand(command: string | undefined, args: Pars
   const readOnlyLifecycle = command === 'status'
     || command === 'cleanup'
     || (command === 'upgrade' && flag(args, 'all'))
+    || (command === 'gateway' && args.positionals[0] === 'status')
     || notificationPreferenceOnly;
   if (readOnlyLifecycle) {
     const format = await inspectStateFormat(paths);
@@ -1135,7 +1249,7 @@ async function prepareStateBeforeCommand(command: string | undefined, args: Pars
   if (command === 'setup' && (await inspectStateFormat(paths)).status === 'uninitialized') return;
   const requiresRuntime = new Set([
     'setup', 'up', 'down', 'create', 'upgrade', 'start', 'stop', 'restart', 'control', 'rename', 'delete', 'restore', 'purge', 'repair', 'apply',
-    'browser', 'network', 'secret', 'ssh', 'backup', 'checkpoint', 'clone', 'devcontainer', 'cleanup', 'skills', 'tools',
+    'browser', 'network', 'secret', 'ssh', 'backup', 'checkpoint', 'clone', 'devcontainer', 'cleanup', 'skills', 'tools', 'gateway',
   ]);
   const includeRuntime = requiresRuntime.has(command)
     || (command === 'config' && args.positionals[0] === 'set')
@@ -1199,17 +1313,30 @@ function findComputer(state: LoadedState, name: string): ComputerConfig {
 }
 
 function endpoints(state: LoadedState, computer: ComputerConfig): { mcp: string; openapi: string; view: string; health: string } {
-  const base = `http://127.0.0.1:${state.config.gateway.port}/computers/${computer.id}`;
-  return { mcp: `${base}/mcp`, openapi: `${base}/openapi.json`, view: `${base}/view`, health: `${base}/health` };
+  const local = gatewayEndpointSet(state.config.gateway, computer, 'local')!;
+  return { mcp: local.mcp, openapi: local.openapi, view: local.view!, health: local.health };
 }
 
-function applicableEndpoints(state: LoadedState, computer: ComputerConfig): { mcp: string; openapi: string; health: string; view?: string } {
+function applicableEndpoints(state: LoadedState, computer: ComputerConfig): { mcp: string; openapi: string; health: string; view?: string; remote?: ReturnType<typeof gatewayEndpointSet> } {
   const all = endpoints(state, computer);
-  return { mcp: all.mcp, openapi: all.openapi, health: all.health, ...(computer.capabilities.includes('viewer') ? { view: all.view } : {}) };
+  const remote = gatewayEndpointSet(state.config.gateway, computer, 'remote');
+  return {
+    mcp: all.mcp,
+    openapi: all.openapi,
+    health: all.health,
+    ...(computer.capabilities.includes('viewer') ? { view: all.view } : {}),
+    ...(remote ? { remote } : {}),
+  };
+}
+
+function parseGatewayAccess(value: string | undefined): 'local' | 'remote' {
+  if (value === undefined || value === 'local') return 'local';
+  if (value === 'remote') return 'remote';
+  throw new Error('--access must be local or remote.');
 }
 
 function printConnection(state: LoadedState, computer: ComputerConfig, running = true): void {
-  console.log(JSON.stringify(buildComputerConnectionResult(state.config.gateway.port, computer, running), null, 2));
+  console.log(JSON.stringify(buildComputerConnectionResult(state.config.gateway.port, computer, running, state.config.gateway.exposure), null, 2));
 }
 
 async function openBrowser(url: string): Promise<void> {
@@ -1267,14 +1394,132 @@ function runtimeCheck(check: string, runtime: { status: string; health?: string 
   return { status: 'fail', check, detail };
 }
 
+async function gatewayExposureStateChecks(state: LoadedState): Promise<DoctorCheck[]> {
+  const exposure = state.config.gateway.exposure;
+  const paths = gatewayExposurePaths(state.paths);
+  if (!exposure) {
+    try {
+      await lstat(paths.directory);
+      return [{
+        status: 'fail',
+        check: 'gateway-exposure-state',
+        detail: `${paths.directory} remains even though remote access is off`,
+        repair: 'Run qubicl gateway revoke --yes to reconcile the local-only gateway state.',
+      }];
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? [{ status: 'ok', check: 'gateway-exposure-state', detail: 'remote access is off and no managed TLS runtime snapshot remains' }]
+        : [{ status: 'fail', check: 'gateway-exposure-state', detail: message(error) }];
+    }
+  }
+
+  const problems: string[] = [];
+  const warnings: DoctorCheck[] = [];
+  const secret = state.secrets.gateway?.tls;
+  if (!secret) {
+    problems.push('protected TLS material is missing');
+  } else {
+    try {
+      const certificate = validateConfiguredGatewayTls(exposure, secret);
+      const remaining = Date.parse(certificate.notAfter) - Date.now();
+      if (remaining < 30 * 24 * 60 * 60 * 1_000) {
+        warnings.push({
+          status: 'warning',
+          check: 'gateway-certificate-expiry',
+          detail: `certificate expires at ${certificate.notAfter}; renew it by re-running qubicl gateway expose`,
+        });
+      }
+    } catch (error) {
+      problems.push(message(error));
+    }
+  }
+  if (!gatewayBindAddressPresent(exposure.bindAddress)) problems.push(`bind address ${exposure.bindAddress} is not assigned to a host interface`);
+
+  try {
+    const expectedFiles = new Set([
+      paths.document,
+      paths.certificate,
+      paths.privateKey,
+      ...(secret?.clientCertificateAuthorityPem ? [paths.clientCertificateAuthority] : []),
+    ]);
+    const directory = await lstat(paths.directory);
+    const uid = typeof process.getuid === 'function' ? process.getuid() : directory.uid;
+    if (!directory.isDirectory() || directory.isSymbolicLink()) problems.push(`${paths.directory} is not a real directory`);
+    if (directory.uid !== uid) problems.push(`${paths.directory} is not owned by the current user`);
+    if ((directory.mode & 0o777) !== 0o700) problems.push(`${paths.directory} mode is not 0700`);
+    const entries = await readdir(paths.directory);
+    const actualFiles = new Set(entries.map((name) => join(paths.directory, name)));
+    for (const expected of expectedFiles) if (!actualFiles.has(expected)) problems.push(`${expected} is missing`);
+    for (const actual of actualFiles) if (!expectedFiles.has(actual)) problems.push(`${actual} is unexpected`);
+    for (const path of expectedFiles) {
+      try {
+        const info = await lstat(path);
+        if (!info.isFile() || info.isSymbolicLink()) problems.push(`${path} is not a regular file`);
+        if (info.uid !== uid) problems.push(`${path} is not owned by the current user`);
+        if ((info.mode & 0o777) !== 0o600) problems.push(`${path} mode is not 0600`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') problems.push(`${path}: ${message(error)}`);
+      }
+    }
+    try {
+      const runtime = GatewayExposureRuntimeSchema.parse(JSON.parse(await readFile(paths.document, 'utf8')));
+      if (JSON.stringify(runtime) !== JSON.stringify(gatewayExposureRuntime(exposure))) {
+        problems.push('managed gateway exposure runtime document does not match durable configuration');
+      }
+    } catch (error) {
+      problems.push(`managed gateway exposure runtime document is invalid: ${message(error)}`);
+    }
+    try { await validateGatewayExposureRuntimeSnapshot(state); }
+    catch (error) { problems.push(message(error)); }
+  } catch (error) {
+    problems.push(message(error));
+  }
+
+  return [securityCheck('gateway-exposure-state', problems), ...warnings];
+}
+
 async function gatewaySecurityChecks(state: LoadedState): Promise<DoctorCheck[]> {
   try {
     const inspected = JSON.parse(await docker(['inspect', gatewayContainerName(state.config.installationId, state.paths.root)])) as Array<Record<string, unknown>>;
     const container = inspected[0] as DockerInspection | undefined;
     if (!container) throw new Error('Docker returned no gateway inspection record.');
     const problems: string[] = [];
-    const binding = container.HostConfig?.PortBindings?.['3211/tcp']?.[0];
-    if (binding?.HostIp !== '127.0.0.1' || Number(binding.HostPort) !== state.config.gateway.port) problems.push('gateway is not published only on the configured localhost port');
+    const portBindings = container.HostConfig?.PortBindings ?? {};
+    const observedPorts = container.NetworkSettings?.Ports ?? {};
+    if (container.HostConfig?.PublishAllPorts === true) problems.push('gateway must not enable Docker PublishAllPorts');
+    const localBindings = portBindings['3211/tcp'] ?? [];
+    const localBinding = localBindings[0];
+    if (localBindings.length !== 1 || localBinding?.HostIp !== '127.0.0.1'
+      || Number(localBinding.HostPort) !== state.config.gateway.port) {
+      problems.push('gateway does not have exactly one publication on the configured localhost port');
+    }
+    const observedLocalBindings = observedPorts['3211/tcp'] ?? [];
+    const observedLocalBinding = observedLocalBindings[0];
+    if (observedLocalBindings.length !== 1 || observedLocalBinding?.HostIp !== '127.0.0.1'
+      || Number(observedLocalBinding.HostPort) !== state.config.gateway.port) {
+      problems.push('running gateway does not report the exact configured localhost publication');
+    }
+    const exposure = state.config.gateway.exposure;
+    const externalPublication = gatewayExternalPublicationFromInspection(container);
+    if (externalPublication?.verificationIssue) {
+      problems.push(`gateway external TLS publication is not verified: ${externalPublication.verificationIssue}`);
+    }
+    if (exposure) {
+      if (externalPublication?.hostIp !== exposure.bindAddress || externalPublication.hostPort !== exposure.port
+        || externalPublication.verificationIssue) {
+        problems.push('gateway external TLS publication does not exactly match the configured address and port');
+      }
+    } else if (externalPublication) {
+      problems.push('gateway external TLS port is published while remote access is off');
+    }
+    const unexpectedBindings = Object.entries(portBindings)
+      .filter(([target, bindings]) => !['3211/tcp', `${GATEWAY_EXTERNAL_CONTAINER_PORT}/tcp`].includes(target) && (bindings?.length ?? 0) > 0)
+      .map(([target]) => target);
+    if (unexpectedBindings.length) problems.push(`unexpected gateway port publications: ${unexpectedBindings.join(', ')}`);
+    const unexpectedObservedBindings = Object.entries(observedPorts)
+      .filter(([target, bindings]) => !['3211/tcp', `${GATEWAY_EXTERNAL_CONTAINER_PORT}/tcp`].includes(target) && (bindings?.length ?? 0) > 0)
+      .map(([target]) => target);
+    if (unexpectedObservedBindings.length) problems.push(`unexpected running gateway port publications: ${unexpectedObservedBindings.join(', ')}`);
     if (container.HostConfig?.Privileged) problems.push('privileged mode is enabled');
     if (container.HostConfig?.ReadonlyRootfs !== true) problems.push('root filesystem is writable');
     if (!(container.HostConfig?.CapDrop ?? []).some((capability) => capability.toUpperCase() === 'ALL')) problems.push('Linux capabilities are not dropped');
@@ -1295,6 +1540,24 @@ async function gatewaySecurityChecks(state: LoadedState): Promise<DoctorCheck[]>
       ...state.config.computers.map((computer) => controlNetwork(state.config.installationId, computer.id, state.paths.root)),
     ].toSorted();
     if (JSON.stringify(networks) !== JSON.stringify(expectedNetworks)) problems.push(`gateway networks do not exactly match ${expectedNetworks.join(', ')}`);
+    const environment = container.Config?.Env ?? [];
+    const exposureEnvironment = environment.filter((entry) => entry.startsWith('QUBICL_GATEWAY_EXPOSURE_')
+      || entry.startsWith('QUBICL_GATEWAY_TLS_') || entry.startsWith('QUBICL_GATEWAY_EXTERNAL_PORT='));
+    if (exposure) {
+      const required = [
+        'QUBICL_GATEWAY_EXPOSURE_CONFIG_PATH=/runtime/gateway-exposure/gateway-exposure.json',
+        'QUBICL_GATEWAY_TLS_CERT_PATH=/runtime/gateway-exposure/certificate.pem',
+        'QUBICL_GATEWAY_TLS_KEY_PATH=/runtime/gateway-exposure/private-key.pem',
+        `QUBICL_GATEWAY_EXTERNAL_PORT=${GATEWAY_EXTERNAL_CONTAINER_PORT}`,
+        ...(state.secrets.gateway?.tls.clientCertificateAuthorityPem
+          ? ['QUBICL_GATEWAY_TLS_CLIENT_CA_PATH=/runtime/gateway-exposure/client-ca.pem']
+          : []),
+      ];
+      for (const value of required) if (!environment.includes(value)) problems.push(`gateway exposure environment is missing ${value.split('=')[0]}`);
+      if (exposureEnvironment.length !== required.length) problems.push('gateway exposure environment contains missing, duplicate, or unexpected entries');
+    } else if (exposureEnvironment.length) {
+      problems.push('gateway exposure environment remains configured while remote access is off');
+    }
     if (JSON.stringify(container).includes('docker.sock')) problems.push('Docker socket is mounted');
     return [securityCheck('gateway-isolation', problems)];
   } catch (error) {
@@ -1314,7 +1577,7 @@ async function unifiedComputerSecurityChecks(state: LoadedState, computer: Compu
     if (!container) throw new Error('Docker returned no unified computer inspection record.');
     const problems: string[] = [];
     inspectCommonIsolation('computer', container, problems);
-    inspectMounts('computer', container, false, problems, true, true);
+    inspectMounts('computer', container, false, problems, true, true, dynamicPreviewAccessExpected('computer', container, problems));
     inspectNetworks('computer', container, [controlNetwork(state.config.installationId, computer.id, state.paths.root)], problems);
     if (container.HostConfig?.NanoCpus !== computer.cpus * 1_000_000_000) problems.push(`computer CPU limit does not match ${computer.cpus}`);
     if (container.HostConfig?.Memory !== memoryBytes(computer.memory)) problems.push(`computer memory limit does not match ${computer.memory}`);
@@ -1370,7 +1633,7 @@ async function splitComputerSecurityChecks(state: LoadedState, computer: Compute
     if (web) inspectCommonIsolation('web', web, problems);
     if (session) inspectCommonIsolation('session', session, problems);
     if (ssh) inspectSshIsolation(ssh, computer.ssh!.port, workspace, problems);
-    inspectMounts('controller', controller, false, problems, true, true);
+    inspectMounts('controller', controller, false, problems, true, true, dynamicPreviewAccessExpected('controller', controller, problems));
     inspectMounts('executor', executor, false, problems);
     const egressMounts = new Map((egress.Mounts ?? []).map((mount) => [mount.Destination, mount]));
     if (egressMounts.size !== 2
@@ -1440,14 +1703,35 @@ function inspectCommonIsolation(label: string, container: DockerInspection, prob
   if (JSON.stringify(container).includes('docker.sock')) problems.push(`${label} mounts the Docker socket`);
 }
 
-function inspectMounts(label: string, container: DockerInspection, display: boolean, problems: string[], audit = false, policy = false): void {
+function dynamicPreviewAccessExpected(label: string, container: DockerInspection, problems: string[]): boolean {
+  const environment = container.Config?.Env ?? [];
+  const imageCapability = environment.includes(`QUBICL_IMAGE_PREVIEW_ACCESS=${COMPUTER_PREVIEW_ACCESS_PROTOCOL}`);
+  const runtimePath = environment.includes(`QUBICL_PREVIEW_ACCESS_PATH=${PREVIEW_ACCESS_CONTAINER_PATH}`);
+  if (imageCapability !== runtimePath) {
+    problems.push(`${label} dynamic preview-access image capability and runtime path do not match`);
+  }
+  return runtimePath;
+}
+
+export function inspectMounts(
+  label: string,
+  container: DockerInspection,
+  display: boolean,
+  problems: string[],
+  audit = false,
+  policy = false,
+  previewAccess = false,
+): void {
   const mounts = container.Mounts ?? [];
   const home = mounts.filter((mount) => mount.Type === 'bind' && mount.Destination === '/home' && mount.RW === true);
   const x11 = mounts.filter((mount) => mount.Type === 'volume' && mount.Destination === '/tmp/.X11-unix' && mount.RW === true);
   const audits = mounts.filter((mount) => mount.Type === 'bind' && mount.Destination === '/run/qubicl/audit.jsonl' && mount.RW === true);
   const policies = mounts.filter((mount) => mount.Type === 'bind' && mount.Destination === '/run/qubicl/policy.json' && mount.RW === false);
-  if (home.length !== 1 || x11.length !== (display ? 1 : 0) || audits.length !== (audit ? 1 : 0) || policies.length !== (policy ? 1 : 0) || mounts.length !== 1 + (display ? 1 : 0) + (audit ? 1 : 0) + (policy ? 1 : 0)) {
-    problems.push(`${label} mounts do not match the private home${display ? ', display socket' : ''}${audit ? ', private audit file' : ''}${policy ? ', and read-only operator policy' : ''}`);
+  const previewAccessMounts = mounts.filter((mount) => mount.Type === 'bind' && mount.Destination === '/run/qubicl/preview-access' && mount.RW === false);
+  if (home.length !== 1 || x11.length !== (display ? 1 : 0) || audits.length !== (audit ? 1 : 0)
+    || policies.length !== (policy ? 1 : 0) || previewAccessMounts.length !== (previewAccess ? 1 : 0)
+    || mounts.length !== 1 + (display ? 1 : 0) + (audit ? 1 : 0) + (policy ? 1 : 0) + (previewAccess ? 1 : 0)) {
+    problems.push(`${label} mounts do not match the private home${display ? ', display socket' : ''}${audit ? ', private audit file' : ''}${policy ? ', read-only operator policy' : ''}${previewAccess ? ', and read-only preview access document' : ''}`);
   }
 }
 
@@ -1497,7 +1781,7 @@ function inspectNetworks(label: string, container: DockerInspection, expected: s
   if (JSON.stringify(actual) !== JSON.stringify(expected.toSorted())) problems.push(`${label} networks do not exactly match ${expected.join(', ')}`);
 }
 
-interface DockerInspection {
+export interface DockerInspection {
   Config?: { User?: string; Env?: string[] };
   HostConfig?: {
     Privileged?: boolean;
@@ -1513,9 +1797,13 @@ interface DockerInspection {
     PidsLimit?: number;
     ShmSize?: number;
     PortBindings?: Record<string, Array<{ HostIp?: string; HostPort?: string }> | undefined>;
+    PublishAllPorts?: boolean;
   };
   Mounts?: Array<{ Type?: string; Destination?: string; RW?: boolean }>;
-  NetworkSettings?: { Networks?: Record<string, unknown> };
+  NetworkSettings?: {
+    Networks?: Record<string, unknown>;
+    Ports?: Record<string, Array<{ HostIp?: string; HostPort?: string }> | null>;
+  };
 }
 
 function securityCheck(check: string, problems: string[]): DoctorCheck {
@@ -1535,6 +1823,7 @@ const invocationRules: Record<string, InvocationRule> = {
   version: { minPositionals: 0, maxPositionals: 0 },
   setup: { minPositionals: 0, maxPositionals: 0, options: ['preset', 'image', 'cpus', 'memory', 'gateway-port', 'create', 'no-create', 'no-start', 'offline', 'allow-unsupported-resources', 'verbose', 'no-clear', 'yes', 'json'] },
   config: { minPositionals: 1, maxPositionals: 1, options: ['gateway-port', 'default-preset', 'default-image', 'default-cpus', 'default-memory', 'update-notifications'] },
+  gateway: { minPositionals: 1, maxPositionals: 1, options: ['bind', 'port', 'hostname', 'cert', 'key', 'allow-networks', 'trusted-origins', 'preview-domain', 'client-ca', 'all-interfaces', 'allow-all-clients', 'yes', 'json'] },
   up: { minPositionals: 0, maxPositionals: 0 },
   down: { minPositionals: 0, maxPositionals: 0 },
   create: { minPositionals: 0, maxPositionals: 1, options: ['preset', 'image', 'cpus', 'memory', 'skills', 'tools', 'no-start', 'offline', 'yes', 'json'] },
@@ -1566,8 +1855,8 @@ const invocationRules: Record<string, InvocationRule> = {
   delete: { minPositionals: 1, maxPositionals: 1 },
   restore: { minPositionals: 1, maxPositionals: 1 },
   purge: { minPositionals: 1, maxPositionals: 1, options: ['yes'] },
-  view: { minPositionals: 1, maxPositionals: 1, options: ['no-open'] },
-  connect: { minPositionals: 1, maxPositionals: 1, options: ['client', 'client-host', 'transport', 'profile', 'result-mode'] },
+  view: { minPositionals: 1, maxPositionals: 1, options: ['no-open', 'access'] },
+  connect: { minPositionals: 1, maxPositionals: 1, options: ['client', 'client-host', 'transport', 'profile', 'result-mode', 'access'] },
   mcp: { minPositionals: 1, maxPositionals: 1, options: ['profile', 'result-mode'] },
   token: { minPositionals: 2, maxPositionals: 2 },
   image: { minPositionals: 1, maxPositionals: 3 },
@@ -1602,6 +1891,12 @@ Usage: qubicl <command> [arguments]
   config set [--gateway-port n] [--default-preset id | --default-image ref]
              [--default-cpus n] [--default-memory 4g] [--update-notifications on|off]
                                          Update managed settings and private local preferences
+  gateway expose --bind ADDRESS --port PORT --hostname HOST
+                 --cert FILE --key FILE --allow-networks CIDR[,CIDR...]
+                 [--trusted-origins HTTPS_ORIGIN,...] [--preview-domain DOMAIN]
+                 [--client-ca FILE] [--all-interfaces] [--allow-all-clients] [--yes]
+  gateway status [--json] | gateway revoke [--yes]
+                                         Manage the optional TLS-only remote listener
   up | down                              Start or stop all resources
   create [name] [--preset id | --image ref] [--cpus n] [--memory 4g]
                 [--skills core|none|ids] [--tools full|names]
@@ -1664,9 +1959,11 @@ Usage: qubicl <command> [arguments]
   delete <name>                          Move a computer to recoverable trash
   restore <name-or-id>                   Restore with a new token
   purge <name-or-id> [--yes]             Permanently delete trashed data
-  view <name> [--no-open]                Open the interactive desktop
+  view <name> [--no-open] [--access local|remote]
+                                         Open the interactive desktop
   connect <name> --client <client> [--client-host local|windows]
                  [--transport stdio|http|openapi]
+                 [--access local|remote]
                  [--profile full|files|browser-semantic|browser-visual|desktop]
                  [--result-mode text|structured|compatible]
                                          Print setup instructions without editing client configuration

@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "id": "qubicl-remote-access",
+  "acceptanceSchemaVersion": 4,
+  "protocol": "direct-tls-v1",
+  "requiredPreset": "workstation",
+  "requiredClientVersionFields": ["mcpHttp", "openapi", "openTerminal", "browser"],
+  "requiredSurfaces": [
+    "mcp-http",
+    "openapi",
+    "open-terminal",
+    "viewer-static",
+    "viewer-websocket",
+    "preview-http",
+    "preview-websocket"
+  ],
+  "requiredChecks": [
+    "tlsOnlyPassed",
+    "certificateIdentityPassed",
+    "hostAndSniPassed",
+    "exactDockerPublicationPassed",
+    "clientNetworkAllowPassed",
+    "clientNetworkDenyPassed",
+    "forwardedHeadersIgnored",
+    "crossComputerBearerRejected",
+    "trustedOriginPassed",
+    "untrustedOriginRejected",
+    "operatorRoutesRejected",
+    "clientCertificatePassed",
+    "localLoopbackPreserved",
+    "runningGatewayLifecyclePassed",
+    "stoppedGatewayLifecyclePassed",
+    "revokePassed",
+    "statusDoctorPassed",
+    "durableDataPreserved"
+  ],
+  "profiles": [
+    {
+      "id": "linux-x64-direct",
+      "platformId": "linux-x64",
+      "networkPath": "native-docker",
+      "clientPath": "external-lan-client",
+      "allowedPeerAddressBehaviors": ["direct"]
+    },
+    {
+      "id": "macos-apple-silicon-docker-desktop",
+      "platformId": "macos-apple-silicon",
+      "networkPath": "docker-desktop",
+      "clientPath": "external-lan-client-through-docker-desktop",
+      "allowedPeerAddressBehaviors": ["direct", "nat-translated"]
+    },
+    {
+      "id": "windows-wsl2-x64-docker-desktop",
+      "platformId": "windows-wsl2-x64",
+      "networkPath": "wsl2-docker-desktop",
+      "clientPath": "windows-host-through-wsl2-docker-desktop",
+      "allowedPeerAddressBehaviors": ["direct", "nat-translated"]
+    }
+  ]
+}

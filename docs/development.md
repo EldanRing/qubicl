@@ -44,6 +44,35 @@ npm run test:e2e:all
 
 These are large local Docker runs. Start one and let that exact process finish; do not overlap or repeatedly launch acceptance builds.
 
+## Remote-access acceptance
+
+The versioned
+[remote-access requirements](../conformance/remote-access-v1.json) are an
+additional schema-4 release gate, not an automatic test runner. After candidate
+bytes are frozen, retain exact, post-freeze evidence for all three required
+profiles: native Linux x64, Apple Silicon through Docker Desktop, and Windows
+11 x64 through WSL 2/Docker Desktop. Use an actual external client path, not a
+second loopback process.
+
+Each profile records the source-client and container-observed address families,
+attests that both paths are non-loopback, and records whether the addresses were
+the same (direct) or different (NAT-translated). Exercise TLS identity,
+Host/SNI, allowed and denied CIDRs, ignored forwarded headers, cross-computer
+bearer rejection, exact trusted/untrusted browser origins, remote operator-route
+denial, optional client certificates, exact Docker publication, local-loopback
+preservation, running and stopped gateway transitions, revoke, status/doctor,
+and durable-data preservation. Exercise remote MCP HTTP, OpenAPI, Open Terminal,
+viewer static/WebSocket, and isolated preview HTTP/WebSocket surfaces with the
+exact client and browser versions recorded in the evidence.
+
+The acceptance bundle hash-binds the requirements copy, every row and surface
+report, the `remoteGateway` workflow, and the `remoteExposure` security review.
+Do not retain certificate private keys, bearer tokens, viewer tickets, session
+cookies, protected state, or durable-home contents in evidence. Qubicl does not
+change the firewall or router for this gate. Do not retain the raw source or
+observed network addresses; the signed comparison and bounded evidence report
+are sufficient and avoid publishing local network topology.
+
 ## Secret and dependency review
 
 Release checks require a locally installed, checksum-verified Gitleaks 8.30.1 (or separately reviewed compatible version):

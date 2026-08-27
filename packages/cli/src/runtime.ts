@@ -1,12 +1,14 @@
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { access, lstat, mkdir, readFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, readFile } from 'node:fs/promises';
 import YAML from 'yaml';
 import {
   IMAGE_CATALOG,
   CONTROL_PROTOCOL_VERSION,
   GATEWAY_PROTOCOL_VERSION,
+  GATEWAY_EXTERNAL_CONTAINER_PORT,
+  GATEWAY_EXPOSURE_PROTOCOL,
   PRESET_DEFINITIONS,
   QUBICL_BUILD,
   VIEWER_AUTHENTICATION_HEADER_V1,
@@ -27,6 +29,15 @@ import type { LoadedState } from './state.js';
 import { atomicWrite, statePaths, writeMountedRuntimeFile } from './state.js';
 import { resolvedBrokerDocument } from './broker-secrets.js';
 import { packagedAssetsPath } from './assets.js';
+import {
+  GATEWAY_EXPOSURE_CERTIFICATE_FILE,
+  GATEWAY_EXPOSURE_CLIENT_CA_FILE,
+  GATEWAY_EXPOSURE_PRIVATE_KEY_FILE,
+  GATEWAY_EXPOSURE_RUNTIME_DIRECTORY,
+  GATEWAY_EXPOSURE_RUNTIME_DOCUMENT,
+  gatewayEndpointSet,
+  materializeGatewayExposure,
+} from './gateway-access.js';
 
 export const GATEWAY_PIDS_LIMIT = 128;
 export const COMPUTER_PIDS_LIMIT = 1024;
@@ -37,6 +48,10 @@ const LEGACY_PROJECT_NAME = 'qubicl';
 const INSTALLATION_FINGERPRINT_LENGTH = 20;
 const COMPUTER_FINGERPRINT_LENGTH = 24;
 const RUNTIME_IMAGE_CONTRACTS_VERSION = 1;
+export const PREVIEW_ACCESS_RUNTIME_DIRECTORY = 'preview-access';
+export const PREVIEW_ACCESS_RUNTIME_FILE = 'access.json';
+export const PREVIEW_ACCESS_CONTAINER_DIRECTORY = '/run/qubicl/preview-access';
+export const PREVIEW_ACCESS_CONTAINER_PATH = `${PREVIEW_ACCESS_CONTAINER_DIRECTORY}/${PREVIEW_ACCESS_RUNTIME_FILE}`;
 
 export const LEGACY_VIEWER_AUTHENTICATION = 'legacy' as const;
 export type RuntimeViewerAuthentication = typeof LEGACY_VIEWER_AUTHENTICATION | ViewerAuthentication;
@@ -46,6 +61,7 @@ export interface RuntimeImageContract {
   contentId: `sha256:${string}`;
   viewerAuthentication: RuntimeViewerAuthentication;
   gatewayProtocolVersion?: number;
+  gatewayExposureProtocol?: typeof GATEWAY_EXPOSURE_PROTOCOL;
 }
 
 export interface RuntimeImageContractsDocument {
@@ -78,11 +94,14 @@ export async function readRuntimeImageContracts(state: LoadedState): Promise<Run
     const contract = candidate as Partial<RuntimeImageContract> | null;
     const viewerAuthentication = contract?.viewerAuthentication;
     const validComputer = contract?.kind === 'computer'
-      && contract.gatewayProtocolVersion === undefined;
+      && contract.gatewayProtocolVersion === undefined
+      && contract.gatewayExposureProtocol === undefined;
     const validGateway = contract?.kind === 'gateway'
       && (viewerAuthentication === LEGACY_VIEWER_AUTHENTICATION
-        ? contract.gatewayProtocolVersion === undefined
-        : contract.gatewayProtocolVersion === GATEWAY_PROTOCOL_VERSION);
+        ? contract.gatewayProtocolVersion === undefined && contract.gatewayExposureProtocol === undefined
+        : contract.gatewayProtocolVersion === GATEWAY_PROTOCOL_VERSION
+          && (contract.gatewayExposureProtocol === undefined
+            || contract.gatewayExposureProtocol === GATEWAY_EXPOSURE_PROTOCOL));
     if (!/^sha256:[a-f0-9]{64}$/u.test(contentId)
       || !contract || contract.contentId !== contentId
       || (contract.kind !== 'gateway' && contract.kind !== 'computer')
@@ -331,6 +350,7 @@ export function runtimeImageReference(
 }
 
 export async function renderRuntime(state: LoadedState): Promise<void> {
+  await materializeGatewayExposure(state);
   const { uid: hostUid, gid: hostGid } = hostIdentity();
   const installationId = state.config.installationId;
   const gatewayAuditVolumes: Array<Record<string, unknown>> = [];
@@ -374,8 +394,25 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
       environment: {
         QUBICL_GATEWAY_PORT: '3211',
         QUBICL_ROUTES_PATH: '/runtime/routes.json',
+        ...(state.config.gateway.exposure ? {
+          QUBICL_GATEWAY_EXTERNAL_PORT: `${GATEWAY_EXTERNAL_CONTAINER_PORT}`,
+          QUBICL_GATEWAY_EXPOSURE_CONFIG_PATH: `/runtime/${GATEWAY_EXPOSURE_RUNTIME_DIRECTORY}/${GATEWAY_EXPOSURE_RUNTIME_DOCUMENT}`,
+          QUBICL_GATEWAY_TLS_CERT_PATH: `/runtime/${GATEWAY_EXPOSURE_RUNTIME_DIRECTORY}/${GATEWAY_EXPOSURE_CERTIFICATE_FILE}`,
+          QUBICL_GATEWAY_TLS_KEY_PATH: `/runtime/${GATEWAY_EXPOSURE_RUNTIME_DIRECTORY}/${GATEWAY_EXPOSURE_PRIVATE_KEY_FILE}`,
+          ...(state.config.gateway.exposure.tls.clientCertificateAuthoritySha256 ? {
+            QUBICL_GATEWAY_TLS_CLIENT_CA_PATH: `/runtime/${GATEWAY_EXPOSURE_RUNTIME_DIRECTORY}/${GATEWAY_EXPOSURE_CLIENT_CA_FILE}`,
+          } : {}),
+        } : {}),
       },
-      ports: [`127.0.0.1:${state.config.gateway.port}:3211`],
+      ports: [
+        `127.0.0.1:${state.config.gateway.port}:3211`,
+        ...(state.config.gateway.exposure ? [{
+          target: GATEWAY_EXTERNAL_CONTAINER_PORT,
+          published: `${state.config.gateway.exposure.port}`,
+          host_ip: state.config.gateway.exposure.bindAddress,
+          protocol: 'tcp',
+        }] : []),
+      ],
       read_only: true,
       cap_drop: ['ALL'],
       security_opt: ['no-new-privileges:true'],
@@ -397,9 +434,11 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
   const volumes: Record<string, unknown> = {};
   const brokerDirectory = join(state.paths.runtime, 'brokers');
   const policyDirectory = join(state.paths.runtime, 'policies');
+  const previewAccessRoot = join(state.paths.runtime, PREVIEW_ACCESS_RUNTIME_DIRECTORY);
   const chromiumSeccompPath = join(state.paths.runtime, 'chromium-seccomp.json');
   await mkdir(brokerDirectory, { recursive: true, mode: 0o700 });
   await mkdir(policyDirectory, { recursive: true, mode: 0o700 });
+  await ensurePrivateRuntimeDirectory(previewAccessRoot);
   if (state.config.computers.some((computer) => computer.capabilities.includes('viewer'))) {
     const profile = await readFile(join(packagedAssetsPath(), 'chromium-seccomp.json'), 'utf8');
     await writeMountedRuntimeFile(chromiumSeccompPath, profile, 0o600);
@@ -429,6 +468,19 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
     const brokerKey = deriveInternalServiceKey(secret.internalKey, 'egress-broker');
     const webKey = deriveInternalServiceKey(secret.internalKey, 'web');
     const networkPolicy = computer.network ?? { profile: 'developer', allowDomains: [], denyDomains: [], temporaryApprovals: [] };
+    const localPreviewBase = `http://${previewHostname(computer.id)}:${state.config.gateway.port}/computers/${computer.id}/previews`;
+    const remotePreviewBase = gatewayEndpointSet(state.config.gateway, computer, 'remote')?.previewBase;
+    const previewAccessDirectory = join(previewAccessRoot, computer.id);
+    await ensurePrivateRuntimeDirectory(previewAccessDirectory);
+    await writeMountedRuntimeFile(
+      join(previewAccessDirectory, PREVIEW_ACCESS_RUNTIME_FILE),
+      `${JSON.stringify({
+        version: 1,
+        publicBaseUrl: localPreviewBase,
+        ...(remotePreviewBase ? { remoteBaseUrl: remotePreviewBase } : {}),
+      }, null, 2)}\n`,
+      0o600,
+    );
     const unifiedRuntime = usesUnifiedComputerRuntime(computer);
     const webRuntime = unifiedRuntime || computer.controlProtocolVersion === LEGACY_SPLIT_CONTROL_PROTOCOL_VERSION;
     const restrictedNetwork = networkPolicy.profile !== 'developer';
@@ -469,7 +521,8 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
       QUBICL_EXECUTOR_URL: `http://${unifiedRuntime ? '127.0.0.1' : executorService}:3213`,
       QUBICL_EXECUTOR_KEY: executorKey,
       QUBICL_EXECUTOR_HOST: unifiedRuntime ? computerContainerName(state, computer) : executorService,
-      QUBICL_PUBLIC_PREVIEW_BASE: `http://${previewHostname(computer.id)}:${state.config.gateway.port}/computers/${computer.id}/previews`,
+      QUBICL_PUBLIC_PREVIEW_BASE: localPreviewBase,
+      QUBICL_PREVIEW_ACCESS_PATH: PREVIEW_ACCESS_CONTAINER_PATH,
       QUBICL_INTERNAL_PREVIEW_BASE: `http://${gatewayContainerName(installationId, state.paths.root)}:3211/computers/${computer.id}/previews`,
       QUBICL_BROKER_URL: `http://${egressHost}:3128`,
       QUBICL_BROKER_KEY: brokerKey,
@@ -511,6 +564,7 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
           homeVolume,
           { type: 'bind', source: auditPath, target: '/run/qubicl/audit.jsonl' },
           { type: 'bind', source: policyPath, target: '/run/qubicl/policy.json', read_only: true },
+          { type: 'bind', source: previewAccessDirectory, target: PREVIEW_ACCESS_CONTAINER_DIRECTORY, read_only: true },
         ],
         networks: [networkKey],
         ports: computer.ssh?.enabled ? [`127.0.0.1:${computer.ssh.port}:2222`] : undefined,
@@ -553,6 +607,7 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
         homeVolume,
         { type: 'bind', source: auditPath, target: '/run/qubicl/audit.jsonl' },
         { type: 'bind', source: policyPath, target: '/run/qubicl/policy.json', read_only: true },
+        { type: 'bind', source: previewAccessDirectory, target: PREVIEW_ACCESS_CONTAINER_DIRECTORY, read_only: true },
       ],
       networks: [networkKey, workspaceNetworkKey],
       cpus: 0.25,
@@ -755,4 +810,13 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
 
   await writeMountedRuntimeFile(state.paths.routes, `${JSON.stringify(routes, null, 2)}\n`, 0o600);
   await atomicWrite(state.paths.compose, YAML.stringify({ name: projectName(installationId, state.paths.root), services, networks, volumes }), 0o600);
+}
+
+async function ensurePrivateRuntimeDirectory(path: string): Promise<void> {
+  await mkdir(path, { recursive: true, mode: 0o700 });
+  const info = await lstat(path);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`${path} must be a real runtime directory.`);
+  const expectedUid = typeof process.getuid === 'function' ? process.getuid() : info.uid;
+  if (info.uid !== expectedUid) throw new Error(`${path} is not owned by the current Qubicl operator.`);
+  await chmod(path, 0o700);
 }

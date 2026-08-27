@@ -116,6 +116,8 @@ export async function inspectOciArchive(archive, {
           assert(labels['dev.qubicl.compatibility'] === expectedPreset, `${archive} ${platform} has the wrong compatibility label.`);
           assert(labels['dev.qubicl.capabilities'] === expectedManifestDocument.capabilities.join(','), `${archive} ${platform} has the wrong capability label.`);
           assert(labels['dev.qubicl.manifest-sha256'] === digestCanonical(expectedManifestDocument), `${archive} ${platform} has the wrong manifest digest label.`);
+          assert(labels['dev.qubicl.preview-access'] === 'dynamic-v1', `${archive} ${platform} has the wrong dynamic preview-access label.`);
+          assert(environmentValue(config.config?.Env ?? [], 'QUBICL_IMAGE_PREVIEW_ACCESS') === 'dynamic-v1', `${archive} ${platform} has the wrong baked dynamic preview-access mode.`);
           const viewerAuthentication = labels['dev.qubicl.viewer-authentication'];
           const bakedViewerAuthentication = environmentValue(config.config?.Env ?? [], 'QUBICL_IMAGE_VIEWER_AUTHENTICATION');
           if (expectedManifestDocument.viewer) {
@@ -130,6 +132,7 @@ export async function inspectOciArchive(archive, {
           const qubiclLabels = Object.fromEntries(Object.entries(labels).filter(([name]) => name.startsWith('dev.qubicl.')));
           assert(canonicalJson(qubiclLabels) === canonicalJson({
             'dev.qubicl.gateway-protocol-version': '2',
+            'dev.qubicl.gateway-exposure': 'direct-tls-v1',
             'dev.qubicl.viewer-authentication': 'header-v1',
           }), `${archive} ${platform} gateway has the wrong authenticated-viewer contract labels.`);
         }

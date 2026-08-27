@@ -24,6 +24,8 @@ const booleanOptions = new Set([
   'orphans',
   'images',
   'all',
+  'all-interfaces',
+  'allow-all-clients',
 ]);
 const optionalValueOptions = new Set(['enable']);
 const stringOptions = new Set([
@@ -67,6 +69,15 @@ const stringOptions = new Set([
   'disable',
   'ref',
   'path',
+  'bind',
+  'hostname',
+  'cert',
+  'key',
+  'allow-networks',
+  'trusted-origins',
+  'preview-domain',
+  'client-ca',
+  'access',
 ]);
 
 export function parseArgs(args: string[]): ParsedArgs {

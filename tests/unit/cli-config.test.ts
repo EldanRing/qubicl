@@ -11,6 +11,8 @@ import { presetDefaults } from '@qubicl/core';
 import { addConfiguredComputer } from '../../packages/cli/dist/computers.js';
 import { initializeState, saveState, statePaths } from '../../packages/cli/dist/state.js';
 import { portAvailable } from '../../packages/cli/dist/docker.js';
+import { buildGatewayExposureConfig, validateGatewayTlsInput } from '../../packages/cli/dist/gateway-access.js';
+import { writeGatewayTlsFixture } from './gateway-test-fixtures.js';
 
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL('../../packages/cli/dist/qubicl.mjs', import.meta.url));
@@ -87,6 +89,43 @@ test('connect derives a pinned Windows-to-WSL stdio launcher from the running CL
     assert.match(result.stderr, /Windows-hosted client/);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('manifest export omits host-local exposure and all protected TLS bytes', async () => {
+  const fixture = await writeGatewayTlsFixture('qubicl-cli-export-exposure-');
+  const root = join(fixture.root, 'state');
+  const output = join(fixture.root, 'qubicl.yaml');
+  const env = { ...process.env, QUBICL_HOME: root };
+  try {
+    const state = await initializeState(statePaths(root));
+    const validated = await validateGatewayTlsInput({
+      certificatePath: fixture.certificate,
+      privateKeyPath: fixture.privateKey,
+      hostname: 'gateway.example.test',
+      now: fixture.validAt,
+    });
+    state.config.gateway.exposure = buildGatewayExposureConfig({
+      bindAddress: '0.0.0.0',
+      port: 443,
+      hostname: 'gateway.example.test',
+      allowedNetworks: ['192.0.2.0/24'],
+      tls: validated.metadata,
+    });
+    state.secrets.gateway = { tls: validated.secret };
+    await saveState(state);
+
+    await exec(process.execPath, [cli, 'export', '--output', output], { env });
+    const raw = await readFile(output, 'utf8');
+    const manifest = YAML.parse(raw) as { gateway: Record<string, unknown> };
+    assert.deepEqual(Object.keys(manifest.gateway).sort(), ['image', 'port']);
+    assert.equal(manifest.gateway.exposure, undefined);
+    assert.doesNotMatch(raw, /gateway\.example\.test|BEGIN (?:CERTIFICATE|PRIVATE KEY)|certificateSha256|privateKeySha256/u);
+
+    const persisted = YAML.parse(await readFile(join(root, 'config.yaml'), 'utf8')) as { gateway: { exposure?: { hostname?: string } } };
+    assert.equal(persisted.gateway.exposure?.hostname, 'gateway.example.test');
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
   }
 });
 

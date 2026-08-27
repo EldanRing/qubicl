@@ -7,6 +7,7 @@ import YAML from 'yaml';
 import {
   ConfigSchema,
   SecretsSchema,
+  assertGatewayExposureTlsSecretMatches,
   assertStateComputerIdsMatch,
   defaultConfig,
   defaultSecrets,
@@ -92,11 +93,13 @@ export async function loadState(paths = statePaths()): Promise<LoadedState> {
   const config = ConfigSchema.parse(YAML.parse(await readFile(paths.config, 'utf8')));
   const secrets = SecretsSchema.parse(YAML.parse(await readFile(paths.secrets, 'utf8')));
   assertStateComputerIdsMatch(config, secrets);
+  assertGatewayExposureTlsSecretMatches(config.gateway.exposure, secrets.gateway?.tls);
   return { paths, config, secrets };
 }
 
 export async function saveState(state: LoadedState, afterConfig?: () => Promise<void>): Promise<void> {
   assertStateComputerIdsMatch(state.config, state.secrets);
+  assertGatewayExposureTlsSecretMatches(state.config.gateway.exposure, state.secrets.gateway?.tls);
   await atomicWrite(state.paths.config, YAML.stringify(state.config), 0o600);
   await afterConfig?.();
   await atomicWrite(state.paths.secrets, YAML.stringify(state.secrets), 0o600);

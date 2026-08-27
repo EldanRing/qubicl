@@ -33,7 +33,13 @@ Native Windows and WSL 1 are unsupported. Qubicl computers are Linux
 containers on every host; macOS and Windows support does not mean native
 macOS/Windows workloads. Those containers are also not a VM security boundary
 against the host, Docker, or the host kernel. The gateway remains loopback-only
-by default.
+by default. Optional direct TLS exposure has focused source/loopback tests, but
+peer-IP behavior behind Docker Desktop/NAT must be validated on the actual host
+before relying on a CIDR allowlist. The separate versioned
+[remote-access requirements](../conformance/remote-access-v1.json) require
+post-freeze native-Linux, Apple Silicon Docker Desktop, and Windows WSL 2/Docker
+Desktop evidence before a v0.2 remote-support claim; those rows do not promote
+any best-effort platform by themselves.
 
 ## macOS with Docker Desktop
 

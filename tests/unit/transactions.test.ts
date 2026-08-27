@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import YAML from 'yaml';
-import { VIEWER_AUTHENTICATION_HEADER_V1, presetDefaults, type ComputerConfig, type TransactionCheckpoint } from '../../packages/core/dist/index.js';
+import { VIEWER_AUTHENTICATION_HEADER_V1, presetDefaults, sha256Text, type ComputerConfig, type TransactionCheckpoint } from '../../packages/core/dist/index.js';
 import { lifecycleUpdateStatus } from '../../packages/cli/dist/lifecycle-command.js';
 import { auditState, initializeState, loadState, newSecret, readMetadata, saveMetadata, saveState, statePaths, withStateLock, type LoadedState } from '../../packages/cli/dist/state.js';
 import { recordRuntimeImageContracts } from '../../packages/cli/dist/runtime.js';
@@ -109,6 +109,41 @@ test('a transient strict gateway verification failure retains the journal for ro
     failInspection = false;
     await recoverPendingTransaction(paths, { runtime });
     await assert.rejects(lstat(paths.journal), { code: 'ENOENT' });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('transactions require gateway exposure metadata and protected TLS bytes to match exactly', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-gateway-exposure-transaction-'));
+  try {
+    const state = await initializeState(statePaths(root));
+    const certificateChainPem = 'test certificate snapshot';
+    const privateKeyPem = 'test private key snapshot';
+    const id = '1'.repeat(64);
+    state.config.gateway.exposure = {
+      protocol: 'direct-tls-v1',
+      bindAddress: '0.0.0.0',
+      port: 443,
+      hostname: 'gateway.example.test',
+      allowedNetworks: ['192.0.2.0/24'],
+      trustedOrigins: ['https://gateway.example.test'],
+      tls: {
+        id,
+        certificateSha256: sha256Text(certificateChainPem),
+        privateKeySha256: sha256Text(privateKeyPem),
+        certificateFingerprint256: `sha256:${'2'.repeat(64)}`,
+        certificateNotBefore: '2026-01-01T00:00:00.000Z',
+        certificateNotAfter: '2126-01-01T00:00:00.000Z',
+      },
+    };
+    state.secrets.gateway = { tls: { id, certificateChainPem, privateKeyPem } };
+    assert.doesNotThrow(() => createStateTransaction('config', state));
+
+    state.secrets.gateway.tls.privateKeyPem = `${privateKeyPem}-changed`;
+    assert.throws(() => createStateTransaction('config', state), /must exactly match.*TLS material and digests/i);
+    delete state.secrets.gateway;
+    assert.throws(() => createStateTransaction('config', state), /must exactly match.*TLS material and digests/i);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

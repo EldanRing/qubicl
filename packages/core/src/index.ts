@@ -6,3 +6,4 @@ export * from './skills.js';
 export * from './redact.js';
 export * from './version.js';
 export * from './content-security.js';
+export * from './gateway-access.js';

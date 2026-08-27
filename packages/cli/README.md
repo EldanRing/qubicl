@@ -36,7 +36,7 @@ your model or agent
         │
         │  MCP / OpenAPI / Open Terminal
         ▼
- localhost-only Qubicl gateway
+ local-by-default Qubicl gateway
         │
         ├── terminal + managed processes
         ├── durable, host-visible files
@@ -123,6 +123,14 @@ bounded ZIP downloads, non-PTY managed processes, chat uploads, screenshots,
 browser tools, and explicitly published local previews without joining Open
 WebUI's Docker network.
 
+The gateway remains on `127.0.0.1` unless the host operator explicitly adds a
+second TLS-only listener with `qubicl gateway expose`. The opt-in uses the same
+gateway container, requires certificate, interface, network, and trusted-origin
+policy, and persists until `qubicl gateway revoke`; `0.0.0.0` additionally
+requires `--all-interfaces`. Read the
+[remote-access guide](https://github.com/EldanRing/qubicl/blob/main/docs/remote-access.md)
+before enabling it.
+
 ## Review updates safely
 
 `qubicl status` shows pending exact curated gateway/default/computer targets.
@@ -167,7 +175,8 @@ removal/preservation scope before explicit confirmation; Downloads remain.
 
 Computers run without privileged mode, a Docker socket, host namespaces,
 arbitrary mounts, or passwordless elevation. The gateway listens only on
-`127.0.0.1`. Qubicl is a Docker-based computer for trusted or
+`127.0.0.1` by default; explicit remote mode adds a separate TLS-only listener
+without publishing computer ports. Qubicl is a Docker-based computer for trusted or
 operator-supervised workloads, not a VM boundary against hostile code.
 
 Read the complete [security model](https://github.com/EldanRing/qubicl/blob/main/docs/security-model.md)

@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { closeSync, constants as fsConstants, fstatSync, openSync, readSync } from 'node:fs';
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
 import { connect } from 'node:net';
 import type { Duplex } from 'node:stream';
@@ -15,6 +16,13 @@ interface Publication {
   expiresAt: string;
 }
 
+export interface PreviewAccess {
+  publicBaseUrl: string;
+  remoteBaseUrl?: string;
+}
+
+export type PreviewAccessSource = () => PreviewAccess;
+
 export class PreviewManager {
   private readonly publications = new Map<string, Publication>();
 
@@ -23,6 +31,8 @@ export class PreviewManager {
     private readonly targetHost: string,
     private readonly publicBaseUrl: string,
     private readonly internalBaseUrl: string,
+    private readonly remoteBaseUrl?: string,
+    private readonly accessSource?: PreviewAccessSource,
   ) {}
 
   listPorts(): Promise<ListeningPort[]> { return this.ports.listPorts(); }
@@ -33,14 +43,16 @@ export class PreviewManager {
     return (await this.ports.listPorts()).filter(({ port }) => published.has(port));
   }
 
-  list(): Array<Omit<Publication, 'tokenHash'> & { url: string }> {
+  list(): Array<Omit<Publication, 'tokenHash'> & { url: string; remoteUrl?: string }> {
     this.prune();
+    const access = this.previewAccess();
     return [...this.publications.values()].map((publication) => ({
       id: publication.id,
       port: publication.port,
       createdAt: publication.createdAt,
       expiresAt: publication.expiresAt,
-      url: this.externalPath(publication.id),
+      url: this.externalPath(publication.id, access.publicBaseUrl),
+      ...(access.remoteBaseUrl ? { remoteUrl: this.remotePath(publication.id, access.remoteBaseUrl) } : {}),
     }));
   }
 
@@ -58,6 +70,7 @@ export class PreviewManager {
       expiresAt: new Date(now.getTime() + expiresInSeconds * 1000).toISOString(),
     };
     this.publications.set(id, publication);
+    const access = this.previewAccess();
     return {
       id,
       port,
@@ -65,7 +78,8 @@ export class PreviewManager {
       authentication: 'unguessable-cookie',
       createdAt: publication.createdAt,
       expiresAt: publication.expiresAt,
-      url: `${this.externalPath(id)}?token=${encodeURIComponent(token)}`,
+      url: `${this.externalPath(id, access.publicBaseUrl)}?token=${encodeURIComponent(token)}`,
+      ...(access.remoteBaseUrl ? { remoteUrl: `${this.remotePath(id, access.remoteBaseUrl)}?token=${encodeURIComponent(token)}` } : {}),
       browserUrl: `${this.internalPath(id)}?token=${encodeURIComponent(token)}`,
     };
   }
@@ -147,8 +161,15 @@ export class PreviewManager {
     request.pipe(upstream);
   }
 
-  private externalPath(id: string): string { return `${this.publicBaseUrl.replace(/\/$/u, '')}/${id}/`; }
+  private previewAccess(): PreviewAccess {
+    return this.accessSource?.() ?? {
+      publicBaseUrl: this.publicBaseUrl,
+      ...(this.remoteBaseUrl ? { remoteBaseUrl: this.remoteBaseUrl } : {}),
+    };
+  }
+  private externalPath(id: string, baseUrl = this.previewAccess().publicBaseUrl): string { return `${baseUrl.replace(/\/$/u, '')}/${id}/`; }
   private internalPath(id: string): string { return `${this.internalBaseUrl.replace(/\/$/u, '')}/${id}/`; }
+  private remotePath(id: string, baseUrl: string): string { return `${baseUrl.replace(/\/$/u, '')}/${id}/`; }
   private cookiePath(id: string): string {
     const value = this.externalPath(id);
     try { return new URL(value).pathname; } catch { return value.startsWith('/') ? value : '/'; }
@@ -157,6 +178,55 @@ export class PreviewManager {
     const now = Date.now();
     for (const [id, publication] of this.publications) if (Date.parse(publication.expiresAt) <= now) this.publications.delete(id);
   }
+}
+
+export function previewAccessFileSource(path: string): PreviewAccessSource {
+  return () => readPreviewAccessFile(path);
+}
+
+function readPreviewAccessFile(path: string): PreviewAccess {
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
+    const before = fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || before.size <= 0n || before.size > 16_384n || (Number(before.mode) & 0o077) !== 0) {
+      throw new Error('must be a private regular file no larger than 16384 bytes');
+    }
+    const buffer = Buffer.alloc(Number(before.size));
+    let offset = 0;
+    while (offset < buffer.length) {
+      const bytesRead = readSync(descriptor, buffer, offset, buffer.length - offset, offset);
+      if (bytesRead === 0) throw new Error('changed while it was read');
+      offset += bytesRead;
+    }
+    const after = fstatSync(descriptor, { bigint: true });
+    if (!after.isFile() || after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size) {
+      throw new Error('changed while it was read');
+    }
+    const parsed = JSON.parse(buffer.toString('utf8')) as Record<string, unknown>;
+    const keys = Object.keys(parsed).sort();
+    const expectedKeys = ['publicBaseUrl', ...(parsed.remoteBaseUrl === undefined ? [] : ['remoteBaseUrl']), 'version'].sort();
+    if (JSON.stringify(keys) !== JSON.stringify(expectedKeys) || parsed.version !== 1) throw new Error('has an unsupported shape');
+    const publicBaseUrl = exactPreviewBase(parsed.publicBaseUrl, 'http:');
+    const remoteBaseUrl = parsed.remoteBaseUrl === undefined ? undefined : exactPreviewBase(parsed.remoteBaseUrl, 'https:');
+    return { publicBaseUrl, ...(remoteBaseUrl ? { remoteBaseUrl } : {}) };
+  } catch (error) {
+    throw new Error(`Qubicl preview access document ${path} is invalid: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function exactPreviewBase(value: unknown, protocol: 'http:' | 'https:'): string {
+  if (typeof value !== 'string' || value.length > 4096) throw new Error(`must contain a bounded ${protocol.slice(0, -1).toUpperCase()} preview base URL`);
+  let parsed: URL;
+  try { parsed = new URL(value); }
+  catch { throw new Error('contains an invalid preview base URL'); }
+  if (parsed.protocol !== protocol || parsed.username || parsed.password || parsed.search || parsed.hash
+    || parsed.origin + parsed.pathname !== value || !parsed.pathname.endsWith('/previews')) {
+    throw new Error(`must contain an exact ${protocol.slice(0, -1).toUpperCase()} preview base URL`);
+  }
+  return value;
 }
 
 function digest(value: string): string { return createHash('sha256').update(value).digest('hex'); }

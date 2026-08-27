@@ -19,6 +19,13 @@ import {
   type Preset,
 } from './presets.js';
 import { normalizeOperatorSkillIds } from './skills.js';
+import {
+  GatewayExposureConfigSchema,
+  GatewayExposureTlsSecretSchema,
+  gatewayExposureTlsSecretMatches,
+  type GatewayExposureConfig,
+  type GatewayExposureTlsSecret,
+} from './gateway-access.js';
 import { QUBICL_BUILD } from './version.js';
 
 declare const __QUBICL_BUILD_DEFAULT_COMPUTER_IMAGE__: string | undefined;
@@ -160,9 +167,24 @@ export const ComputerConfigSchema = z.strictObject({
 
 export type ComputerConfig = z.infer<typeof ComputerConfigSchema>;
 
-export const GatewayConfigSchema = z.strictObject({
+const manifestGatewayFields = {
   port: z.number().int().min(1).max(65535),
   image: ImageIdentitySchema.omit({ manifestSha256: true }),
+};
+
+export const ManifestGatewayConfigSchema = z.strictObject(manifestGatewayFields);
+
+export const GatewayConfigSchema = z.strictObject({
+  ...manifestGatewayFields,
+  exposure: GatewayExposureConfigSchema.optional(),
+}).superRefine((value, context) => {
+  if (value.exposure?.port === value.port) {
+    context.addIssue({
+      code: 'custom',
+      path: ['exposure', 'port'],
+      message: 'external TLS port must differ from the local loopback gateway port',
+    });
+  }
 });
 
 const legacyComputerFields = {
@@ -251,7 +273,7 @@ export const ConfigSchema = z.strictObject({
 
 export type QubiclConfig = z.infer<typeof ConfigSchema>;
 
-const secretFields = {
+const computerSecretFields = {
   computers: z.record(z.uuid(), z.object({
     token: z.string().min(32),
     internalKey: z.string().min(32),
@@ -273,9 +295,14 @@ const secretFields = {
   })),
 };
 
-export const LegacySecretsV1Schema = z.object({ version: z.literal(1), ...secretFields });
+const secretFields = {
+  ...computerSecretFields,
+  gateway: z.strictObject({ tls: GatewayExposureTlsSecretSchema }).optional(),
+};
+
+export const LegacySecretsV1Schema = z.object({ version: z.literal(1), ...computerSecretFields });
 export type LegacyQubiclSecretsV1 = z.infer<typeof LegacySecretsV1Schema>;
-export const LegacySecretsV2Schema = z.object({ version: z.literal(2), ...secretFields });
+export const LegacySecretsV2Schema = z.object({ version: z.literal(2), ...computerSecretFields });
 export type LegacyQubiclSecretsV2 = z.infer<typeof LegacySecretsV2Schema>;
 export const SecretsSchema = z.object({ version: z.literal(STATE_FORMAT_VERSION), ...secretFields });
 export type QubiclSecrets = z.infer<typeof SecretsSchema>;
@@ -291,12 +318,14 @@ export const StateMigrationSchema = z.strictObject({
   secrets: SecretsSchema,
 }).superRefine((migration, context) => {
   const { missingSecrets, orphanSecrets } = stateComputerIdMismatch(migration.config, migration.secrets);
-  if (!missingSecrets.length && !orphanSecrets.length) return;
-  context.addIssue({
-    code: 'custom',
-    path: ['secrets', 'computers'],
-    message: `must exactly match config computer IDs; missing: ${missingSecrets.join(', ') || 'none'}; orphan: ${orphanSecrets.join(', ') || 'none'}`,
-  });
+  if (missingSecrets.length || orphanSecrets.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['secrets', 'computers'],
+      message: `must exactly match config computer IDs; missing: ${missingSecrets.join(', ') || 'none'}; orphan: ${orphanSecrets.join(', ') || 'none'}`,
+    });
+  }
+  validateGatewayExposureSecret(migration.config.gateway.exposure, migration.secrets.gateway?.tls, ['secrets', 'gateway', 'tls'], context);
 });
 export type StateMigration = z.infer<typeof StateMigrationSchema>;
 
@@ -391,8 +420,8 @@ const transactionBase = {
 
 interface TransactionValidationValue {
   operation: string;
-  config: { computers: Array<{ id: string }> };
-  secrets: { computers: Record<string, { token: string; internalKey: string }> };
+  config: { gateway?: { exposure?: GatewayExposureConfig | undefined } | undefined; computers: Array<{ id: string }> };
+  secrets: { gateway?: { tls: GatewayExposureTlsSecret } | undefined; computers: Record<string, { token: string; internalKey: string }> };
   active: Array<{ source: 'active' | 'create' | 'trash' | 'staged'; metadata: { id: string } }>;
   trash: Array<{ metadata: { id: string; deletedAt?: string } }>;
   runtime: {
@@ -434,6 +463,7 @@ function validateStateTransaction(transaction: TransactionValidationValue, conte
     trashIds.add(id);
   }
   if (!sameSet(configIds, secretIds)) context.addIssue({ code: 'custom', path: ['secrets', 'computers'], message: 'target secrets must exactly match target computer IDs' });
+  validateGatewayExposureSecret(transaction.config.gateway?.exposure, transaction.secrets.gateway?.tls, ['secrets', 'gateway', 'tls'], context);
   if (!sameSet(configIds, activeIds)) context.addIssue({ code: 'custom', path: ['active'], message: 'active transaction entries must exactly match target computer IDs' });
   validateRuntimeIds(transaction.runtime.reconnectIds, configIds, ['runtime', 'reconnectIds'], context);
   validateRuntimeIds(transaction.runtime.replaceIds, configIds, ['runtime', 'replaceIds'], context);
@@ -479,6 +509,17 @@ function validateStateTransaction(transaction: TransactionValidationValue, conte
   }
   validateRuntimeIds(transaction.runtime.verifyTokenIds, configIds, ['runtime', 'verifyTokenIds'], context);
   validateRuntimeIds(transaction.runtime.removeIds, trashIds, ['runtime', 'removeIds'], context);
+}
+
+function validateGatewayExposureSecret(
+  exposure: GatewayExposureConfig | undefined,
+  secret: GatewayExposureTlsSecret | undefined,
+  path: string[],
+  context: z.RefinementCtx,
+): void {
+  if (!gatewayExposureTlsSecretMatches(exposure, secret)) {
+    context.addIssue({ code: 'custom', path, message: 'must exactly match the configured gateway exposure TLS material and digests' });
+  }
 }
 
 export const LegacyStateTransactionV1Schema = z.strictObject({
@@ -673,7 +714,7 @@ const manifestComputerFields = {
 
 export const ManifestSchema = z.strictObject({
   version: z.literal(2),
-  gateway: GatewayConfigSchema,
+  gateway: ManifestGatewayConfigSchema,
   defaults: ComputerDefaultsSchema,
   computers: z.array(z.strictObject(manifestComputerFields).superRefine(validateContract)),
 });
@@ -781,7 +822,7 @@ export function reconcileManifest(config: QubiclConfig, manifest: QubiclManifest
     creates,
     updates,
     trashes,
-    gatewayChanged: JSON.stringify(config.gateway) !== JSON.stringify(manifest.gateway),
+    gatewayChanged: JSON.stringify({ port: config.gateway.port, image: config.gateway.image }) !== JSON.stringify(manifest.gateway),
     defaultsChanged: JSON.stringify(config.defaults) !== JSON.stringify(manifest.defaults),
   };
 }

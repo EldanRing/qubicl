@@ -147,7 +147,11 @@ export class LeaseManager {
     this.generation = 0;
     this._epoch = randomBytes(18).toString('base64url');
     this.clearTimer();
-    await this.revoke(revoked);
+    // An epoch change invalidates gateway-scoped capabilities even when no
+    // agent currently owns the computer. Run the revocation handler so stale
+    // preview publications and viewer pointers cannot become usable again
+    // after a gateway revoke/re-expose cycle.
+    await this.revoke(revoked, true);
   }
 
   private publicLease(lease: Lease): LeaseProof & { expiresAt: string } {
@@ -181,10 +185,10 @@ export class LeaseManager {
     this.timer = undefined;
   }
 
-  private revoke(proof: LeaseProof | undefined): Promise<LeaseRevocationReport> {
+  private revoke(proof: LeaseProof | undefined, invokeWithoutProof = false): Promise<LeaseRevocationReport> {
     const previous = this.revocation ?? Promise.resolve({ terminatedManagedProcesses: 0 });
     const pending = previous.then(async () => {
-      if (proof) return await this.onRevoked(proof) ?? { terminatedManagedProcesses: 0 };
+      if (proof || invokeWithoutProof) return await this.onRevoked(proof) ?? { terminatedManagedProcesses: 0 };
       return { terminatedManagedProcesses: 0 };
     });
     this.revocation = pending;

@@ -18,3 +18,9 @@ condition = "AND"
 paths = ['''(^|/)tests/integration/gateway\.test\.ts$''']
 regexTarget = "line"
 regexes = ['''Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==''']
+
+[[allowlists]]
+description = "Public self-signed TLS keys used only by the remote-gateway test fixture"
+condition = "AND"
+rules = ["private-key"]
+paths = ['''(^|/)tests/unit/gateway-test-fixtures\.ts$''']

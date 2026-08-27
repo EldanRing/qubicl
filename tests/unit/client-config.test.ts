@@ -161,6 +161,18 @@ test('Open WebUI uses the admin Open Terminal form without embedding a token', (
   assert.match(snippet.activationHint ?? '', /host\.docker\.internal/);
   assert.match(snippet.activationHint ?? '', /does not advertise an interactive PTY/);
   assert.match(snippet.activationHint ?? '', /file-backed chat uploads/);
+
+  const remote = connectionSnippet({
+    ...base,
+    client: 'open-webui',
+    endpoints: {
+      mcp: 'https://gateway.example.test/computers/id/mcp',
+      openapi: 'https://gateway.example.test/computers/id/openapi.json',
+    },
+  });
+  assert.equal(JSON.parse(remote.content).url, 'https://gateway.example.test/computers/id/open-terminal');
+  assert.match(remote.activationHint ?? '', /explicitly configured remote gateway endpoint/i);
+  assert.doesNotMatch(remote.activationHint ?? '', /host\.docker\.internal|use 127\.0\.0\.1/i);
   assert.throws(() => connectionSnippet({ ...base, client: 'open-webui', transport: 'http' }), /uses openapi/);
 });
 

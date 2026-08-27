@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   ConfigSchema,
   ComputerConfigSchema,
+  ManifestSchema,
   NetworkPolicySchema,
   SecretsSchema,
   StateMigrationSchema,
@@ -139,6 +140,41 @@ test('manifest v2 reconciliation preserves exact contracts and explicit pruning'
   assert.equal(safe.gatewayChanged, true);
   assert.deepEqual(reconcileManifest(config, manifest, true).trashes.map(({ name }) => name), ['omit']);
   assert.throws(() => reconcileManifest(config, { ...manifest, computers: [manifest.computers[0]!, { ...manifest.computers[0]! }] }, false), /more than once/);
+});
+
+test('manifests omit and cannot revoke host-local gateway exposure', () => {
+  const config = defaultConfig();
+  config.gateway.exposure = {
+    protocol: 'direct-tls-v1',
+    bindAddress: '0.0.0.0',
+    port: 443,
+    hostname: 'gateway.example.test',
+    allowedNetworks: ['192.0.2.0/24'],
+    trustedOrigins: ['https://gateway.example.test'],
+    tls: {
+      id: '1'.repeat(64),
+      certificateSha256: `sha256:${'2'.repeat(64)}`,
+      privateKeySha256: `sha256:${'3'.repeat(64)}`,
+      certificateFingerprint256: `sha256:${'4'.repeat(64)}`,
+      certificateNotBefore: '2026-01-01T00:00:00.000Z',
+      certificateNotAfter: '2126-01-01T00:00:00.000Z',
+    },
+  };
+  const manifest: QubiclManifest = {
+    version: 2,
+    gateway: { port: config.gateway.port, image: structuredClone(config.gateway.image) },
+    defaults: structuredClone(config.defaults),
+    computers: [],
+  };
+  assert.equal(reconcileManifest(config, manifest, false).gatewayChanged, false);
+  assert.throws(() => ManifestSchema.parse({
+    ...manifest,
+    gateway: structuredClone(config.gateway),
+  }), /unrecognized key/i);
+
+  const changedPort = structuredClone(manifest);
+  changedPort.gateway.port += 1;
+  assert.equal(reconcileManifest(config, changedPort, false).gatewayChanged, true);
 });
 
 test('manifest version 1 is accepted only through the explicit migration parser', () => {

@@ -18,6 +18,7 @@ import {
 import {
   UpgradeAllPartialFailure,
   assessUpgradeSpace,
+  assertRemotePreviewUpgradeCompatibility,
   buildLifecycleUpdateStatus,
   buildUpgradeAllPlan,
   computerUpgradeRuntimePlan,
@@ -413,6 +414,55 @@ test('acquisition failure or changed preview causes no mutation', async () => {
   assert.equal(mutations, 0);
 });
 
+test('preserved remote access rejects incompatible direct, gateway, and computer upgrade targets before mutation', async () => {
+  assert.throws(
+    () => assertRemotePreviewUpgradeCompatibility('preview.example.test', 'alpha', undefined),
+    /does not declare dynamic-v1 preview access/,
+  );
+  assert.doesNotThrow(() => assertRemotePreviewUpgradeCompatibility(
+    'preview.example.test',
+    'alpha',
+    'dynamic-v1',
+  ));
+
+  const fixture = upgradeFixture(false);
+  fixture.config = ConfigSchema.parse({
+    ...fixture.config,
+    gateway: {
+      ...fixture.config.gateway,
+      exposure: previewExposureFixture(),
+    },
+  });
+  const plan = buildUpgradeAllPlan(planningInput(fixture));
+  let mutations = 0;
+
+  await assert.rejects(executeUpgradeAll(plan, fixture.config, {
+    confirm: async () => true,
+    replan: async () => plan,
+    acquireAndInspect: async (target) => {
+      const result = acquiredForExposure(target);
+      if (target.consumers.some(({ kind }) => kind === 'gateway')) delete result.gatewayExposureProtocol;
+      return result;
+    },
+    applyGatewayAndDefaults: async () => { mutations += 1; },
+    applyComputer: async () => { mutations += 1; },
+  }), /does not declare direct-tls-v1 support/);
+  assert.equal(mutations, 0);
+
+  await assert.rejects(executeUpgradeAll(plan, fixture.config, {
+    confirm: async () => true,
+    replan: async () => plan,
+    acquireAndInspect: async (target) => {
+      const result = acquiredForExposure(target);
+      if (target.consumers.some(({ kind }) => kind === 'computer')) delete result.previewAccessProtocol;
+      return result;
+    },
+    applyGatewayAndDefaults: async () => { mutations += 1; },
+    applyComputer: async () => { mutations += 1; },
+  }), /does not declare dynamic-v1 preview access/);
+  assert.equal(mutations, 0);
+});
+
 test('duplicate consumer or invalid immutable-content evidence blocks every mutation', async () => {
   const fixture = upgradeFixture(false);
   const plan = buildUpgradeAllPlan(planningInput(fixture));
@@ -642,6 +692,37 @@ function acquired(target: ExactUpgradeTarget): AcquiredUpgradeTarget {
     exactTarget: target.exactTarget,
     contentId: sha('f'),
     inspectedConsumers: target.consumers.map(({ id }) => id),
+  };
+}
+
+function acquiredForExposure(target: ExactUpgradeTarget): AcquiredUpgradeTarget {
+  const result = acquired(target);
+  if (target.consumers.some(({ kind }) => kind === 'gateway')) {
+    result.gatewayExposureProtocol = 'direct-tls-v1';
+  }
+  if (target.consumers.some(({ kind }) => kind === 'computer')) {
+    result.previewAccessProtocol = 'dynamic-v1';
+  }
+  return result;
+}
+
+function previewExposureFixture(): NonNullable<QubiclConfig['gateway']['exposure']> {
+  return {
+    protocol: 'direct-tls-v1',
+    bindAddress: '127.0.0.1',
+    port: 8443,
+    hostname: 'gateway.example.test',
+    allowedNetworks: ['127.0.0.0/8'],
+    trustedOrigins: ['https://gateway.example.test:8443'],
+    previewDomain: 'preview.example.test',
+    tls: {
+      id: 'a'.repeat(64),
+      certificateSha256: sha('a'),
+      privateKeySha256: sha('b'),
+      certificateFingerprint256: sha('c'),
+      certificateNotBefore: '2026-01-01T00:00:00.000Z',
+      certificateNotAfter: '2027-01-01T00:00:00.000Z',
+    },
   };
 }
 

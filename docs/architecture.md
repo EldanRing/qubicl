@@ -27,7 +27,7 @@ The Docker stages follow that same progression. The common headless layer carrie
 
 ### Gateway
 
-The normal `~/.qubicl` installation is one Compose project named `qubicl`. Its only published container is `gateway`; computer Compose services and containers use their literal Qubicl names, so Docker Desktop presents the same operator-facing structure as the CLI. The gateway binds to `127.0.0.1` (port `3211` by default) and reads a generated route file from a read-only mount. Explicit custom `QUBICL_HOME` installations instead derive Compose, container, and network names from the stable installation UUID, allowing isolated development/test installations to coexist on different host ports. The route contains external token hashes and per-computer internal credentials, not raw bearer tokens.
+The normal `~/.qubicl` installation is one Compose project named `qubicl`. Its only published container is `gateway`; computer Compose services and containers use their literal Qubicl names, so Docker Desktop presents the same operator-facing structure as the CLI. The gateway binds its HTTP listener to `127.0.0.1` (port `3211` by default) and reads a generated route file from a read-only mount. An explicit `gateway expose` transaction can add a second TLS-only host publication to the same process/container; the local mapping remains unchanged and no computer port is published. Explicit custom `QUBICL_HOME` installations instead derive Compose, container, and network names from the stable installation UUID, allowing isolated development/test installations to coexist on different host ports. The route contains external token hashes and per-computer internal credentials, not raw bearer tokens.
 
 For immutable ID `<id>`, applicable endpoints are:
 
@@ -36,7 +36,7 @@ For immutable ID `<id>`, applicable endpoints are:
 /computers/<id>/openapi.json
 /computers/<id>/health
 /computers/<id>/open-terminal/  Open WebUI native files and lease-safe tools
-/computers/<id>/previews/      authenticated loopback port previews
+/computers/<id>/previews/      authenticated local/isolated-remote previews
 /computers/<id>/view          viewer-capable presets only
 ```
 
@@ -62,6 +62,19 @@ The `browser`, `computer`, and `workstation` contracts expose the same bounded P
 Chromium runs as the unprivileged `qubicl` user with its Linux namespace and renderer seccomp-BPF sandboxes enabled. Browser-capable computer containers use Qubicl's pinned default-deny Chromium-compatible seccomp profile. That profile is based on the minimum-supported Docker 24.0 default allowlist, keeps later Docker's `io_uring` restriction, and adds only the precise `clone`/`unshare` namespace flag sets Chromium requires. The computer remains non-privileged, has no `SYS_ADMIN` or added capability, enables `no-new-privileges`, and uses the curated preset's dedicated 1 GiB shared-memory allocation instead of `--disable-dev-shm-usage`. The maintained source profile records each Qubicl-specific rule and is derived from [Moby's Apache-2.0 Docker 24.0 default seccomp profile](https://github.com/moby/moby/blob/v24.0.0/profiles/seccomp/default.json).
 
 The gateway authenticates the external token and reaches the controller on that computer's private network. The controller uses independently derived, localhost-only credentials for the runner processes. Exclusive leases carry an unguessable ID, fencing generation, and server epoch. Expiry, preemption, or control restart invalidates stale proofs and terminates tracked managed process groups. Human ownership follows the controlling viewer WebSocket: a 10-second grace period permits ordinary reconnects, after which the gateway releases abandoned control and retries release while a computer restarts. Because all computer functions share one PID namespace, this is a cooperative managed-process fence: an intentionally evasive process that daemonizes outside its tracked process group may survive until the computer container is restarted.
+
+Optional remote access is local state, not part of the portable manifest. Config
+stores the selected bind, external authority, CIDRs, trusted origins, and
+certificate metadata; protected secrets store the matching PEM snapshot. The
+transaction schema requires the two halves to match. Rendering writes fixed
+mode-`0600` runtime files beneath the gateway's existing read-only `/runtime`
+mount and conditionally adds target port `3216`; no new gateway mount or service
+is created. Current computer runtimes receive one stable, read-only per-computer
+preview-access mount so expose, renewal, and revoke can update preview URLs
+without recreating them. Running changes use the existing exact gateway-replacement journal and
+reattach only computers that were already running. Stopped and absent gateway
+state stays stopped or absent. Setup, image upgrade, and manifest apply preserve
+the host-local setting, while manifest export omits it.
 
 `web_search` and `web_extract` are ordinary lease-fenced tools. The first provider implementations are `ddgs` and `local`; their stable public schemas do not expose provider-specific responses. Direct extraction validates public DNS answers locally in developer mode or delegates that validation to the authenticated gateway egress service on private restricted networks; every redirect is revalidated, time, redirect, download, and decompressed-byte budgets are bounded, and supported content is parsed locally. HTML extraction then runs Trafilatura, readability-lxml only when the primary result is not meaningful, and finally a bounded structural heuristic over the same fetched bytes. Non-HTML handlers remain direct. Browser rendering reuses the computer's Chromium only for the established render modes and sparse/JavaScript signals, validates each HTTP(S) request, blocks non-public destinations, waits within a fixed content-stability budget, and sends at most 1.5 MB of sanitized rendered DOM through a localhost-authenticated route. The same Trafilatura/readability pipeline handles that DOM and may recover bounded high-signal JSON-LD, microdata, price attributes, and accessible market labels. It does not create another browser stack or expose page credentials, cookies, response headers, or arbitrary network responses. Tool policy, transport profile, network policy, and audit behavior are unchanged.
 

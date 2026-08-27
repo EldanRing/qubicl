@@ -141,6 +141,7 @@ export function connectionSnippet(options: ConnectionSnippetOptions): Connection
   }
   if (client === 'open-webui') {
     const baseUrl = openWebUiContainerUrl(options.endpoints.openapi).replace(/\/openapi\.json$/, '/open-terminal');
+    const remoteEndpoint = new URL(options.endpoints.openapi).protocol === 'https:';
     return {
       ...jsonSnippet(client, 'openapi', 'Open WebUI Admin Panel → Settings → Integrations → Open Terminal', false, {
         id: serverName,
@@ -154,7 +155,9 @@ export function connectionSnippet(options: ConnectionSnippetOptions): Connection
       }),
       activationHint: [
         'Add this as an admin Open Terminal connection and replace the key placeholder with the separately retrieved token; Open WebUI should detect it as a Terminal.',
-        'The generated host.docker.internal URL is for Docker Desktop. If Open WebUI runs directly on the host, use 127.0.0.1 instead.',
+        remoteEndpoint
+          ? 'The generated HTTPS URL is the explicitly configured remote gateway endpoint; its certificate and network policy must be reachable from Open WebUI.'
+          : 'The generated host.docker.internal URL is for Docker Desktop. If Open WebUI runs directly on the host, use 127.0.0.1 instead.',
         'This compatibility exposes Qubicl files, file-backed chat uploads, lease-safe tools, and explicitly published port previews, but intentionally does not advertise an interactive PTY.',
       ].join(' '),
     };

@@ -6,7 +6,10 @@ import { createServer } from 'node:net';
 import YAML from 'yaml';
 import {
   ComputerManifestSchema,
+  COMPUTER_PREVIEW_ACCESS_PROTOCOL,
   GATEWAY_PROTOCOL_VERSION,
+  GATEWAY_EXTERNAL_CONTAINER_PORT,
+  GATEWAY_EXPOSURE_PROTOCOL,
   IMAGE_CATALOG,
   MIN_DOCKER_COMPOSE_VERSION,
   MIN_DOCKER_ENGINE_VERSION,
@@ -14,6 +17,8 @@ import {
   RuntimeRoutesSchema,
   VIEWER_AUTHENTICATION_HEADER_V1,
   capabilitiesForCompatibility,
+  gatewayExposureRuntime,
+  gatewayExposureRuntimeId,
   manifestSha256,
   normalizeDockerPlatform,
   viewerForCapabilities,
@@ -29,7 +34,7 @@ import {
 } from '@qubicl/core';
 import { atomicWrite, durableRemove, type LoadedState } from './state.js';
 import { packagedAssetsPath } from './assets.js';
-import { COMPUTER_RUNTIME_TOPOLOGY_VERSION, LEGACY_SPLIT_CONTROL_PROTOCOL_VERSION, LEGACY_VIEWER_AUTHENTICATION, computerContainerName, computerEgressContainerName, computerEgressServiceName, computerExecutorContainerName, computerExecutorServiceName, computerRuntimeContainerNames, computerServiceName, computerSessionContainerName, computerSessionServiceName, computerSshContainerName, computerWebContainerName, computerWebServiceName, containerName, controlNetwork, displaySocketVolume, gatewayContainerName, gatewayNetworkName, hostIdentity, projectName, readRuntimeImageContracts, recordRuntimeImageContracts, runtimeImageReference, serviceName, usesUnifiedComputerRuntime, workspaceNetwork, type RuntimeImageContract, type RuntimeImageContractsDocument } from './runtime.js';
+import { COMPUTER_RUNTIME_TOPOLOGY_VERSION, LEGACY_SPLIT_CONTROL_PROTOCOL_VERSION, LEGACY_VIEWER_AUTHENTICATION, PREVIEW_ACCESS_CONTAINER_DIRECTORY, PREVIEW_ACCESS_CONTAINER_PATH, PREVIEW_ACCESS_RUNTIME_DIRECTORY, computerContainerName, computerEgressContainerName, computerEgressServiceName, computerExecutorContainerName, computerExecutorServiceName, computerRuntimeContainerNames, computerServiceName, computerSessionContainerName, computerSessionServiceName, computerSshContainerName, computerWebContainerName, computerWebServiceName, containerName, controlNetwork, displaySocketVolume, gatewayContainerName, gatewayNetworkName, hostIdentity, projectName, readRuntimeImageContracts, recordRuntimeImageContracts, runtimeImageReference, serviceName, usesUnifiedComputerRuntime, workspaceNetwork, type RuntimeImageContract, type RuntimeImageContractsDocument } from './runtime.js';
 
 export interface RunOptions {
   cwd?: string;
@@ -84,7 +89,7 @@ export interface RuntimeInspection {
   Image?: string;
   State?: { Status?: string; Health?: { Status?: string } };
   Config?: { Labels?: Record<string, string> | null; Env?: string[] | null };
-  Mounts?: Array<{ Source?: string; Destination?: string }>;
+  Mounts?: Array<{ Type?: string; Source?: string; Destination?: string; RW?: boolean }>;
 }
 
 export interface LegacyRuntimeMigrationAdapter {
@@ -119,6 +124,8 @@ export interface InspectedComputerImage {
 export interface RuntimeImageCompatibility {
   contentId?: `sha256:${string}`;
   gatewayProtocolVersion?: number;
+  gatewayExposureProtocol?: typeof GATEWAY_EXPOSURE_PROTOCOL;
+  previewAccessProtocol?: typeof COMPUTER_PREVIEW_ACCESS_PROTOCOL;
   viewerAuthentication?: ViewerAuthentication;
 }
 
@@ -897,12 +904,16 @@ function imageAssetsPath(): string {
 }
 
 export async function acquireCatalogGateway(options: AcquireOptions = {}): Promise<ImageIdentity> {
+  return (await acquireCatalogGatewayContract(options)).identity;
+}
+
+export async function acquireCatalogGatewayContract(options: AcquireOptions = {}): Promise<InspectedGatewayImage> {
   const catalog = options.catalog ?? IMAGE_CATALOG;
   const platform = options.platform ?? catalog.supportedPlatforms[0]!;
   const variant = catalog.gateway.platforms[platform];
   if (!variant) throw new Error(`Gateway image is unavailable for ${platform}.`);
   await obtainImage(catalog.gateway.requested, variant.resolved, { ...options, kind: 'gateway' });
-  return inspectGatewayImage(catalog.gateway.requested, variant.resolved, VIEWER_AUTHENTICATION_HEADER_V1);
+  return inspectGatewayImageContract(catalog.gateway.requested, variant.resolved, VIEWER_AUTHENTICATION_HEADER_V1);
 }
 
 export async function acquireCatalogPreset(preset: Preset, options: AcquireOptions = {}): Promise<InspectedComputerImage> {
@@ -996,17 +1007,25 @@ export function gatewayCompatibilityFromLabels(
 ): RuntimeImageCompatibility {
   const rawProtocol = labels['dev.qubicl.gateway-protocol-version'];
   const rawAuthentication = labels['dev.qubicl.viewer-authentication'];
-  if (rawProtocol === undefined && rawAuthentication === undefined) {
+  const rawExposure = labels['dev.qubicl.gateway-exposure'];
+  if (rawProtocol === undefined && rawAuthentication === undefined && rawExposure === undefined) {
     if (expectedViewerAuthentication) throw new Error(`Gateway image ${reference} is missing its authenticated-viewer contract labels.`);
     return {};
   }
   if (rawProtocol !== `${GATEWAY_PROTOCOL_VERSION}` || rawAuthentication !== VIEWER_AUTHENTICATION_HEADER_V1) {
     throw new Error(`Gateway image ${reference} has an invalid authenticated-viewer contract (${JSON.stringify(rawProtocol)}, ${JSON.stringify(rawAuthentication)}).`);
   }
+  if (rawExposure !== undefined && rawExposure !== GATEWAY_EXPOSURE_PROTOCOL) {
+    throw new Error(`Gateway image ${reference} has an invalid remote-exposure contract ${JSON.stringify(rawExposure)}.`);
+  }
   if (expectedViewerAuthentication && rawAuthentication !== expectedViewerAuthentication) {
     throw new Error(`Gateway image ${reference} viewer authentication is ${JSON.stringify(rawAuthentication)}; expected ${JSON.stringify(expectedViewerAuthentication)}.`);
   }
-  return { gatewayProtocolVersion: GATEWAY_PROTOCOL_VERSION, viewerAuthentication: VIEWER_AUTHENTICATION_HEADER_V1 };
+  return {
+    gatewayProtocolVersion: GATEWAY_PROTOCOL_VERSION,
+    viewerAuthentication: VIEWER_AUTHENTICATION_HEADER_V1,
+    ...(rawExposure === GATEWAY_EXPOSURE_PROTOCOL ? { gatewayExposureProtocol: GATEWAY_EXPOSURE_PROTOCOL } : {}),
+  };
 }
 
 export async function inspectComputerImage(
@@ -1051,6 +1070,11 @@ export async function inspectComputerImage(
     manifest.viewer,
     expectedViewerAuthentication,
   );
+  const previewAccessProtocol = computerPreviewAccessFromLabels(
+    requested,
+    inspection.labels,
+    inspection.env,
+  );
   return {
     identity: {
       requested,
@@ -1060,8 +1084,26 @@ export async function inspectComputerImage(
     },
     manifest,
     labels: inspection.labels,
-    compatibility: { contentId: inspection.id, ...(viewerAuthentication ? { viewerAuthentication } : {}) },
+    compatibility: {
+      contentId: inspection.id,
+      ...(viewerAuthentication ? { viewerAuthentication } : {}),
+      ...(previewAccessProtocol ? { previewAccessProtocol } : {}),
+    },
   };
+}
+
+export function computerPreviewAccessFromLabels(
+  reference: string,
+  labels: Readonly<Record<string, string>>,
+  environment: readonly string[],
+): typeof COMPUTER_PREVIEW_ACCESS_PROTOCOL | undefined {
+  const label = labels['dev.qubicl.preview-access'];
+  const baked = imageEnvironmentValue(environment, 'QUBICL_IMAGE_PREVIEW_ACCESS');
+  if (label === undefined && baked === undefined) return undefined;
+  if (label !== COMPUTER_PREVIEW_ACCESS_PROTOCOL || baked !== COMPUTER_PREVIEW_ACCESS_PROTOCOL) {
+    throw new Error(`Image ${reference} has a mismatched dynamic preview-access contract (${JSON.stringify(label)}, ${JSON.stringify(baked)}).`);
+  }
+  return COMPUTER_PREVIEW_ACCESS_PROTOCOL;
 }
 
 export function computerViewerAuthentication(
@@ -1159,7 +1201,9 @@ function computerContractFromCompatibility(compatibility: RuntimeImageCompatibil
 
 function gatewayContractFromCompatibility(compatibility: RuntimeImageCompatibility): RuntimeImageContract | undefined {
   if (!compatibility.contentId) return undefined;
-  if (compatibility.viewerAuthentication === undefined && compatibility.gatewayProtocolVersion === undefined) {
+  if (compatibility.viewerAuthentication === undefined
+    && compatibility.gatewayProtocolVersion === undefined
+    && compatibility.gatewayExposureProtocol === undefined) {
     return {
       kind: 'gateway',
       contentId: compatibility.contentId,
@@ -1167,7 +1211,9 @@ function gatewayContractFromCompatibility(compatibility: RuntimeImageCompatibili
     };
   }
   if (compatibility.viewerAuthentication !== VIEWER_AUTHENTICATION_HEADER_V1
-    || compatibility.gatewayProtocolVersion !== GATEWAY_PROTOCOL_VERSION) {
+    || compatibility.gatewayProtocolVersion !== GATEWAY_PROTOCOL_VERSION
+    || (compatibility.gatewayExposureProtocol !== undefined
+      && compatibility.gatewayExposureProtocol !== GATEWAY_EXPOSURE_PROTOCOL)) {
     throw new Error(`Gateway image ${compatibility.contentId} has an inconsistent runtime viewer contract.`);
   }
   return {
@@ -1175,6 +1221,9 @@ function gatewayContractFromCompatibility(compatibility: RuntimeImageCompatibili
     contentId: compatibility.contentId,
     viewerAuthentication: VIEWER_AUTHENTICATION_HEADER_V1,
     gatewayProtocolVersion: GATEWAY_PROTOCOL_VERSION,
+    ...(compatibility.gatewayExposureProtocol === GATEWAY_EXPOSURE_PROTOCOL
+      ? { gatewayExposureProtocol: GATEWAY_EXPOSURE_PROTOCOL }
+      : {}),
   };
 }
 
@@ -1268,6 +1317,74 @@ async function recoverGatewayImageContract(
   return gatewayContractFromEvidence(contentId, state.config.gateway.image.resolved, image.labels);
 }
 
+export async function assertConfiguredGatewaySupportsExposure(
+  state: LoadedState,
+  adapter: RuntimeImageContractEvidenceAdapter = defaultRuntimeImageContractEvidenceAdapter(),
+): Promise<void> {
+  const contentId = state.config.gateway.image.contentId;
+  if (!contentId) {
+    throw new Error(`Gateway image ${state.config.gateway.image.resolved} is not bound to immutable content evidence. Run qubicl upgrade --all before enabling remote access.`);
+  }
+  const cached = (await readRuntimeImageContracts(state)).images[contentId];
+  const contract = cached?.kind === 'gateway' && cached.gatewayExposureProtocol === GATEWAY_EXPOSURE_PROTOCOL
+    ? cached
+    : await recoverGatewayImageContract(state, adapter);
+  if (contract.gatewayExposureProtocol !== GATEWAY_EXPOSURE_PROTOCOL) {
+    throw new Error(`Gateway image ${state.config.gateway.image.resolved} does not declare ${GATEWAY_EXPOSURE_PROTOCOL} support. Run qubicl upgrade --all before enabling remote access.`);
+  }
+}
+
+export async function assertConfiguredComputersSupportRemotePreviews(
+  state: LoadedState,
+  adapter: RuntimeImageContractEvidenceAdapter = defaultRuntimeImageContractEvidenceAdapter(),
+): Promise<void> {
+  for (const computer of state.config.computers) {
+    const configuredContentId = computer.image.contentId;
+    if (!configuredContentId) {
+      throw new Error(`Computer ${computer.name} is not bound to immutable image evidence required for remote previews. Run qubicl upgrade --all before enabling a remote preview domain.`);
+    }
+    const contentId = configuredContentId as `sha256:${string}`;
+    const name = computerContainerName(state, computer);
+    const retained = await adapter.inspectContainer(name);
+    if (retained) {
+      verifyManagedComputer(state, computer.id, retained, name);
+      if (retained.Image !== contentId) {
+        throw new Error(`Retained computer ${computer.name} was created from ${retained.Image ?? 'an unknown image'}, not its configured content ID ${contentId}. Refusing to enable remote previews.`);
+      }
+      if (computerPreviewAccessFromLabels(
+        `${computer.image.resolved} (${contentId})`,
+        retained.Config?.Labels ?? {},
+        retained.Config?.Env ?? [],
+      ) !== COMPUTER_PREVIEW_ACCESS_PROTOCOL) {
+        throw new Error(`Computer image ${computer.image.resolved} for ${computer.name} does not declare ${COMPUTER_PREVIEW_ACCESS_PROTOCOL} preview access. Run qubicl upgrade --all before enabling a remote preview domain.`);
+      }
+      const expectedSource = join(state.paths.runtime, PREVIEW_ACCESS_RUNTIME_DIRECTORY, computer.id);
+      const previewMounts = (retained.Mounts ?? []).filter(({ Destination }) => Destination === PREVIEW_ACCESS_CONTAINER_DIRECTORY);
+      if (previewMounts.length !== 1
+        || previewMounts[0]?.Type !== 'bind'
+        || previewMounts[0].RW !== false
+        || !previewMounts[0].Source
+        || !sameDockerBindSource(previewMounts[0].Source, expectedSource)
+        || !(retained.Config?.Env ?? []).includes(`QUBICL_PREVIEW_ACCESS_PATH=${PREVIEW_ACCESS_CONTAINER_PATH}`)) {
+        throw new Error(`Retained computer ${computer.name} does not have the managed read-only dynamic preview-access mount. Upgrade or recreate it before enabling a remote preview domain.`);
+      }
+      continue;
+    }
+
+    const image = await adapter.inspectImage(contentId);
+    if (!image || image.id !== contentId) {
+      throw new Error(`Computer ${computer.name} has no locally inspectable exact image ${contentId} for remote preview verification. Restore or reacquire it before enabling a remote preview domain.`);
+    }
+    if (computerPreviewAccessFromLabels(
+      `${computer.image.resolved} (${contentId})`,
+      image.labels,
+      image.env,
+    ) !== COMPUTER_PREVIEW_ACCESS_PROTOCOL) {
+      throw new Error(`Computer image ${computer.image.resolved} for ${computer.name} does not declare ${COMPUTER_PREVIEW_ACCESS_PROTOCOL} preview access. Run qubicl upgrade --all before enabling a remote preview domain.`);
+    }
+  }
+}
+
 async function resolveConfiguredViewerContracts(
   state: LoadedState,
   cache: RuntimeImageContractsDocument,
@@ -1345,10 +1462,20 @@ export async function ensureRuntimeImages(
   evidenceAdapter: RuntimeImageContractEvidenceAdapter = defaultRuntimeImageContractEvidenceAdapter(),
 ): Promise<void> {
   const gateway = await ensure(state.config.gateway.image, 'gateway', undefined, offline);
+  if (state.config.gateway.exposure && gateway.gatewayExposureProtocol !== GATEWAY_EXPOSURE_PROTOCOL) {
+    throw new Error(`Gateway image ${state.config.gateway.image.resolved} does not declare ${GATEWAY_EXPOSURE_PROTOCOL} support required by the preserved remote-access configuration. Revoke remote access before selecting this gateway image, or choose a compatible gateway.`);
+  }
   const inspectedComputers = await Promise.all(computers.map(async (computer) => ({
     computer,
     compatibility: await ensure(computer.image, 'computer', computer.compatibility, offline),
   })));
+  if (state.config.gateway.exposure?.previewDomain) {
+    for (const { computer, compatibility } of inspectedComputers) {
+      if (compatibility.previewAccessProtocol !== COMPUTER_PREVIEW_ACCESS_PROTOCOL) {
+        throw new Error(`Computer image ${computer.image.resolved} for ${computer.name} does not declare ${COMPUTER_PREVIEW_ACCESS_PROTOCOL} preview access required by the preserved remote preview domain. Upgrade the image or revoke/reconfigure remote previews first.`);
+      }
+    }
+  }
   if (gateway.viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1
     && (!state.config.gateway.image.contentId || gateway.contentId !== state.config.gateway.image.contentId)) {
     throw new Error(`Authenticated-viewer gateway ${state.config.gateway.image.resolved} is not bound to its stored content ID.`);
@@ -1549,17 +1676,41 @@ export async function dockerDiskUsage(): Promise<string> {
 }
 
 export async function startGateway(state: LoadedState): Promise<void> {
-  await assertGatewayPort(state);
+  await assertGatewayPorts(state);
   await compose(state, ['up', '--detach', '--no-deps', 'gateway']);
   await waitForContainerHealthy(gatewayContainerName(state.config.installationId, state.paths.root), 'Gateway');
 }
 
-export async function verifyGatewayCompatibility(state: LoadedState, skipComputerIds: readonly string[] = []): Promise<void> {
+export async function verifyGatewayCompatibility(
+  state: LoadedState,
+  skipComputerIds: readonly string[] = [],
+  options: { allowUnavailableExposure?: boolean } = {},
+): Promise<void> {
   const routes = RuntimeRoutesSchema.parse(JSON.parse(await readFile(state.paths.routes, 'utf8')));
-  if (routes.routes.some(({ viewerAuthentication }) => viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1)) {
+  if (routes.routes.some(({ viewerAuthentication }) => viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1)
+    || state.config.gateway.exposure) {
     const response = await fetch(`http://127.0.0.1:${state.config.gateway.port}/health`, { signal: AbortSignal.timeout(5_000) });
     if (!response.ok) throw new Error(`Gateway capability check failed with HTTP ${response.status}.`);
-    assertGatewayHealthCompatibility(await response.json());
+    const health = await response.json();
+    if (routes.routes.some(({ viewerAuthentication }) => viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1)) {
+      assertGatewayHealthCompatibility(health);
+    }
+    if (state.config.gateway.exposure) {
+      const external = (health as { external?: unknown } | null)?.external as {
+        configured?: unknown;
+        ready?: unknown;
+        protocol?: unknown;
+      } | undefined;
+      const knownUnavailable = external?.configured === true
+        && external.ready === false
+        && external.protocol === 'direct-tls-v1';
+      if (!knownUnavailable || !options.allowUnavailableExposure) {
+        assertGatewayExposureHealth(
+          health,
+          gatewayExposureRuntimeId(gatewayExposureRuntime(state.config.gateway.exposure)),
+        );
+      }
+    }
   }
   // Compose may recreate the shared gateway for an image, port, label, or
   // binary-version change from any lifecycle command. Reattach every running
@@ -1574,6 +1725,21 @@ export async function verifyGatewayCompatibility(state: LoadedState, skipCompute
     if (runtime.group === 'complete' && runtime.status === 'running') {
       await connectComputerToGateway(state, computer);
     }
+  }
+}
+
+export function assertGatewayExposureHealth(value: unknown, expectedConfigurationId?: string): void {
+  const external = (value as { external?: unknown } | null)?.external as {
+    configured?: unknown;
+    ready?: unknown;
+    protocol?: unknown;
+    configurationId?: unknown;
+  } | undefined;
+  if (!external || external.configured !== true || external.ready !== true || external.protocol !== 'direct-tls-v1') {
+    throw new Error('Running gateway did not confirm the configured direct TLS listener; the exposure transaction remains pending recovery.');
+  }
+  if (expectedConfigurationId !== undefined && external.configurationId !== expectedConfigurationId) {
+    throw new Error('Running gateway confirmed a different direct TLS configuration; the exposure transaction remains pending recovery.');
   }
 }
 
@@ -1600,6 +1766,173 @@ export async function assertGatewayPort(state: LoadedState): Promise<void> {
     if (Number.parseInt(published, 10) === state.config.gateway.port) return;
   } catch { /* a different process owns the port */ }
   throw new Error(`Gateway port 127.0.0.1:${state.config.gateway.port} is already in use. Choose another with --gateway-port.`);
+}
+
+export async function assertGatewayPorts(state: LoadedState): Promise<void> {
+  await assertGatewayPort(state);
+  const exposure = state.config.gateway.exposure;
+  if (!exposure) return;
+  if (exposure.port === state.config.gateway.port) {
+    throw new Error(`External TLS port ${exposure.port} must differ from the local gateway port.`);
+  }
+  if (await portAvailable(exposure.port, exposure.bindAddress)) return;
+  try {
+    const inspected = JSON.parse(await docker([
+      'container', 'inspect', gatewayContainerName(state.config.installationId, state.paths.root),
+    ])) as Array<{ HostConfig?: { PortBindings?: Record<string, Array<{ HostIp?: string; HostPort?: string }> | null> } }>;
+    const bindings = inspected[0]?.HostConfig?.PortBindings?.[`${GATEWAY_EXTERNAL_CONTAINER_PORT}/tcp`] ?? [];
+    if (bindings.length === 1
+      && bindings[0]?.HostIp === exposure.bindAddress
+      && Number(bindings[0]?.HostPort) === exposure.port) return;
+  } catch { /* a different process owns the configured external port */ }
+  throw new Error(`Gateway TLS port ${exposure.bindAddress}:${exposure.port} is already in use.`);
+}
+
+export interface GatewayExternalPublication {
+  hostIp?: string;
+  hostPort?: number;
+  target?: 'external-tls' | 'local-http' | 'unexpected';
+  verificationIssue?:
+    | 'publish-all-ports'
+    | 'host-runtime-mismatch'
+    | 'unsafe-local-publication'
+    | 'ambiguous-publication'
+    | 'unexpected-publication';
+  detail?: string;
+}
+
+interface GatewayPublicationInspection {
+  State?: { Running?: boolean };
+  HostConfig?: {
+    PublishAllPorts?: boolean;
+    PortBindings?: Record<string, Array<{ HostIp?: string; HostPort?: string }> | null | undefined>;
+  };
+  NetworkSettings?: {
+    Ports?: Record<string, Array<{ HostIp?: string; HostPort?: string }> | null | undefined>;
+  };
+}
+
+export function gatewayExternalPublicationFromInspection(
+  inspection: GatewayPublicationInspection,
+  expectedLocalPort?: number,
+): GatewayExternalPublication | undefined {
+  const target = `${GATEWAY_EXTERNAL_CONTAINER_PORT}/tcp`;
+  const planned = singleGatewayPublication(inspection.HostConfig?.PortBindings?.[target], 'configured');
+  const actual = singleGatewayPublication(inspection.NetworkSettings?.Ports?.[target], 'observed');
+  const running = inspection.State?.Running === true;
+  const publishAllPorts = inspection.HostConfig?.PublishAllPorts === true;
+  const localTarget = '3211/tcp';
+  const plannedLocal = expectedLocalPort === undefined
+    ? undefined
+    : singleGatewayPublication(inspection.HostConfig?.PortBindings?.[localTarget], 'configured local HTTP');
+  const actualLocal = expectedLocalPort === undefined
+    ? undefined
+    : singleGatewayPublication(inspection.NetworkSettings?.Ports?.[localTarget], 'observed local HTTP');
+  const expectedLocal = expectedLocalPort === undefined
+    ? undefined
+    : { hostIp: '127.0.0.1', hostPort: expectedLocalPort };
+  if (planned?.verificationIssue || actual?.verificationIssue) {
+    return { ...(actual?.verificationIssue ? actual : planned!), target: 'external-tls' };
+  }
+  if (plannedLocal?.verificationIssue || actualLocal?.verificationIssue) {
+    return { ...(actualLocal?.verificationIssue ? actualLocal : plannedLocal!), target: 'local-http' };
+  }
+  const localVerified = expectedLocalPort === undefined
+    || (sameGatewayPublication(plannedLocal, expectedLocal)
+      && (running ? sameGatewayPublication(actualLocal, expectedLocal) : actualLocal === undefined));
+  if (publishAllPorts) {
+    const publication = actual ?? planned ?? actualLocal ?? plannedLocal ?? expectedLocal;
+    return {
+      ...publication,
+      target: actual || planned ? 'external-tls' : actualLocal || plannedLocal ? 'local-http' : 'unexpected',
+      verificationIssue: 'publish-all-ports',
+      ...(!publication ? { detail: 'Docker PublishAllPorts is enabled without an identifiable publication.' } : {}),
+    };
+  }
+  const unexpectedTargets = new Set<string>();
+  for (const [unexpectedTarget, bindings] of Object.entries(inspection.HostConfig?.PortBindings ?? {})) {
+    if (![target, localTarget].includes(unexpectedTarget) && (bindings?.length ?? 0) > 0) {
+      unexpectedTargets.add(unexpectedTarget);
+    }
+  }
+  for (const [unexpectedTarget, bindings] of Object.entries(inspection.NetworkSettings?.Ports ?? {})) {
+    if (![target, localTarget].includes(unexpectedTarget) && (bindings?.length ?? 0) > 0) {
+      unexpectedTargets.add(unexpectedTarget);
+    }
+  }
+  if (unexpectedTargets.size > 0) {
+    return {
+      target: 'unexpected',
+      verificationIssue: 'unexpected-publication',
+      detail: `Unexpected gateway target publication(s): ${[...unexpectedTargets].sort().join(', ')}.`,
+    };
+  }
+  let external: GatewayExternalPublication | undefined;
+  if (!running && planned && !actual) external = planned;
+  else if (!running && !planned && !actual) external = undefined;
+  else if (sameGatewayPublication(planned, actual)) external = actual ?? planned;
+  else {
+    const publication = actual ?? planned;
+    if (publication) external = { ...publication, verificationIssue: 'host-runtime-mismatch' };
+  }
+  if (!localVerified) {
+    const publication = external ?? actualLocal ?? plannedLocal ?? expectedLocal!;
+    return {
+      ...publication,
+      target: external ? 'external-tls' : 'local-http',
+      verificationIssue: 'unsafe-local-publication',
+    };
+  }
+  return external;
+}
+
+export async function inspectGatewayExternalPublication(state: LoadedState): Promise<GatewayExternalPublication | undefined> {
+  const name = gatewayContainerName(state.config.installationId, state.paths.root);
+  const inspected = JSON.parse(await docker(['container', 'inspect', name])) as Array<{
+    Name?: unknown;
+    State?: { Running?: boolean };
+    HostConfig?: {
+      PublishAllPorts?: boolean;
+      PortBindings?: Record<string, Array<{ HostIp?: string; HostPort?: string }> | null>;
+    };
+    NetworkSettings?: { Ports?: Record<string, Array<{ HostIp?: string; HostPort?: string }> | null> };
+  }>;
+  if (inspected.length !== 1 || inspected[0]?.Name !== `/${name}`) {
+    throw new Error(`Docker returned an ambiguous gateway inspection while checking external publication for ${name}.`);
+  }
+  return gatewayExternalPublicationFromInspection(inspected[0], state.config.gateway.port);
+}
+
+function singleGatewayPublication(
+  bindings: Array<{ HostIp?: string; HostPort?: string }> | null | undefined,
+  label: string,
+): GatewayExternalPublication | undefined {
+  if (!bindings?.length) return undefined;
+  if (bindings.length !== 1 || typeof bindings[0]?.HostIp !== 'string' || !/^\d+$/u.test(bindings[0].HostPort ?? '')) {
+    return {
+      verificationIssue: 'ambiguous-publication',
+      detail: `Gateway has ambiguous ${label} port publications.`,
+    };
+  }
+  const hostPort = Number(bindings[0].HostPort);
+  if (!Number.isInteger(hostPort) || hostPort < 1 || hostPort > 65_535) {
+    return {
+      verificationIssue: 'ambiguous-publication',
+      detail: `Gateway ${label} publication has an invalid host port.`,
+    };
+  }
+  return { hostIp: bindings[0].HostIp, hostPort };
+}
+
+function sameGatewayPublication(
+  left: GatewayExternalPublication | undefined,
+  right: GatewayExternalPublication | undefined,
+): boolean {
+  return left === undefined && right === undefined
+    || left !== undefined && right !== undefined
+      && left.verificationIssue === undefined && right.verificationIssue === undefined
+      && left.hostIp !== undefined && left.hostPort !== undefined
+      && left.hostIp === right.hostIp && left.hostPort === right.hostPort;
 }
 
 export async function startComputer(state: LoadedState, computer: ComputerConfig): Promise<void> {
@@ -1889,6 +2222,7 @@ export async function replaceStoppedGatewayRuntime(
   if (source) {
     await docker(['rm', source.id]);
   }
+  await assertGatewayPorts(state);
   await compose(state, ['create', '--no-deps', 'gateway']);
   const replacement = await strictLifecycleContainerInspection(name);
   if (!replacement) throw new Error('Stopped gateway replacement was not created.');

@@ -83,7 +83,16 @@ export const defaultTransactionRuntime: TransactionRuntime = {
     await startGateway(state);
   },
   replaceStoppedGateway: replaceStoppedGatewayRuntime,
-  verifyGateway: verifyGatewayCompatibility,
+  // A malformed or expired external TLS snapshot is fail-closed by the
+  // gateway. Let the durable transaction finish only when the v0.2 gateway
+  // explicitly reports that known-unavailable state, so `gateway revoke` or
+  // renewal cannot be blocked behind an unrecoverable journal. Direct
+  // lifecycle commands still treat external unavailability as an error.
+  verifyGateway: (state, skipComputerIds) => verifyGatewayCompatibility(
+    state,
+    skipComputerIds,
+    { allowUnavailableExposure: true },
+  ),
   reconnect: reconnectComputerAfterGateway,
   waitForRemoval: waitForGatewayRemoval,
   remove: removeComputerRuntime,

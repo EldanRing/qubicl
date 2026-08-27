@@ -232,9 +232,18 @@ qubicl connect qubicl-1 --client generic --transport http
 qubicl connect qubicl-1 --client generic --transport openapi
 ```
 
-Qubicl stays bound to `127.0.0.1`. Do not change it to `0.0.0.0` for WSL
-convenience. Mirrored networking is optional and is not required for the
-supported Windows-to-WSL localhost path.
+Qubicl stays bound to `127.0.0.1` by default. Do not enable remote exposure for
+ordinary Windows-to-WSL convenience; mirrored networking is optional and is
+not required for the supported localhost path.
+
+If a separate remote client genuinely needs access, use the confirmed
+`qubicl gateway expose` workflow rather than editing Compose or replacing the
+local bind. Direct TLS exposure through WSL/Docker Desktop is best-effort until
+the candidate is exercised on that exact networking mode. Windows, WSL, and
+Docker Desktop NAT can change the peer address seen in the container, so a CIDR
+allowlist may fail closed; verify `gateway status`, TLS from the intended
+client, and the Windows firewall manually. See [Optional remote
+access](remote-access.md).
 
 ## Candidate acceptance matrix
 
@@ -253,14 +262,20 @@ requires all of the following on the candidate bytes:
 5. Complete one WSL-local stdio session and one Windows-hosted stdio session.
    Use different adapters if available so the result is not client-specific.
 6. Exercise direct HTTP MCP or OpenAPI from a Windows-hosted client.
-7. Restart Docker Desktop. Verify the gateway, the running/stopped container
+7. Complete the versioned remote-access row from a Windows-hosted client:
+   expose a TLS listener, record the non-loopback address families and whether
+   the source and container-observed peer were the same or NAT-translated,
+   exercise every required remote surface and boundary, then revoke it without
+   changing the local listener or durable data. Do not retain the raw network
+   addresses in release evidence.
+8. Restart Docker Desktop. Verify the gateway, the running/stopped container
    policy, route health, and durable-home contents.
-8. Run `npm run test:reboot:prepare`, execute `wsl --shutdown` from PowerShell,
+9. Run `npm run test:reboot:prepare`, execute `wsl --shutdown` from PowerShell,
    reopen WSL after Docker integration is ready, then run
    `npm run test:reboot:verify` and `npm run test:reboot:cleanup`.
-9. Reboot Windows once and repeat doctor, health, client reconnection, viewer,
+10. Reboot Windows once and repeat doctor, health, client reconnection, viewer,
    and durable-home checks.
-10. Confirm setup rejects a disposable test `QUBICL_HOME` on `/mnt/c`, while
+11. Confirm setup rejects a disposable test `QUBICL_HOME` on `/mnt/c`, while
     unit coverage rejects WSL 1, missing interop for Windows stdio, and
     Windows-backed mount-table fixtures.
 

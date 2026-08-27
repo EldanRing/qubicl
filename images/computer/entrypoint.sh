@@ -146,6 +146,8 @@ start_control_as_user() {
   )
   if [[ -v QUBICL_SESSION_URL ]]; then control_env+=(QUBICL_SESSION_URL="$QUBICL_SESSION_URL"); fi
   if [[ -v QUBICL_SESSION_KEY ]]; then control_env+=(QUBICL_SESSION_KEY="$QUBICL_SESSION_KEY"); fi
+  if [[ -v QUBICL_PREVIEW_ACCESS_PATH ]]; then control_env+=(QUBICL_PREVIEW_ACCESS_PATH="$QUBICL_PREVIEW_ACCESS_PATH"); fi
+  if [[ -v QUBICL_REMOTE_PREVIEW_BASE ]]; then control_env+=(QUBICL_REMOTE_PREVIEW_BASE="$QUBICL_REMOTE_PREVIEW_BASE"); fi
   if [[ -v QUBICL_MANIFEST_PATH ]]; then control_env+=(QUBICL_MANIFEST_PATH="$QUBICL_MANIFEST_PATH"); fi
   if [[ "${QUBICL_TOKEN_METRICS:-0}" == 1 ]]; then control_env+=(QUBICL_TOKEN_METRICS=1); fi
   if [[ -v DISPLAY ]]; then control_env+=(DISPLAY="$DISPLAY"); fi

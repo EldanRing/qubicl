@@ -43,6 +43,7 @@ import {
 } from './prompts.js';
 import { runImagePreflight, runSetupPreflight, type PreflightResult } from './preflight.js';
 import { buildSetupPlan, sameSetupSnapshot, snapshotSetup, type SetupSelections } from './setup-plan.js';
+import { gatewayEndpointSet, type GatewayEndpointSet } from './gateway-access.js';
 import {
   loadState,
   prepareStateDirectories,
@@ -72,6 +73,7 @@ export interface SetupResult {
     mcp: string;
     openapi: string;
     view?: string;
+    remote?: GatewayEndpointSet;
   };
   warnings: string[];
 }
@@ -180,7 +182,11 @@ export async function setupCommand(args: ParsedArgs, injectedPrompt?: SetupPromp
       phase(write, 'saving configuration');
       await prepareStateDirectories(paths);
       const state: LoadedState = current ?? { paths, config: defaultConfig(), secrets: defaultSecrets() };
-      state.config.gateway = { port: plan.gateway.port, image: gatewayIdentity };
+      state.config.gateway = {
+        port: plan.gateway.port,
+        image: gatewayIdentity,
+        ...(state.config.gateway.exposure ? { exposure: structuredClone(state.config.gateway.exposure) } : {}),
+      };
       state.config.defaults = defaultContract;
       let computer: ComputerConfig | undefined;
       if (plan.createName) computer = addConfiguredComputer(state, plan.createName, defaultContract);
@@ -575,7 +581,8 @@ function phase(write: (message: string) => void, name: string): void {
 }
 
 export function buildSetupResult(state: LoadedState, computer: ComputerConfig | undefined, running: boolean, warnings: string[]): SetupResult {
-  const endpoints = computer ? computerEndpoints(state, computer) : undefined;
+  const endpoints = computer ? gatewayEndpointSet(state.config.gateway, computer, 'local') : undefined;
+  const remote = computer ? gatewayEndpointSet(state.config.gateway, computer, 'remote') : undefined;
   return {
     ok: true,
     stateRoot: state.paths.root,
@@ -595,14 +602,10 @@ export function buildSetupResult(state: LoadedState, computer: ComputerConfig | 
       mcp: endpoints.mcp,
       openapi: endpoints.openapi,
       ...(computer.capabilities.includes('viewer') ? { view: endpoints.view } : {}),
+      ...(remote ? { remote } : {}),
     } : null,
     warnings,
   };
-}
-
-function computerEndpoints(state: LoadedState, computer: ComputerConfig): { mcp: string; openapi: string; view: string } {
-  const base = `http://127.0.0.1:${state.config.gateway.port}/computers/${computer.id}`;
-  return { mcp: `${base}/mcp`, openapi: `${base}/openapi.json`, view: `${base}/view` };
 }
 
 export function printHandoff(result: SetupResult, write: (message: string) => void): void {
@@ -614,6 +617,7 @@ export function printHandoff(result: SetupResult, write: (message: string) => vo
     write(`MCP: ${result.computer.mcp}`);
     write(`OpenAPI: ${result.computer.openapi}`);
     if (result.computer.view) write(`Viewer: ${result.computer.view}`);
+    if (result.computer.remote) write(`Remote HTTPS: ${result.computer.remote.origin}`);
     write(`Client adapter: qubicl connect ${result.computer.name} --client codex (other adapters are available)`);
     write(`HTTP authentication: qubicl token show ${result.computer.name}`);
     write('Direct MCP/OpenAPI URLs require that bearer token. The local stdio bridge reads it from protected Qubicl state.');

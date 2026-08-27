@@ -161,7 +161,7 @@ export const toolDefinitions = {
     lease: true,
   },
   publish_port: {
-    description: 'Publish a listener as an expiring authenticated loopback preview.',
+    description: 'Publish a listener as an expiring authenticated preview; returns the local URL and, when configured, an isolated remote URL.',
     input: leaseOnly.extend({
       port: z.number().int().min(1).max(65_535),
       expiresInSeconds: z.number().int().min(60).max(86_400).default(3600),

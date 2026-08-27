@@ -36,6 +36,7 @@ test('authenticated previews proxy HTTP, establish a private cookie, and revoke 
     '127.0.0.1',
     'http://127.0.0.1:3211/computers/example/previews',
     'http://gateway:3211/computers/example/previews',
+    'https://preview-example.remote.test/computers/example/previews',
   );
   const front = createServer((request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
@@ -47,6 +48,10 @@ test('authenticated previews proxy HTTP, establish a private cookie, and revoke 
     const id = publication.id as string;
     const token = new URL(publication.url as string).searchParams.get('token');
     assert.ok(token);
+    assert.equal(
+      publication.remoteUrl,
+      `https://preview-example.remote.test/computers/example/previews/${id}/?token=${encodeURIComponent(token)}`,
+    );
     assert.equal((await fetch(`http://127.0.0.1:${frontPort}/_qubicl/previews/${id}/hello`)).status, 401);
 
     const authenticated = await fetch(`http://127.0.0.1:${frontPort}/_qubicl/previews/${id}/hello?answer=42&token=${encodeURIComponent(token)}`, {
@@ -61,6 +66,8 @@ test('authenticated previews proxy HTTP, establish a private cookie, and revoke 
     const withCookie = await fetch(`http://127.0.0.1:${frontPort}/_qubicl/previews/${id}/again`, { headers: { cookie: cookie!.split(';')[0]! } });
     assert.equal(withCookie.status, 200);
     assert.equal(manager.list().length, 1);
+    assert.equal(manager.list()[0]?.url, `http://127.0.0.1:3211/computers/example/previews/${id}/`);
+    assert.equal(manager.list()[0]?.remoteUrl, `https://preview-example.remote.test/computers/example/previews/${id}/`);
     manager.clear();
     assert.equal((await fetch(`http://127.0.0.1:${frontPort}/_qubicl/previews/${id}/again`, { headers: { cookie: cookie!.split(';')[0]! } })).status, 401);
   } finally {

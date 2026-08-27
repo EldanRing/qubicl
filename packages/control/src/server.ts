@@ -137,13 +137,29 @@ export const controlServer = createServer(async (request, response) => {
 });
 
 controlServer.on('upgrade', (request, socket, head) => {
-  const url = new URL(request.url ?? '/', 'http://control.internal');
-  if (!authenticated(request) || typeof request.headers['x-qubicl-gateway-epoch'] !== 'string') {
-    socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-    return;
-  }
-  if (!executor.previews.handleUpgrade(request, socket, head, url)) socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+  void handleUpgrade(request, socket, head);
 });
+
+async function handleUpgrade(request: IncomingMessage, socket: import('node:stream').Duplex, head: Buffer): Promise<void> {
+  try {
+    const url = new URL(request.url ?? '/', 'http://control.internal');
+    const gatewayEpoch = request.headers['x-qubicl-gateway-epoch'];
+    if (!authenticated(request) || typeof gatewayEpoch !== 'string') {
+      socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      return;
+    }
+    // Reset gateway-scoped preview capabilities before checking the upgrade
+    // token. HTTP and WebSocket entrypoints must observe an epoch transition
+    // through the same ordered fence.
+    await executor.observeGatewayEpoch(gatewayEpoch);
+    if (!executor.previews.handleUpgrade(request, socket, head, url)) {
+      socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+    }
+  } catch (error) {
+    console.error(error);
+    socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+  }
+}
 
 function authenticated(request: IncomingMessage): boolean {
   const received = request.headers['x-qubicl-internal-key'];

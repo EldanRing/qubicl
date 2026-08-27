@@ -252,3 +252,18 @@ best-effort. macOS rows require Docker Desktop restart evidence. Native Windows
 and WSL 1 remain unsupported. The matrix records policy—it does not claim that
 new physical-host runs occurred—so every schema-4 row still needs post-freeze,
 hash-bound evidence from the frozen candidate before signing.
+
+Remote gateway support adds a third immutable contract:
+`remote-access-v1.json`. Schema 4 requires one post-freeze row on native Linux
+x64, Apple Silicon Docker Desktop, and Windows 11 x64 through WSL 2/Docker
+Desktop. Each row records non-loopback source and container-observed address
+families plus an exact same/different comparison for direct or NAT-translated
+behavior, exact client/browser versions, TLS identity,
+and passing results for remote MCP HTTP, OpenAPI, Open Terminal, viewer static
+and WebSocket traffic, and isolated HTTP/WebSocket previews. The exact security,
+lifecycle, local-loopback preservation, revoke, doctor/status, mTLS, CIDR,
+origin, bearer-isolation, and durable-data checks are mandatory, as is the
+top-level `remoteGateway` workflow and `remoteExposure` security-review topic.
+Focused source tests cannot substitute for these physical-host and real-client
+records. Raw source and observed network addresses are excluded from published
+evidence so the release record does not disclose local network topology.

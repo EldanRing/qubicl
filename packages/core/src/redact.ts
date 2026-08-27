@@ -1,4 +1,4 @@
-const secretKey = /^(?:token|internalKey|authorization|secret|password|.*(?:Key|Token|Secret|Password))$/i;
+const secretKey = /^(?:token|internalKey|authorization|secret|password|.*(?:PrivateKey|Key|Token|Secret|Password).*)$/i;
 const bearerToken = /qubicl_[A-Za-z0-9_-]{32,}/g;
 const qubiclSecretEnvironment = /^(QUBICL_[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD))=/u;
 

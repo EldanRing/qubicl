@@ -28,6 +28,37 @@ test('argument parsing accepts configuration, connection, setup display, and JSO
   assert.throws(() => parseArgs(['--show-secrets']), /Unknown option/);
 });
 
+test('argument parsing accepts explicit gateway exposure controls without treating values as flags', () => {
+  const parsed = parseArgs([
+    '--bind', '0.0.0.0',
+    '--port', '443',
+    '--hostname', 'gateway.example.test',
+    '--cert', '/tmp/certificate.pem',
+    '--key', '/tmp/private-key.pem',
+    '--client-ca', '/tmp/client-ca.pem',
+    '--allow-networks', '192.0.2.0/24,2001:db8::/32',
+    '--trusted-origins', 'https://client.example.test',
+    '--preview-domain', 'preview.example.test',
+    '--access', 'remote',
+    '--all-interfaces',
+    '--allow-all-clients',
+  ]);
+  assert.equal(parsed.options.get('bind'), '0.0.0.0');
+  assert.equal(parsed.options.get('port'), '443');
+  assert.equal(parsed.options.get('hostname'), 'gateway.example.test');
+  assert.equal(parsed.options.get('cert'), '/tmp/certificate.pem');
+  assert.equal(parsed.options.get('key'), '/tmp/private-key.pem');
+  assert.equal(parsed.options.get('client-ca'), '/tmp/client-ca.pem');
+  assert.equal(parsed.options.get('allow-networks'), '192.0.2.0/24,2001:db8::/32');
+  assert.equal(parsed.options.get('trusted-origins'), 'https://client.example.test');
+  assert.equal(parsed.options.get('preview-domain'), 'preview.example.test');
+  assert.equal(parsed.options.get('access'), 'remote');
+  assert.equal(parsed.options.get('all-interfaces'), true);
+  assert.equal(parsed.options.get('allow-all-clients'), true);
+  assert.throws(() => parseArgs(['--all-interfaces=yes']), /does not take a value/);
+  assert.throws(() => parseArgs(['--allow-all-clients=yes']), /does not take a value/);
+});
+
 test('skills enable supports both an import flag and a policy value', () => {
   assert.equal(parseArgs(['--enable', '--yes']).options.get('enable'), true);
   assert.equal(parseArgs(['--enable', 'plan']).options.get('enable'), 'plan');

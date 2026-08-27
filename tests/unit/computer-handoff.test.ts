@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { CORE_SKILL_IDS, defaultCatalogSkillsForCompatibility, defaultConfig, defaultSecrets, presetDefaults } from '@qubicl/core';
 import { buildComputerConnectionResult, printComputerHandoff } from '../../packages/cli/dist/computer-handoff.js';
 import { addConfiguredComputer } from '../../packages/cli/dist/computers.js';
+import { buildGatewayExposureConfig } from '../../packages/cli/dist/gateway-access.js';
 import { statePaths } from '../../packages/cli/dist/state.js';
 
 function computerFor(preset: 'file-system' | 'browser' | 'computer' | 'workstation') {
@@ -52,4 +53,38 @@ test('computer create JSON result stays structured and contains literal terminal
   assert.equal(result.openapi, `http://127.0.0.1:4321/computers/${result.id}/openapi.json`);
   assert.equal('view' in result, false);
   assert.doesNotMatch(encoded, /\]\(http/);
+});
+
+test('computer handoff adds complete remote endpoints only when exposure is configured', () => {
+  const computer = computerFor('workstation');
+  const exposure = buildGatewayExposureConfig({
+    bindAddress: '0.0.0.0',
+    port: 443,
+    hostname: 'gateway.example.test',
+    allowedNetworks: ['192.0.2.0/24'],
+    previewDomain: 'preview.example.test',
+    tls: {
+      id: '1'.repeat(64),
+      certificateSha256: `sha256:${'2'.repeat(64)}`,
+      privateKeySha256: `sha256:${'3'.repeat(64)}`,
+      certificateFingerprint256: `sha256:${'4'.repeat(64)}`,
+      certificateNotBefore: '2026-01-01T00:00:00.000Z',
+      certificateNotAfter: '2126-01-01T00:00:00.000Z',
+    },
+  });
+  const result = buildComputerConnectionResult(4321, computer, true, exposure);
+  assert.deepEqual(result.remote, {
+    origin: 'https://gateway.example.test',
+    health: `https://gateway.example.test/computers/${computer.id}/health`,
+    mcp: `https://gateway.example.test/computers/${computer.id}/mcp`,
+    openapi: `https://gateway.example.test/computers/${computer.id}/openapi.json`,
+    openTerminal: `https://gateway.example.test/computers/${computer.id}/open-terminal`,
+    view: `https://gateway.example.test/computers/${computer.id}/view`,
+    previewBase: `https://preview-${computer.id}.preview.example.test/computers/${computer.id}/previews`,
+  });
+  assert.equal(result.mcp, `http://127.0.0.1:4321/computers/${computer.id}/mcp`);
+  const output: string[] = [];
+  printComputerHandoff(result, (line) => output.push(line));
+  assert.match(output.join('\n'), /Remote HTTPS: https:\/\/gateway\.example\.test/u);
+  assert.doesNotMatch(output.join('\n'), /certificate|private key|bearer/i);
 });

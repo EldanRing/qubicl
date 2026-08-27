@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import {
+  COMPUTER_PREVIEW_ACCESS_PROTOCOL,
   ComputerDefaultsSchema,
   CURATED_PRESETS,
+  GATEWAY_EXPOSURE_PROTOCOL,
   catalogImageIdentity,
   presetDefaults,
   type ComputerConfig,
@@ -469,6 +471,18 @@ export interface AcquiredUpgradeTarget {
   exactTarget: string;
   contentId: `sha256:${string}`;
   inspectedConsumers: string[];
+  previewAccessProtocol?: typeof COMPUTER_PREVIEW_ACCESS_PROTOCOL;
+  gatewayExposureProtocol?: typeof GATEWAY_EXPOSURE_PROTOCOL;
+}
+
+export function assertRemotePreviewUpgradeCompatibility(
+  previewDomain: string | undefined,
+  computerName: string,
+  previewAccessProtocol: typeof COMPUTER_PREVIEW_ACCESS_PROTOCOL | undefined,
+): void {
+  if (previewDomain && previewAccessProtocol !== COMPUTER_PREVIEW_ACCESS_PROTOCOL) {
+    throw new Error(`Computer image selected for ${computerName} does not declare ${COMPUTER_PREVIEW_ACCESS_PROTOCOL} preview access required by the preserved remote preview domain. Choose a compatible image or revoke/reconfigure remote previews first.`);
+  }
 }
 
 export interface GatewayAndDefaultsMutation {
@@ -550,6 +564,8 @@ export async function executeUpgradeAll(
     assertAcquiredTarget(target, result);
     acquired.set(target.exactTarget, structuredClone(result));
   }
+  assertPreservedGatewayExposureTarget(plan, config, acquired);
+  assertPreservedRemotePreviewTargets(plan, config, acquired);
 
   const steps = mutationSteps(plan);
   const completed: string[] = [];
@@ -819,6 +835,37 @@ function assertAcquiredTarget(target: ExactUpgradeTarget, result: AcquiredUpgrad
   const inspected = [...result.inspectedConsumers].sort(compareText);
   if (JSON.stringify(inspected) !== JSON.stringify(expected)) {
     throw new Error(`Exact target ${target.exactTarget} was not inspected for every consumer (expected ${expected.join(', ') || 'none'}; inspected ${inspected.join(', ') || 'none'}).`);
+  }
+}
+
+function assertPreservedRemotePreviewTargets(
+  plan: UpgradeAllPlan,
+  config: QubiclConfig,
+  acquired: ReadonlyMap<string, AcquiredUpgradeTarget>,
+): void {
+  if (!config.gateway.exposure?.previewDomain) return;
+  for (const row of plan.rows) {
+    if (row.kind !== 'computer' || (row.action !== 'upgrade' && row.action !== 'repair-content-drift')) continue;
+    const target = row.targetImage?.resolved;
+    assertRemotePreviewUpgradeCompatibility(
+      config.gateway.exposure.previewDomain,
+      row.name,
+      target ? acquired.get(target)?.previewAccessProtocol : undefined,
+    );
+  }
+}
+
+function assertPreservedGatewayExposureTarget(
+  plan: UpgradeAllPlan,
+  config: QubiclConfig,
+  acquired: ReadonlyMap<string, AcquiredUpgradeTarget>,
+): void {
+  if (!config.gateway.exposure) return;
+  const gateway = plan.rows.find(({ key }) => key === 'gateway');
+  if (!gateway || (gateway.action !== 'upgrade' && gateway.action !== 'repair-content-drift')) return;
+  const target = gateway.targetImage?.resolved;
+  if (!target || acquired.get(target)?.gatewayExposureProtocol !== GATEWAY_EXPOSURE_PROTOCOL) {
+    throw new Error(`Gateway image selected for upgrade does not declare ${GATEWAY_EXPOSURE_PROTOCOL} support required by the preserved remote-access configuration. Revoke remote access first or use a compatible gateway image.`);
   }
 }
 

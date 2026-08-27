@@ -82,6 +82,19 @@ The `http` and `openapi` shortcuts select those transports directly. Their heade
 
 Run the token command separately only when a local HTTP/OpenAPI client needs it. Treat that output as a password: do not commit it, paste it into an issue, or expose it in shell history or screenshots.
 
+When the operator has explicitly configured the optional TLS listener, select
+the remote endpoint instead of silently changing existing adapters:
+
+```sh
+qubicl connect computer-name --client generic --transport http --access remote
+qubicl connect computer-name --client generic --transport openapi --access remote
+```
+
+Remote mode still prints only a token placeholder. Stdio remains local and
+token-free; combining stdio with `--access remote` is rejected. Browser-hosted
+clients must use an exact HTTPS origin included in the gateway's
+`--trusted-origins` policy. See [Optional remote access](remote-access.md).
+
 ## Open WebUI on the same computer
 
 Qubicl presents each computer as an isolated Open Terminal-compatible service for Open WebUI:
@@ -111,7 +124,7 @@ On `browser`, `computer`, and `workstation` presets, that tool list includes nav
 
 Open Terminal serves both desktop and browser screenshot operations as native `image/png` responses. MCP likewise uses native image content and keeps only dimensions and other small metadata in structured/text results, avoiding a second base64 copy in the model context.
 
-The generated URL uses Docker Desktop's `host.docker.internal` route so the Open WebUI backend can reach the host-loopback Qubicl gateway without joining a Qubicl-managed network. If Open WebUI runs directly on the host rather than in Docker, replace that hostname with `127.0.0.1`. Qubicl remains bound only to localhost. Open WebUI stores the separately retrieved per-computer bearer token in its admin connection settings; restrict the connection's Open WebUI access grants accordingly.
+The default generated URL uses Docker Desktop's `host.docker.internal` route so the Open WebUI backend can reach the host-loopback Qubicl gateway without joining a Qubicl-managed network. If Open WebUI runs directly on the host rather than in Docker, replace that hostname with `127.0.0.1`. A deliberately remote Open WebUI deployment can instead use the separately configured TLS origin; include its exact browser origin in `--trusted-origins` and keep the per-computer token restricted to the intended connection. Open WebUI stores the separately retrieved token in its admin settings; restrict the connection's Open WebUI access grants accordingly.
 
 Compatibility intentionally reports `terminal: false` and `notebooks: false`, while advertising its existing `/system` guidance endpoint. It provides bounded non-PTY process management and ZIP download, not an interactive terminal emulator or notebooks. Process count, lifetime, command/input, queued stdin, retained records, output pages, per-process output, and aggregate output are capped; record or byte exhaustion marks paged output as truncated, and expired/deleted records fence surviving members before removal. ZIP input stays below `/home/qubicl`, rejects links and special files, and applies path, entry, ancestry-metadata, file, aggregate-byte, output, creation-time, and transfer-time limits. At most two ZIP creations/downloads can reserve output space on one computer at once. Open WebUI's `/ports` and `/proxy/{port}/...` routes expose only live ports that were explicitly published through Qubicl; an arbitrary listener never becomes reachable merely because it exists. Existing MCP, OpenAPI, viewer, and human-control routes remain unchanged.
 
@@ -120,7 +133,10 @@ Compatibility intentionally reports `terminal: false` and `notebooks: false`, wh
 - Qubicl and the selected computer must be running.
 - Stdio adapters require the local `qubicl` executable.
 - Direct URLs require the computer's bearer token.
-- The gateway binds to localhost. A hosted service cannot reach it unless the operator deliberately designs separate secure remote access; Qubicl does not provide or configure that path.
+- The gateway binds to localhost by default. A hosted service can use Qubicl's
+  explicit TLS listener only after the operator configures the interface,
+  certificate, client networks, and trusted origins; Qubicl does not configure
+  DNS, firewalls, or tunnels.
 - A `file-system` computer has MCP/OpenAPI tools but no viewer. Use `browser`, `computer`, or `workstation` when human viewing is required.
 
 Run `qubicl doctor` for connection failures. Run `qubicl token rotate computer-name` if a token may have been exposed.
@@ -154,3 +170,9 @@ file, and its detached signature binds the final acceptance JSON. Qubicl does
 not download clients, inspect online version feeds, or manufacture these
 results. Maintainers must supply the real-client binaries/accounts and retain
 the actual post-freeze evidence before a v0.2 acceptance bundle can pass.
+
+Remote support is separately bound by the versioned
+[remote-access requirements](../conformance/remote-access-v1.json). Those rows
+exercise real remote MCP HTTP, OpenAPI, Open Terminal, viewer, and isolated
+preview traffic on the required native-Linux and Docker Desktop/NAT host paths;
+passing the local client matrix alone cannot satisfy that gate.

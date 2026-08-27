@@ -37,7 +37,7 @@ your model or agent
         │
         │  MCP / OpenAPI / Open Terminal
         ▼
- localhost-only Qubicl gateway
+ local-by-default Qubicl gateway
         │
         ├── terminal + managed processes
         ├── durable, host-visible files
@@ -148,6 +148,13 @@ previews without joining Open WebUI's Docker network.
 
 See [Client setup](docs/clients.md) for exact instructions.
 
+The gateway remains on `127.0.0.1` unless the host operator explicitly enables
+a second TLS-only listener with `qubicl gateway expose`. That opt-in uses the
+same gateway container, requires certificate, interface, network, and browser
+origin policy, and persists until `qubicl gateway revoke`. Binding
+`0.0.0.0` requires the additional `--all-interfaces` acknowledgement. See
+[Optional remote access](docs/remote-access.md) before making it reachable.
+
 ## Watch and take over
 
 ```sh
@@ -193,7 +200,8 @@ qubicl control release computer-name
 
 ## Built for daily use
 
-- Publish an agent-started local web app through an authenticated loopback preview.
+- Publish an agent-started web app through an authenticated local preview and,
+  when explicitly configured, a separately isolated remote preview origin.
 - Back up, verify, encrypt, restore, clone, and checkpoint durable homes.
 - Preview and deliberately wipe one durable Chromium profile without deleting Downloads.
 - Apply `offline`, `web-only`, `developer`, or custom egress policies.
@@ -219,7 +227,8 @@ check, telemetry, image pull, or automatic mutation.
 Qubicl keeps every computer inside one explicit Docker resource and filesystem
 boundary. Computers run without privileged mode, a Docker socket, host
 namespaces, arbitrary mounts, or passwordless elevation. The gateway listens
-only on `127.0.0.1`; Chromium retains its Linux namespace and renderer
+only on `127.0.0.1` by default; an operator can deliberately add a distinct
+TLS-only listener without exposing computer ports. Chromium retains its Linux namespace and renderer
 seccomp-BPF sandboxes; model-facing files are confined to the durable home.
 Controller and workload processes share the computer container, so human
 takeover is a cooperative managed-process fence rather than a hostile-code boundary.
@@ -245,7 +254,7 @@ matrix is authoritative. Back up important computer homes before upgrades.
 
 | Topic | Guide |
 | --- | --- |
-| Architecture and boundaries | [Architecture](docs/architecture.md) · [Security model](docs/security-model.md) |
+| Architecture and boundaries | [Architecture](docs/architecture.md) · [Security model](docs/security-model.md) · [Optional remote access](docs/remote-access.md) |
 | Persistence and recovery | [Persistence](docs/persistence.md) · [Troubleshooting](docs/troubleshooting.md) |
 | Host platforms | [Platform support](docs/platforms.md) · [Windows Subsystem for Linux](docs/wsl.md) |
 | Clients and workflows | [Client setup](docs/clients.md) · [Daily-driver workflows](docs/daily-driver.md) |

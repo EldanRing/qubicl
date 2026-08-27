@@ -1,7 +1,16 @@
-import type { ComputerConfig } from '@qubicl/core';
+import type { ComputerConfig, GatewayExposureConfig } from '@qubicl/core';
+import { gatewayEndpointSet } from './gateway-access.js';
 
-export function buildComputerConnectionResult(gatewayPort: number, computer: ComputerConfig, running: boolean) {
+export function buildComputerConnectionResult(
+  gatewayPort: number,
+  computer: ComputerConfig,
+  running: boolean,
+  exposure?: GatewayExposureConfig,
+) {
   const base = `http://127.0.0.1:${gatewayPort}/computers/${computer.id}`;
+  const remote = exposure
+    ? gatewayEndpointSet({ port: gatewayPort, exposure }, computer, 'remote')
+    : undefined;
   return {
     name: computer.name,
     id: computer.id,
@@ -15,6 +24,7 @@ export function buildComputerConnectionResult(gatewayPort: number, computer: Com
     mcp: `${base}/mcp`,
     openapi: `${base}/openapi.json`,
     ...(computer.capabilities.includes('viewer') ? { view: `${base}/view` } : {}),
+    ...(remote ? { remote } : {}),
     stdio: `qubicl mcp ${computer.name}`,
     tokenCommand: `qubicl token show ${computer.name}`,
   };
@@ -26,5 +36,6 @@ export function printComputerHandoff(result: ComputerConnectionResult, write: (m
   write(`Computer: ${result.name} (${result.id})${result.running ? ' is healthy' : ' is configured but stopped'}.`);
   write(`Preferred token-free stdio bridge: ${result.stdio}`);
   if (result.view) write(`Viewer: ${result.view}`);
+  if (result.remote) write(`Remote HTTPS: ${result.remote.origin}`);
   write(`Client adapter: qubicl connect ${result.name} --client codex (other adapters are available)`);
 }

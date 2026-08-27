@@ -6,7 +6,37 @@ Start with:
 qubicl doctor
 ```
 
-Doctor audits host/runtime versions, local Docker context, protected state, pending recovery, exact images and drift, localhost routing, capability manifests, mounts, limits, privileges, and networks. `--json` is available for scripts.
+Doctor audits host/runtime versions, local Docker context, protected state, pending recovery, exact images and drift, localhost routing, optional TLS exposure state/publications, capability manifests, mounts, limits, privileges, and networks. `--json` is available for scripts.
+
+## Remote gateway exposure
+
+Start with the read-only report:
+
+```sh
+qubicl gateway status --json
+qubicl doctor
+```
+
+If exposure is configured but unavailable, confirm that the selected address is
+still assigned, the external port is free, the certificate is current and
+covers the configured hostname, and the configured gateway image declares
+`direct-tls-v1`. If it does not, run `qubicl status` and `qubicl upgrade --all`
+before retrying. Re-run `qubicl gateway expose` with the intended certificate
+to renew or correct it. Use `qubicl gateway revoke` to return to loopback-only
+operation; it also detects and previews stale managed publication/key state.
+If `--preview-domain` is rejected for a computer, update its curated image with
+`qubicl upgrade --all` or provide a custom image that declares the exact
+`dynamic-v1` preview-access contract and recreate that retained runtime.
+
+An external TLS probe can fail with `network_not_allowed` when the CIDR list
+does not include the socket peer observed inside the gateway. Docker Desktop or
+host NAT may replace the original client address. Do not trust
+`X-Forwarded-For` as a workaround: Qubicl intentionally ignores it. Prefer a
+specific host interface and use TLS, bearer authentication, and optionally a
+client CA. Verify DNS, router, and host firewall rules yourself; doctor reports
+them as manual because Qubicl does not control those systems. Remote previews
+also require wildcard DNS and certificate coverage for the configured preview
+domain.
 
 ## Setup preflight fails
 
