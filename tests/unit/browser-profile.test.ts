@@ -285,22 +285,22 @@ test('mount boundary checks reject exact, descendant, file, stacked, and same-de
 });
 
 test('macOS mount parsing preserves raw paths and rejects ambiguous delimiters', async () => {
-  const profile = '/Users/operator/Qubicl/browser profile';
+  const profile = '/Users/user/Qubicl/browser profile';
   const output = [
     '/dev/disk3s1 on / (apfs, local, journaled)',
     `/dev/disk3s2 on ${profile} (apfs, local)`,
-    '/dev/disk3s3 on /Users/operator/literal\\040name (apfs, local)',
+    '/dev/disk3s3 on /Users/user/literal\\040name (apfs, local)',
   ].join('\n') + '\n';
   const parsed = parseMacOsMountTable(output);
   assert.ok(parsed.includes(profile));
-  assert.ok(parsed.includes('/Users/operator/literal\\040name'));
+  assert.ok(parsed.includes('/Users/user/literal\\040name'));
   await assert.rejects(assertNoBrowserProfileMountBoundaries(profile, macMountSource(output)), /host mount point/iu);
   await assert.doesNotReject(assertNoBrowserProfileMountBoundaries(
     profile,
-    macMountSource('/dev/disk3s1 on / (apfs, local)\n/dev/disk3s2 on /Users/operator/sibling (apfs, local)\n'),
+    macMountSource('/dev/disk3s1 on / (apfs, local)\n/dev/disk3s2 on /Users/user/sibling (apfs, local)\n'),
   ));
   assert.throws(
-    () => parseMacOsMountTable('/dev/source on ambiguous on /Users/operator (apfs, local)\n'),
+    () => parseMacOsMountTable('/dev/source on ambiguous on /Users/user (apfs, local)\n'),
     /ambiguous or malformed/iu,
   );
   assert.throws(() => parseMacOsMountTable('/dev/root on / (apfs, local)'), /truncated|malformed/iu);
