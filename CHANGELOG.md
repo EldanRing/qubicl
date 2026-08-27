@@ -2,6 +2,17 @@
 
 All notable Qubicl changes are recorded here. Supported releases will follow Semantic Versioning and Keep a Changelog.
 
+## Unreleased
+
+### Fixed
+
+- Multi-platform release candidates now scan independently filtered amd64 and
+  arm64 OCI views and reject retained Trivy reports whose image configuration,
+  compressed layers, or rootfs diff IDs do not match the selected platform.
+- Failed late-stage candidates can be preserved and resumed through verification
+  only, without rebuilding, rescanning, or rerunning artifact acceptance; all
+  candidate verification remains pinned to the clean reviewed revision.
+
 ## 0.1.1 - 2026-08-27
 
 ### Fixed

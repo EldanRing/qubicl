@@ -32,6 +32,29 @@ test('candidate catalog identity rejects stale version, revision, and source', a
   }), /source/);
 });
 
+test('candidate verification facts stay bound to one clean reviewed revision', async () => {
+  const { assertReviewedRevisionFacts } = await import(evidenceModule);
+  const candidate = {
+    version: '1.2.3',
+    revision: 'a'.repeat(40),
+    created: '2026-08-27T12:00:00-04:00',
+    source: 'https://github.com/example/qubicl',
+  };
+  const facts = {
+    head: candidate.revision,
+    clean: true,
+    version: candidate.version,
+    created: candidate.created,
+    source: `${candidate.source}.git`,
+  };
+  assert.doesNotThrow(() => assertReviewedRevisionFacts(facts, candidate));
+  assert.throws(() => assertReviewedRevisionFacts({ ...facts, head: 'b'.repeat(40) }, candidate), /HEAD/);
+  assert.throws(() => assertReviewedRevisionFacts({ ...facts, clean: false }, candidate), /clean/);
+  assert.throws(() => assertReviewedRevisionFacts({ ...facts, version: '1.2.4' }, candidate), /version/);
+  assert.throws(() => assertReviewedRevisionFacts({ ...facts, created: '2026-08-27T12:00:01-04:00' }, candidate), /timestamp/);
+  assert.throws(() => assertReviewedRevisionFacts({ ...facts, source: 'https://github.com/other/qubicl' }, candidate), /source repository/);
+});
+
 test('Trivy reports reject absolute and traversing builder paths', async () => {
   const { assertTrivyReportPrivacy } = await import(evidenceModule);
   assert.doesNotThrow(() => assertTrivyReportPrivacy({

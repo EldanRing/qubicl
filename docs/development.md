@@ -87,7 +87,25 @@ For the strict supported-release policy:
 npm run candidate:local
 ```
 
-The builder creates five multi-architecture OCI archives (gateway plus four presets), checks contracts/provenance/SBOM, runs ten Trivy platform reports, generates exact digest/size catalog data, then builds/tests the npm and native artifacts against those exact bytes. Output remains ignored under `release/candidates/`; there is no push, publish, tag, release, or visibility operation.
+The builder creates five multi-architecture OCI archives (gateway plus four
+presets), checks contracts/provenance/SBOM, and scans independently filtered
+amd64 and arm64 OCI views. Each retained Trivy report must match the selected
+manifest, configuration, compressed layers, and rootfs diff IDs. The builder
+then generates exact digest/size catalog data and builds/tests the npm and native
+artifacts against those exact bytes. Output remains ignored under
+`release/candidates/`; there is no push, publish, tag, release, or visibility
+operation.
+
+If a complete late-stage candidate is preserved under
+`release/candidates/.failed-*`, return to its clean reviewed revision and run:
+
+```sh
+npm run candidate:resume -- release/candidates/.failed-VERSION-REVISION-TARGET.PID
+```
+
+Resume verifies and promotes the unchanged candidate. It does not rebuild
+images, rerun Trivy, or rerun artifact acceptance; incomplete staging remains
+diagnostic-only.
 
 Additional native hosts must use the exact generated catalog:
 

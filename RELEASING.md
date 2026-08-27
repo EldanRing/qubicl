@@ -88,28 +88,34 @@ npm run candidate:release
 
 If a late candidate check fails, Qubicl preserves the staging directory under
 `release/candidates/.failed-*` instead of deleting completed images, scans, and
-packages. After correcting a verification-only problem, resume without rebuilding:
+packages. After correcting an external verification-only condition, return to
+the same clean reviewed revision and resume without rebuilding:
 
 ```sh
 npm run candidate:resume -- release/candidates/.failed-VERSION-REVISION-TARGET.PID
 ```
 
-Resume verifies the complete preserved candidate before promoting it. If failure
-occurred before the manifest and checksums were complete, the directory remains
-available for diagnosis or explicit cleanup but cannot be promoted.
+Resume runs only the complete candidate verifier before promoting the unchanged
+bytes; it does not rebuild images, rerun Trivy, or rerun artifact acceptance. If
+failure occurred before the manifest and checksums were complete, the directory
+remains available for diagnosis or explicit cleanup but cannot be promoted.
 
 `candidate:release` first exports the reviewed commit into a disposable clean
 worktree, runs a fresh `npm ci`, and retains lockfile, registry, installed-tree,
-audit, and registry-signature evidence. It then creates the five multi-platform image archives first,
-generates their exact catalog, builds npm/native artifacts once against that
-catalog, scans everything, and reruns source/npm/native acceptance against the
-staged bytes. It writes an ignored candidate beneath:
+audit, and registry-signature evidence. It then creates the five multi-platform
+image archives first, generates their exact catalog, builds npm/native artifacts
+once against that catalog, and reruns source/npm/native acceptance against the
+staged bytes. Each amd64/arm64 Trivy run receives its own one-manifest OCI view;
+the builder verifies the selected index, manifest, configuration, compressed
+layers, rootfs diff IDs, and report identity before retaining the report. It
+writes an ignored candidate beneath:
 
 ```text
 release/candidates/0.1.0-<revision>/linux-x64/
 ```
 
-Verify it without rebuilding:
+From the same clean reviewed revision, verify it without rebuilding or rerunning
+acceptance:
 
 ```sh
 node scripts/verify-candidate.mjs /path/to/candidate

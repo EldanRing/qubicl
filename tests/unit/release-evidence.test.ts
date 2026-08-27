@@ -95,7 +95,13 @@ test('Trivy bindings reject reports detached from exact OCI identities', async (
     layerDigests: [`sha256:${'3'.repeat(64)}`],
     diffIds: [`sha256:${'4'.repeat(64)}`],
   };
-  const report = { SchemaVersion: 2, ArtifactType: 'container_image', Metadata: { ImageID: platform.configDigest, DiffIDs: platform.diffIds } };
+  const report = {
+    SchemaVersion: 2,
+    ArtifactName: '.scan-gateway.oci',
+    ArtifactType: 'container_image',
+    Metadata: { ImageID: platform.configDigest, DiffIDs: platform.diffIds },
+    Results: [],
+  };
   const expected = {
     reportName: 'trivy-gateway-linux-amd64.json', reportSha256: '5'.repeat(64), archiveName: 'qubicl-gateway.oci.tar', archiveSha256: '6'.repeat(64),
     image: 'gateway', platform: 'linux/amd64', measured: { indexDigest: `sha256:${'7'.repeat(64)}`, platforms: { 'linux/amd64': platform } },
@@ -110,6 +116,81 @@ test('Trivy bindings reject reports detached from exact OCI identities', async (
   assert.doesNotThrow(() => assertTrivyScanBinding(binding, report, expected));
   assert.throws(() => assertTrivyScanBinding({ ...binding, ociArchiveSha256: '8'.repeat(64) }, report, expected), /exact OCI archive/);
   assert.throws(() => assertTrivyScanBinding(binding, { ...report, Metadata: { ...report.Metadata, ImageID: `sha256:${'9'.repeat(64)}` } }, expected), /ImageID/);
+});
+
+test('filtered Trivy bindings reject mismatched platform config, layers, and diff IDs', async () => {
+  const { assertTrivyScanBinding } = await import(pathToFileURL(join(root, 'scripts', 'candidate-evidence.mjs')).href);
+  const platform = {
+    digest: `sha256:${'1'.repeat(64)}`,
+    configDigest: `sha256:${'2'.repeat(64)}`,
+    layerDigests: [`sha256:${'3'.repeat(64)}`],
+    diffIds: [`sha256:${'4'.repeat(64)}`],
+  };
+  const report = {
+    SchemaVersion: 2,
+    ArtifactName: '.scan-gateway-linux-amd64.oci',
+    ArtifactType: 'container_image',
+    Metadata: {
+      ImageID: platform.configDigest,
+      DiffIDs: platform.diffIds,
+      ImageConfig: {
+        os: 'linux',
+        architecture: 'amd64',
+        rootfs: { type: 'layers', diff_ids: platform.diffIds },
+      },
+    },
+    Results: [],
+  };
+  const expected = {
+    reportName: 'trivy-gateway-linux-amd64.json',
+    reportSha256: '5'.repeat(64),
+    archiveName: 'qubicl-gateway.oci.tar',
+    archiveSha256: '6'.repeat(64),
+    image: 'gateway',
+    platform: 'linux/amd64',
+    bindingSchemaVersion: 2,
+    measured: { indexDigest: `sha256:${'7'.repeat(64)}`, platforms: { 'linux/amd64': platform } },
+  };
+  const binding = {
+    report: expected.reportName,
+    reportSha256: expected.reportSha256,
+    image: expected.image,
+    platform: expected.platform,
+    ociArchive: expected.archiveName,
+    ociArchiveSha256: expected.archiveSha256,
+    indexDigest: expected.measured.indexDigest,
+    manifestDigest: platform.digest,
+    configDigest: platform.configDigest,
+    layerDigests: platform.layerDigests,
+    diffIds: platform.diffIds,
+    platformView: {
+      input: report.ArtifactName,
+      manifestDigest: platform.digest,
+      configDigest: platform.configDigest,
+      layerDigests: platform.layerDigests,
+      diffIds: platform.diffIds,
+    },
+    reportIdentity: {
+      schemaVersion: 2,
+      artifactType: 'container_image',
+      imageId: platform.configDigest,
+      diffIds: platform.diffIds,
+      imageConfig: { os: 'linux', architecture: 'amd64', diffIds: platform.diffIds },
+    },
+    options: { scanners: ['vuln', 'secret'], input: report.ArtifactName },
+  };
+  assert.doesNotThrow(() => assertTrivyScanBinding(binding, report, expected));
+  assert.throws(() => assertTrivyScanBinding({ ...binding, configDigest: `sha256:${'8'.repeat(64)}` }, report, expected), /manifest, or config digest/);
+  assert.throws(() => assertTrivyScanBinding({ ...binding, layerDigests: [`sha256:${'8'.repeat(64)}`] }, report, expected), /layer identity/);
+  assert.throws(() => assertTrivyScanBinding({ ...binding, diffIds: [`sha256:${'8'.repeat(64)}`] }, report, expected), /layer identity/);
+  assert.throws(() => assertTrivyScanBinding(binding, {
+    ...report,
+    Metadata: { ...report.Metadata, ImageConfig: { ...report.Metadata.ImageConfig, architecture: 'arm64' } },
+  }, expected), /another platform/);
+  assert.throws(() => assertTrivyScanBinding({
+    ...binding,
+    platformView: { ...binding.platformView, layerDigests: [`sha256:${'8'.repeat(64)}`] },
+  }, report, expected), /filtered OCI platform view/);
 });
 
 test('Trivy scanner evidence requires an identified scanner and a fresh exact database', async () => {
@@ -135,6 +216,7 @@ test('Trivy scanner evidence requires an identified scanner and a fresh exact da
     },
   };
   assert.doesNotThrow(() => assertTrivyScannerIdentity(bindings, '2026-08-23T13:00:00.000Z'));
+  assert.doesNotThrow(() => assertTrivyScannerIdentity({ ...bindings, schemaVersion: 2 }, '2026-08-23T13:00:00.000Z'));
   const stale = structuredClone(bindings);
   stale.scanner.vulnerabilityDatabase.UpdatedAt = '2026-08-20T11:00:00.000Z';
   assert.throws(() => assertTrivyScannerIdentity(stale, '2026-08-23T13:00:00.000Z'), /stale/);

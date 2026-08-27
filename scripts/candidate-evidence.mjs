@@ -65,6 +65,15 @@ export function normalizeRepository(repository) {
   return repository.replace(/^git\+/, '').replace(/\.git$/, '').replace(/\/$/, '');
 }
 
+export function assertReviewedRevisionFacts(facts, candidate) {
+  assert(facts?.head === candidate.revision, 'Reviewed checkout HEAD does not match the candidate revision.');
+  assert(facts?.clean === true, 'Reviewed checkout must remain clean while verifying candidate evidence.');
+  assert(facts?.version === candidate.version, 'Reviewed checkout version does not match the candidate.');
+  assert(facts?.created === candidate.created, 'Candidate creation identity does not match the reviewed commit timestamp.');
+  assert(normalizeRepository(facts?.source) === normalizeRepository(candidate.source),
+    'Reviewed checkout source repository does not match the candidate.');
+}
+
 export function assertCatalogIdentity(catalog, expected) {
   assert(catalog?.schemaVersion === 1, 'Image catalog schemaVersion must be 1.');
   assert(catalog.development === false, 'Candidate artifacts require a non-development image catalog.');
@@ -162,12 +171,13 @@ export function parseVulnerabilityApplicability(document) {
 }
 
 export function assertTrivyReportPrivacy(document, expectedInput) {
+  const expectedInputs = Array.isArray(expectedInput) ? expectedInput : [expectedInput];
   const artifactName = normalizeScanInputPath(document?.ArtifactName);
-  assert(artifactName === expectedInput, `Trivy ArtifactName must be the relative input ${expectedInput}; found ${document?.ArtifactName}.`);
+  assert(expectedInputs.includes(artifactName), `Trivy ArtifactName must be one of the relative inputs ${expectedInputs.join(', ')}; found ${document?.ArtifactName}.`);
   for (const result of document.Results ?? []) {
     if (typeof result.Target !== 'string') continue;
     const target = normalizeScanTarget(result.Target.split(' (')[0]);
-    if (target.includes('.scan-')) assert(target === expectedInput, `Trivy Target exposes a non-relative scan path: ${result.Target}.`);
+    if (target.includes('.scan-')) assert(expectedInputs.includes(target), `Trivy Target exposes a non-relative scan path: ${result.Target}.`);
   }
 }
 
@@ -199,7 +209,10 @@ export function summarizeTrivyReports(reportEntries, exceptionsDocument, {
 
   for (const { name, document } of [...reportEntries].sort((left, right) => left.name.localeCompare(right.name))) {
     const identity = reportIdentity(name);
-    assertTrivyReportPrivacy(document, `.scan-${identity.image}.oci`);
+    assertTrivyReportPrivacy(document, [
+      `.scan-${identity.image}.oci`,
+      platformScanInput(identity.image, identity.platform),
+    ]);
     const results = document.Results ?? [];
     const vulnerabilities = results.flatMap((result) => result.Vulnerabilities ?? []);
     const secrets = results.flatMap((result) => (result.Secrets ?? []).map((secret) => ({
@@ -407,6 +420,7 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
 
   const candidate = await jsonFile(join(candidateDirectory, 'candidate.json'));
   assertCandidateManifest(candidate);
+  await assertReviewedRevision(candidate, root);
   const checksumEntries = parseChecksums(await readFile(join(candidateDirectory, 'SHA256SUMS'), 'utf8'));
   assert(equalArrays([...checksumEntries.keys()].sort(), names.filter((name) => name !== 'SHA256SUMS')), 'SHA256SUMS must cover every candidate file except itself.');
   for (const [name, expected] of checksumEntries) {
@@ -527,6 +541,7 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
           image: identity.image,
           platform: identity.platform,
           measured,
+          bindingSchemaVersion: bindings.schemaVersion,
         });
       }
       const expectedSummary = summarizeTrivyReports(reportEntries, exceptions, {
@@ -550,6 +565,7 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
     await rm(temporary, { recursive: true, force: true });
   }
 
+  await assertReviewedRevision(candidate, root);
   return { candidate, catalog, files: names };
 }
 
@@ -585,6 +601,9 @@ export function canonicalJson(value) {
 
 export function assertTrivyScanBinding(binding, report, expected) {
   const platform = expected.measured.platforms[expected.platform];
+  assert(platform, `Trivy binding targets missing OCI platform ${expected.platform}.`);
+  const bindingSchemaVersion = expected.bindingSchemaVersion ?? (binding.platformView ? 2 : 1);
+  assert([1, 2].includes(bindingSchemaVersion), `Unsupported Trivy binding schemaVersion ${bindingSchemaVersion}.`);
   assert(binding.report === expected.reportName && binding.reportSha256 === expected.reportSha256, 'Trivy binding does not identify the exact report bytes.');
   assert(binding.image === expected.image && binding.platform === expected.platform, 'Trivy binding has the wrong image or platform.');
   assert(binding.ociArchive === expected.archiveName && binding.ociArchiveSha256 === expected.archiveSha256, 'Trivy binding does not identify the exact OCI archive bytes.');
@@ -597,13 +616,37 @@ export function assertTrivyScanBinding(binding, report, expected) {
   assert(report.Metadata?.ImageID === platform.configDigest && binding.reportIdentity.imageId === report.Metadata.ImageID, 'Trivy report ImageID does not match the OCI config digest.');
   assert(canonicalJson(report.Metadata?.DiffIDs) === canonicalJson(platform.diffIds)
     && canonicalJson(binding.reportIdentity.diffIds) === canonicalJson(report.Metadata.DiffIDs), 'Trivy report DiffIDs do not match the OCI config.');
-  assert(canonicalJson(binding.options) === canonicalJson({ scanners: ['vuln', 'secret'], input: `.scan-${expected.image}.oci` }), 'Trivy binding has unexpected scan options.');
+  const scanInput = bindingSchemaVersion === 1
+    ? `.scan-${expected.image}.oci`
+    : platformScanInput(expected.image, expected.platform);
+  assert(canonicalJson(binding.options) === canonicalJson({ scanners: ['vuln', 'secret'], input: scanInput }), 'Trivy binding has unexpected scan options.');
+  assertTrivyReportPrivacy(report, scanInput);
+  if (bindingSchemaVersion === 2) {
+    assert(canonicalJson(binding.platformView) === canonicalJson({
+      input: scanInput,
+      manifestDigest: platform.digest,
+      configDigest: platform.configDigest,
+      layerDigests: platform.layerDigests,
+      diffIds: platform.diffIds,
+    }), 'Trivy binding does not identify the independently filtered OCI platform view.');
+    const [os, architecture] = expected.platform.split('/');
+    const imageConfig = report.Metadata?.ImageConfig;
+    assert(imageConfig?.os === os && imageConfig?.architecture === architecture,
+      'Trivy report image configuration targets another platform.');
+    assert(canonicalJson(imageConfig?.rootfs?.diff_ids) === canonicalJson(platform.diffIds),
+      'Trivy report image configuration has the wrong rootfs diff IDs.');
+    assert(canonicalJson(binding.reportIdentity.imageConfig) === canonicalJson({
+      os,
+      architecture,
+      diffIds: platform.diffIds,
+    }), 'Trivy report binding has the wrong image configuration identity.');
+  }
 }
 
 export function assertTrivyScannerIdentity(bindings, now) {
   const scanner = bindings?.scanner;
   const database = scanner?.vulnerabilityDatabase;
-  assert(bindings?.schemaVersion === 1 && isoDate(bindings.createdAt), 'trivy-bindings.json has an invalid schema or creation time.');
+  assert([1, 2].includes(bindings?.schemaVersion) && isoDate(bindings.createdAt), 'trivy-bindings.json has an invalid schema or creation time.');
   assert(scanner?.name === 'trivy' && /^\d+\.\d+\.\d+$/u.test(scanner.version ?? '')
     && /^[a-f0-9]{64}$/u.test(scanner.versionOutputSha256 ?? ''), 'trivy-bindings.json has an invalid scanner identity.');
   assert(Number.isInteger(database?.Version) && isoDate(database?.UpdatedAt) && isoDate(database?.DownloadedAt)
@@ -704,6 +747,10 @@ function reportIdentity(name) {
   return { image: match[1], platform: `linux/${match[2]}` };
 }
 
+function platformScanInput(image, platform) {
+  return `.scan-${image}-${platform.replace('/', '-')}.oci`;
+}
+
 function normalizeScanInputPath(value) {
   assert(typeof value === 'string' && value.length > 0, 'Trivy report has no ArtifactName.');
   assert(!isAbsolute(value) && !win32.isAbsolute(value), `Trivy scan path must be relative: ${value}.`);
@@ -727,6 +774,8 @@ function normalizeScanTarget(value) {
 function assertCandidateManifest(candidate) {
   assert(candidate?.schemaVersion === 5, 'candidate.json schemaVersion must be 5.');
   for (const field of ['version', 'revision', 'created', 'source']) assert(nonemptyString(candidate[field]), `candidate.json requires ${field}.`);
+  assert(/^[a-f0-9]{40}$/u.test(candidate.revision), 'candidate.json revision must be the exact reviewed Git commit.');
+  assert(Number.isFinite(Date.parse(candidate.created)), 'candidate.json created must be an ISO timestamp.');
   assert(RELEASE_TIERS.includes(candidate.releaseTier), 'candidate.json requires a supported release tier.');
   assert(candidate.releaseTier !== 'preview' || candidate.version.includes('-'), 'Preview candidates require a prerelease version.');
   assert(candidate.releaseTier !== 'initial' || /^0\.[0-9]+\.[0-9]+$/.test(candidate.version), 'Initial-release candidates require a stable pre-1.0 version.');
@@ -741,6 +790,23 @@ function assertCandidateManifest(candidate) {
   assert(Array.isArray(candidate.artifacts) && candidate.artifacts.every((entry) => safeName(entry.name)
     && Number.isInteger(entry.bytes) && /^[a-f0-9]{64}$/.test(entry.sha256)), 'candidate.json has invalid artifacts.');
   assert(new Set(candidate.artifacts.map((entry) => entry.name)).size === candidate.artifacts.length, 'candidate.json has duplicate artifacts.');
+}
+
+async function assertReviewedRevision(candidate, root) {
+  assert(root, 'Candidate verification requires the reviewed repository root.');
+  const [head, status, created, workspace] = await Promise.all([
+    exec('git', ['rev-parse', 'HEAD'], { cwd: root }).then(({ stdout }) => stdout.trim()),
+    exec('git', ['status', '--porcelain'], { cwd: root }).then(({ stdout }) => stdout.trim()),
+    exec('git', ['show', '-s', '--format=%cI', candidate.revision], { cwd: root }).then(({ stdout }) => stdout.trim()),
+    jsonFile(join(root, 'package.json')),
+  ]);
+  assertReviewedRevisionFacts({
+    head,
+    clean: status === '',
+    created,
+    version: workspace.version,
+    source: workspace.repository?.url,
+  }, candidate);
 }
 
 function expectedArtifactNames(candidate) {

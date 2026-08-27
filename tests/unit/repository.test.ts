@@ -48,7 +48,7 @@ test('initial package publishing is explicit and guarded', async () => {
     scripts?: { prepublishOnly?: string };
   };
   assert.equal(manifest.name, 'qubicl-cli');
-  assert.equal(manifest.version, '0.1.0');
+  assert.equal(manifest.version, '0.1.1');
   assert.equal(manifest.author, 'Qubicl contributors');
   assert.equal(manifest.license, 'Apache-2.0');
   assert.notEqual(manifest.private, true);
