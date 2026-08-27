@@ -37,6 +37,10 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   acceptance from passing without post-freeze native-Linux and Docker
   Desktop/NAT evidence for the remote client surfaces, security boundaries,
   lifecycle transitions, and local-loopback preservation.
+- Every v0.2 image candidate now retains and publishes exact
+  `oci-efficiency.json` evidence: per-platform compressed and expanded layer
+  sharing plus bounded, normalized installed-package inventories derived from
+  the candidate's embedded SPDX attestations.
 
 ### Changed
 

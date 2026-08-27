@@ -8,7 +8,7 @@ const args = process.argv.slice(2);
 if (args.length !== 1 || args[0] === '--help') {
   const usage = 'Usage: node scripts/verify-candidate.mjs CANDIDATE_DIRECTORY';
   if (args[0] === '--help') {
-    console.log(`${usage}\n\nFrom the clean reviewed revision, verify the manifest, checksums, exact npm/native evidence, OCI archives, per-platform Trivy reports, privacy, and vulnerability exceptions without rebuilding, rerunning acceptance, or publishing.`);
+    console.log(`${usage}\n\nFrom the clean reviewed revision, verify the manifest, checksums, exact npm/native evidence, OCI archives, v0.2 layer/package efficiency evidence, per-platform Trivy reports, privacy, and vulnerability exceptions without rebuilding, rerunning acceptance, or publishing.`);
     process.exit(0);
   }
   throw new Error(usage);

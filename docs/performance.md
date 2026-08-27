@@ -39,3 +39,11 @@ Each preset also must become healthy inside its catalog startup budget and compl
 Use `--binary PATH` to sample an already-built native candidate and `--json` for machine-readable stdout. Reports include only revision/dirty state, tool/platform versions, and measurements—never username, hostname, home path, IP, or credentials.
 
 Multi-computer scaling and cold/warm hardware comparisons remain separate local acceptance records because they require an isolated host and controlled cache state.
+
+Complete v0.2 image candidates also carry `oci-efficiency.json`. Unlike the
+local expanded-size guardrails above, that immutable report compares both
+architectures across all five exact OCI archives. It records compressed and
+expanded layer sharing and a bounded normalized package inventory derived from
+each platform's embedded SPDX attestation. Candidate verification regenerates the
+report, so package/layer optimization decisions can be reviewed against the
+same bytes that would be published.

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { IMAGE_NAMES, verifyCandidateDirectory } from './candidate-evidence.mjs';
 import { requiresClientConformance } from './client-conformance.mjs';
+import { OCI_EFFICIENCY_REPORT_NAME } from './oci-efficiency.mjs';
 import { verifyCandidateSignature } from './sign-candidate.mjs';
 import { verifyAcceptanceBundle } from './acceptance-evidence.mjs';
 
@@ -20,6 +21,11 @@ export function buildPublishPlan(candidate, catalog, candidateDirectory, release
   assert(candidate.modes?.binaryOnly === false, 'Publishing requires the npm artifact from a complete candidate.');
   const acceptanceRequired = candidate.releaseTier === 'supported' || requiresClientConformance(candidate.version);
   assert(!acceptanceRequired || releaseEvidence, 'Supported releases and v0.2 or later publication require a signed release set and signed acceptance evidence.');
+  if (requiresClientConformance(candidate.version)) {
+    assert(candidate.imageEfficiency?.name === OCI_EFFICIENCY_REPORT_NAME
+      && /^[a-f0-9]{64}$/u.test(candidate.imageEfficiency.sha256 ?? ''),
+    'v0.2 or later publication requires exact OCI efficiency evidence.');
+  }
   const images = IMAGE_NAMES.map((name) => {
     const image = name === 'gateway' ? catalog.gateway : catalog.presets[name].image;
     const registry = parseGhcrReference(image.requested);
@@ -58,6 +64,7 @@ export function buildPublishPlan(candidate, catalog, candidateDirectory, release
       'image-catalog.json',
       'qubicl-npm.spdx.json',
       'trivy-summary.json',
+      ...(requiresClientConformance(candidate.version) ? [OCI_EFFICIENCY_REPORT_NAME] : []),
     ].map((name) => join(candidateDirectory, name)).concat(nativeAssets, trustAssets),
   };
 }

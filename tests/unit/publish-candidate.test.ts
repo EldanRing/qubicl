@@ -85,6 +85,38 @@ test('v0.2 initial publication cannot use the v0.1 acceptance exemption', async 
   }, {}, '/candidate'), /v0\.2 or later publication/);
 });
 
+test('v0.2 publication retains candidate-bound image-efficiency evidence', async () => {
+  const { buildPublishPlan } = await import(moduleUrl);
+  const image = (name: string) => ({
+    requested: `ghcr.io/example/qubicl-${name}:0.2.0`,
+    indexDigest: `sha256:${name[0]!.repeat(64)}`,
+  });
+  const releaseEvidence = {
+    set: { path: '/release/release-set.json', directory: '/release', document: { members: [] } },
+    releaseSetSignature: '/evidence/release-set-signature.json',
+    acceptance: '/evidence/acceptance.json',
+    acceptanceSignature: '/evidence/acceptance-signature.json',
+    evidenceFiles: [],
+  };
+  const candidate = {
+    version: '0.2.0',
+    revision: 'a'.repeat(40),
+    releaseTier: 'initial',
+    host: { target: 'linux-x64' },
+    modes: { images: true, scans: true, exactArtifactAcceptance: true, binaryOnly: false },
+    imageEfficiency: { name: 'oci-efficiency.json', sha256: 'b'.repeat(64) },
+  };
+  const catalog = {
+    gateway: image('gateway'),
+    presets: Object.fromEntries(['file-system', 'browser', 'computer', 'workstation'].map((name) => [name, { image: image(name) }])),
+  };
+  assert.throws(() => buildPublishPlan({ ...candidate, imageEfficiency: undefined }, catalog, '/candidate', releaseEvidence),
+    /requires exact OCI efficiency evidence/);
+  const plan = buildPublishPlan(candidate, catalog, '/candidate', releaseEvidence);
+  assert.ok(plan.releaseAssets.includes('/candidate/oci-efficiency.json'));
+  assert.ok(plan.releaseAssets.includes('/release/release-set.json'));
+});
+
 test('existing GitHub release metadata rejects stale or surplus assets', async () => {
   const { assertReleaseMetadata } = await import(moduleUrl);
   const expected = {

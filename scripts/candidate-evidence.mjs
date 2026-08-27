@@ -11,6 +11,11 @@ import {
   extractReleaseArchive,
 } from './artifact-evidence.mjs';
 import { requiresClientConformance } from './client-conformance.mjs';
+import {
+  OCI_EFFICIENCY_MAX_REPORT_BYTES,
+  OCI_EFFICIENCY_REPORT_NAME,
+  inspectOciEfficiencyArchives,
+} from './oci-efficiency.mjs';
 import { inspectOciArchive } from './oci-evidence.mjs';
 export const IMAGE_NAMES = ['gateway', 'file-system', 'browser', 'computer', 'workstation'];
 export const PLATFORMS = ['linux/amd64', 'linux/arm64'];
@@ -421,6 +426,11 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
 
   const candidate = await jsonFile(join(candidateDirectory, 'candidate.json'));
   assertCandidateManifest(candidate);
+  if (candidate.modes.images && requiresClientConformance(candidate.version)) {
+    const reportDetails = await stat(join(candidateDirectory, OCI_EFFICIENCY_REPORT_NAME));
+    assert(reportDetails.isFile() && reportDetails.size <= OCI_EFFICIENCY_MAX_REPORT_BYTES,
+      'oci-efficiency.json is not a regular file within the 64 MiB report budget.');
+  }
   await assertReviewedRevision(candidate, root);
   const checksumEntries = parseChecksums(await readFile(join(candidateDirectory, 'SHA256SUMS'), 'utf8'));
   assert(equalArrays([...checksumEntries.keys()].sort(), names.filter((name) => name !== 'SHA256SUMS')), 'SHA256SUMS must cover every candidate file except itself.');
@@ -511,6 +521,18 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
               && actual.downloadBytes === expected.downloadBytes
               && actual.expandedBytes === expected.expandedBytes, `${image} ${platform} OCI digest or size does not match image-catalog.json.`);
           }
+        }
+      }
+      if (requiresClientConformance(candidate.version)) {
+        const reportPath = join(candidateDirectory, OCI_EFFICIENCY_REPORT_NAME);
+        assert(candidate.imageEfficiency?.name === OCI_EFFICIENCY_REPORT_NAME
+          && candidate.imageEfficiency.sha256 === await sha256(reportPath),
+        'candidate.json image-efficiency identity does not match the retained report.');
+        if (inspectOci) {
+          const archives = Object.fromEntries(IMAGE_NAMES.map((name) => [name, join(candidateDirectory, `qubicl-${name}.oci.tar`)]));
+          const expectedReport = await inspectOciEfficiencyArchives(archives);
+          assert(canonicalJson(await jsonFile(reportPath)) === canonicalJson(expectedReport),
+            'oci-efficiency.json does not match the exact candidate OCI archives and SPDX package inventories.');
         }
       }
     }
@@ -794,6 +816,14 @@ function assertCandidateManifest(candidate) {
     && typeof candidate.modes.scans === 'boolean'
     && typeof candidate.modes.exactArtifactAcceptance === 'boolean', 'candidate.json has invalid modes.');
   assert(!candidate.modes.scans || candidate.modes.images, 'Candidate scans require image candidates.');
+  const requiresEfficiency = candidate.modes.images && requiresClientConformance(candidate.version);
+  if (requiresEfficiency) {
+    assert(candidate.imageEfficiency?.name === OCI_EFFICIENCY_REPORT_NAME
+      && /^[a-f0-9]{64}$/u.test(candidate.imageEfficiency.sha256 ?? ''),
+    'v0.2 and later image candidates require exact OCI efficiency evidence.');
+  } else {
+    assert(candidate.imageEfficiency === undefined, 'Candidate image-efficiency evidence is not valid for this mode or version.');
+  }
   assert(Array.isArray(candidate.artifacts) && candidate.artifacts.every((entry) => safeName(entry.name)
     && Number.isInteger(entry.bytes) && /^[a-f0-9]{64}$/.test(entry.sha256)), 'candidate.json has invalid artifacts.');
   assert(new Set(candidate.artifacts.map((entry) => entry.name)).size === candidate.artifacts.length, 'candidate.json has duplicate artifacts.');
@@ -824,7 +854,10 @@ function expectedArtifactNames(candidate) {
     `qubicl-${candidate.version}-${candidate.host.target}.spdx.json`,
   ];
   if (!candidate.modes.binaryOnly) names.push(`qubicl-cli-${candidate.version}.tgz`, 'qubicl-npm.spdx.json');
-  if (candidate.modes.images) names.push(...IMAGE_NAMES.map((name) => `qubicl-${name}.oci.tar`));
+  if (candidate.modes.images) {
+    names.push(...IMAGE_NAMES.map((name) => `qubicl-${name}.oci.tar`));
+    if (requiresClientConformance(candidate.version)) names.push(OCI_EFFICIENCY_REPORT_NAME);
+  }
   if (candidate.modes.scans) {
     names.push(
       'trivy-summary.json',

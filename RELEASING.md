@@ -113,7 +113,11 @@ once against that catalog, and reruns source/npm/native acceptance against the
 staged bytes. Each amd64/arm64 Trivy run receives its own one-manifest OCI view;
 the builder verifies the selected index, manifest, configuration, compressed
 layers, rootfs diff IDs, and report identity before retaining the report. It
-writes an ignored candidate beneath:
+writes `oci-efficiency.json` for v0.2 and later from those exact archives and
+their embedded SPDX attestations, recording shared/unique compressed and expanded
+layers plus normalized package overlap. Candidate verification regenerates the
+report from the retained bytes, and publication includes it as release evidence.
+The builder writes an ignored candidate beneath:
 
 ```text
 release/candidates/0.1.0-<revision>/linux-x64/

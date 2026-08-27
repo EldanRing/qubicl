@@ -71,6 +71,8 @@ test('initial package publishing is explicit and guarded', async () => {
   assert.match(candidateBuilder, /await run\('docker', args, \{ env:/);
   assert.match(candidateBuilder, /'trivy'/);
   assert.match(candidateBuilder, /trivy-summary\.json/);
+  assert.match(candidateBuilder, /inspectOciEfficiencyArchives/);
+  assert.match(candidateBuilder, /OCI_EFFICIENCY_REPORT_NAME/);
   assert.match(candidateBuilder, /vulnerability-applicability\.json/);
   assert.match(candidateBuilder, /verify-candidate\.mjs/);
   assert.match(candidateBuilder, /'bundle', 'create', bundle, 'HEAD'/);
@@ -114,8 +116,10 @@ test('initial package publishing is explicit and guarded', async () => {
   const publisher = await readFile(join(root, 'scripts/publish-candidate.mjs'), 'utf8');
   assert.match(publisher, /v0\.2 or later publication require a signed release set/);
   assert.match(publisher, /requiresClientConformance\(candidate\.version\)/);
-  assert.match(await readFile(join(root, 'scripts/candidate-evidence.mjs'), 'utf8'),
-    /Trivy binding schemaVersion.*required for v0\.2 and later candidates/);
+  const candidateEvidence = await readFile(join(root, 'scripts/candidate-evidence.mjs'), 'utf8');
+  assert.match(candidateEvidence, /Trivy binding schemaVersion.*required for v0\.2 and later candidates/);
+  assert.match(candidateEvidence, /v0\.2 and later image candidates require exact OCI efficiency evidence/);
+  assert.match(candidateEvidence, /oci-efficiency\.json does not match the exact candidate OCI archives/);
 
 });
 
@@ -214,6 +218,17 @@ test('container bases are pinned by digest', async () => {
   assert.match(computer, /brace-expansion@5\.0\.9/);
   assert.match(computer, /ip-address@10\.3\.1/);
   assert.match(computer, /tar@7\.5\.21/);
+  for (const instruction of computer.split(/\n(?=RUN )/u)) {
+    if (instruction.includes('apt-get install')) {
+      assert.match(instruction, /apt-get install -y --no-install-recommends/);
+      assert.match(instruction, /rm -rf [^\n]*\/var\/lib\/apt\/lists\/\*/);
+    }
+    if (instruction.includes('/pip install')) {
+      assert.match(instruction, /\/pip install --no-cache-dir/);
+      assert.match(instruction, /find [^\n]* -type d -name __pycache__ -prune -exec rm -rf/);
+    }
+  }
+  assert.match(computer, /npm cache clean --force/);
   for (const name of ['curl', 'fd-find', 'gh', 'jq', 'ripgrep', 'tree', 'unzip', 'wget', 'zip']) {
     assert.match(computer, new RegExp(`^\\s+${name} \\\\$`, 'm'));
   }

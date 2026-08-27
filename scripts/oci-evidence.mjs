@@ -14,6 +14,10 @@ const ATTESTATION = 'attestation-manifest';
 const IN_TOTO = 'application/vnd.in-toto+json';
 const SLSA_PROVENANCE = 'https://slsa.dev/provenance/v1';
 const SPDX_DOCUMENT = 'https://spdx.dev/Document';
+const MAX_PROVENANCE_ATTESTATION_BYTES = 32 * 1024 * 1024;
+const MAX_SPDX_ATTESTATION_BYTES = 256 * 1024 * 1024;
+const MAX_AGGREGATE_ATTESTATION_BYTES = 576 * 1024 * 1024;
+const MAX_JSON_DESCRIPTOR_BYTES = 256 * 1024 * 1024;
 const STATEMENT_TYPES = new Set([
   'https://in-toto.io/Statement/v0.1',
   'https://in-toto.io/Statement/v1',
@@ -30,6 +34,7 @@ export async function inspectOciArchive(archive, {
   requireAttestations = false,
   expectedPlatforms = OCI_PLATFORMS,
   includeLayerMeasurements = false,
+  includePackageInventory = false,
 } = {}) {
   assert(!(expectedManifest && expectedManifestPath), 'OCI inspection accepts expectedManifest or expectedManifestPath, not both.');
   const details = await lstat(archive);
@@ -62,12 +67,14 @@ export async function inspectOciArchive(archive, {
       : undefined);
     const measurements = {};
     const platformContent = new Map();
+    const platformNamesByDigest = new Map();
     for (const descriptor of platformDescriptors) {
       assert(descriptor.mediaType === OCI_MANIFEST, `${archive} platform descriptor has an invalid media type.`);
       const manifestBytes = await descriptorBytes(extracted, descriptor, archive);
       const manifest = parseJson(manifestBytes, `${archive} platform manifest ${descriptor.digest}`);
       assert(manifest.schemaVersion === 2 && manifest.mediaType === OCI_MANIFEST, `${archive} has an invalid platform manifest.`);
-      assert(Array.isArray(manifest.layers) && manifest.layers.length > 0, `${archive} platform manifest contains no layers.`);
+      assert(Array.isArray(manifest.layers) && manifest.layers.length > 0 && manifest.layers.length <= 4096,
+        `${archive} platform manifest must contain between 1 and 4096 layers.`);
       const configBytes = await descriptorBytes(extracted, manifest.config, archive);
       const config = parseJson(configBytes, `${archive} config ${manifest.config?.digest}`);
       const platform = platformName(descriptor);
@@ -148,6 +155,7 @@ export async function inspectOciArchive(archive, {
         ...(includeLayerMeasurements ? { layers: layerMeasurements } : {}),
       };
       platformContent.set(descriptor.digest, contentDigests);
+      platformNamesByDigest.set(descriptor.digest, platform);
     }
 
     const attestationDescriptors = (index.manifests ?? []).filter(
@@ -155,12 +163,20 @@ export async function inspectOciArchive(archive, {
     );
     const knownDescriptors = new Set([...platformDescriptors, ...attestationDescriptors]);
     assert((index.manifests ?? []).every((descriptor) => knownDescriptors.has(descriptor)), `${archive} contains an unexpected index descriptor.`);
-    if (requireAttestations) {
-      await validateAttestations(extracted, archive, attestationDescriptors, platformContent, {
+    if (requireAttestations || includePackageInventory) {
+      const packageInventoriesBySubject = await validateAttestations(extracted, archive, attestationDescriptors, platformContent, {
         expectedVersion,
         expectedRevision,
         expectedSource,
+        includePackageInventory,
       });
+      if (includePackageInventory) {
+        for (const [subjectDigest, packages] of packageInventoriesBySubject) {
+          const platform = platformNamesByDigest.get(subjectDigest);
+          assert(platform, `${archive} package inventory targets an unknown platform manifest ${subjectDigest}.`);
+          measurements[platform].packages = packages;
+        }
+      }
     }
 
     return { archive: basename(archive), indexDigest: indexDescriptor.digest, platforms: measurements };
@@ -213,6 +229,8 @@ async function collectReferencedBlobs(directory, descriptors, archive, found = n
       await collectReferencedBlobs(directory, index.manifests, archive, found);
     } else if (descriptor.mediaType === OCI_MANIFEST) {
       const manifest = await descriptorJson(directory, descriptor, archive);
+      assert(Array.isArray(manifest.layers) && manifest.layers.length > 0 && manifest.layers.length <= 4096,
+        `${archive} OCI manifest must contain between 1 and 4096 layers.`);
       await collectReferencedBlobs(directory, [manifest.config, ...(manifest.layers ?? [])], archive, found);
     }
   }
@@ -224,10 +242,12 @@ async function validateAttestations(
   archive,
   descriptors,
   platformContent,
-  { expectedVersion, expectedRevision, expectedSource },
+  { expectedVersion, expectedRevision, expectedSource, includePackageInventory },
 ) {
   assert(descriptors.length === platformContent.size, `${archive} must contain one attestation manifest per platform.`);
   const bySubject = new Map();
+  const packageInventoriesBySubject = new Map();
+  let aggregateAttestationBytes = 0;
   for (const descriptor of descriptors) {
     assert(descriptor.mediaType === OCI_MANIFEST, `${archive} attestation descriptor has an invalid media type.`);
     const subjectDigest = descriptor.annotations?.['vnd.docker.reference.digest'];
@@ -241,15 +261,23 @@ async function validateAttestations(
     const manifest = await descriptorJson(directory, descriptor, archive);
     assert(manifest.schemaVersion === 2 && manifest.mediaType === OCI_MANIFEST, `${archive} has an invalid attestation manifest.`);
     await descriptorBytes(directory, manifest.config, archive);
-    const statements = new Map();
+    const statementTypes = new Set();
+    let packageInventory;
     for (const layer of manifest.layers ?? []) {
       assert(layer.mediaType === IN_TOTO, `${archive} attestation layer has media type ${layer.mediaType}.`);
-      const statement = parseJson(await descriptorBytes(directory, layer, archive), `${archive} attestation ${layer.digest}`);
       const annotatedType = layer.annotations?.['in-toto.io/predicate-type'];
+      assert([SLSA_PROVENANCE, SPDX_DOCUMENT].includes(annotatedType), `${archive} has an unexpected attestation predicate ${annotatedType}.`);
+      const maximumBytes = annotatedType === SPDX_DOCUMENT
+        ? MAX_SPDX_ATTESTATION_BYTES
+        : MAX_PROVENANCE_ATTESTATION_BYTES;
+      const statementBytes = await descriptorBytes(directory, layer, archive, { maximumBytes });
+      aggregateAttestationBytes += statementBytes.length;
+      assert(aggregateAttestationBytes <= MAX_AGGREGATE_ATTESTATION_BYTES,
+        `${archive} attestation JSON exceeds the 576 MiB aggregate budget.`);
+      const statement = parseJson(statementBytes, `${archive} attestation ${layer.digest}`);
       assert(STATEMENT_TYPES.has(statement._type), `${archive} attestation has an invalid in-toto statement type.`);
       assert(statement.predicateType === annotatedType, `${archive} attestation predicate type does not match its descriptor.`);
-      assert([SLSA_PROVENANCE, SPDX_DOCUMENT].includes(statement.predicateType), `${archive} has an unexpected attestation predicate ${statement.predicateType}.`);
-      assert(!statements.has(statement.predicateType), `${archive} has duplicate ${statement.predicateType} statements for ${subjectDigest}.`);
+      assert(!statementTypes.has(statement.predicateType), `${archive} has duplicate ${statement.predicateType} statements for ${subjectDigest}.`);
       const expectedHash = subjectDigest.slice('sha256:'.length);
       assert(Array.isArray(statement.subject), `${archive} ${statement.predicateType} has no in-toto subject array.`);
       assert(statement.subject.length === 0
@@ -286,20 +314,93 @@ async function validateAttestations(
           && Array.isArray(statement.predicate?.packages)
           && statement.predicate.packages.length > 0
           && statement.predicate.packages.every((entry) => nonemptyString(entry?.name) && nonemptyString(entry?.SPDXID)), `${archive} SPDX attestation predicate is invalid or empty.`);
+        if (includePackageInventory) {
+          packageInventory = normalizeSpdxPackageInventory(statement.predicate, `${archive} ${subjectDigest}`);
+        }
       }
-      statements.set(statement.predicateType, statement);
+      statementTypes.add(statement.predicateType);
     }
-    assert(statements.has(SLSA_PROVENANCE), `${archive} attestation has no parsed SLSA v1 provenance.`);
-    assert(statements.has(SPDX_DOCUMENT), `${archive} attestation has no parsed SPDX SBOM.`);
+    assert(statementTypes.has(SLSA_PROVENANCE), `${archive} attestation has no parsed SLSA v1 provenance.`);
+    assert(statementTypes.has(SPDX_DOCUMENT), `${archive} attestation has no parsed SPDX SBOM.`);
+    if (includePackageInventory) {
+      assert(packageInventory, `${archive} ${subjectDigest} has no SPDX package inventory.`);
+      packageInventoriesBySubject.set(subjectDigest, packageInventory);
+    }
   }
+  return packageInventoriesBySubject;
+}
+
+function normalizeSpdxPackageInventory(document, label) {
+  assert(Array.isArray(document.packages) && document.packages.length <= 50_000,
+    `${label} SPDX package inventory is missing or exceeds 50000 entries.`);
+  const describedEntries = document.documentDescribes ?? [];
+  assert(Array.isArray(describedEntries) && describedEntries.length <= 1024,
+    `${label} SPDX documentDescribes is invalid or exceeds 1024 entries.`);
+  const described = new Set(describedEntries.map((value, index) => boundedText(value, `${label} documentDescribes ${index}`, 512)));
+  const relationships = document.relationships ?? [];
+  assert(Array.isArray(relationships) && relationships.length <= 1_000_000,
+    `${label} SPDX relationships are invalid or exceed 1000000 entries.`);
+  for (const [index, relationship] of relationships.entries()) {
+    assert(relationship && typeof relationship === 'object' && !Array.isArray(relationship),
+      `${label} SPDX relationship ${index} must be an object.`);
+    const relationshipType = boundedText(relationship.relationshipType, `${label} SPDX relationship ${index} type`, 128);
+    const source = boundedText(relationship.spdxElementId, `${label} SPDX relationship ${index} source`, 512);
+    const target = boundedText(relationship.relatedSpdxElement, `${label} SPDX relationship ${index} target`, 512);
+    if (relationshipType === 'DESCRIBES' && source === 'SPDXRef-DOCUMENT') described.add(target);
+    if (relationshipType === 'DESCRIBED_BY' && target === 'SPDXRef-DOCUMENT') described.add(source);
+    assert(described.size <= 1024, `${label} SPDX described package set exceeds 1024 entries.`);
+  }
+  const packages = new Map();
+  let textBytes = 0;
+  for (const [index, entry] of document.packages.entries()) {
+    assert(entry && typeof entry === 'object' && !Array.isArray(entry), `${label} SPDX package ${index} must be an object.`);
+    const spdxId = boundedText(entry.SPDXID, `${label} SPDX package ${index} id`, 512);
+    if (described.has(spdxId)) continue;
+    const name = boundedText(entry.name, `${label} SPDX package ${spdxId} name`, 512);
+    const version = optionalBoundedText(entry.versionInfo, `${label} SPDX package ${spdxId} version`, 1024);
+    const references = entry.externalRefs ?? [];
+    assert(Array.isArray(references) && references.length <= 64, `${label} SPDX package ${spdxId} has too many external references.`);
+    const purls = [...new Set(references.flatMap((reference, referenceIndex) => {
+      assert(reference && typeof reference === 'object' && !Array.isArray(reference),
+        `${label} SPDX package ${spdxId} external reference ${referenceIndex} must be an object.`);
+      const type = `${reference.referenceType ?? ''}`.toLowerCase();
+      const locator = reference.referenceLocator;
+      if (type !== 'purl' && !(typeof locator === 'string' && locator.startsWith('pkg:'))) return [];
+      const purl = boundedText(locator, `${label} SPDX package ${spdxId} purl`, 2048);
+      assert(purl.startsWith('pkg:') && !/\s/u.test(purl) && !hasControlCharacters(purl), `${label} SPDX package ${spdxId} has an invalid purl.`);
+      return [purl];
+    }))].sort();
+    const normalized = { name, version, purls };
+    const key = canonicalJson(normalized);
+    textBytes += Buffer.byteLength(key);
+    assert(textBytes <= 8 * 1024 * 1024, `${label} SPDX package inventory exceeds the 8 MiB normalized metadata budget.`);
+    packages.set(key, normalized);
+  }
+  return [...packages.entries()].sort(([left], [right]) => compareText(left, right)).map(([, entry]) => entry);
+}
+
+function boundedText(value, label, maximumBytes) {
+  assert(typeof value === 'string' && value.length > 0 && value === value.trim()
+    && Buffer.byteLength(value) <= maximumBytes && !hasControlCharacters(value), `${label} is missing or invalid.`);
+  return value;
+}
+
+function optionalBoundedText(value, label, maximumBytes) {
+  return value === undefined ? null : boundedText(value, label, maximumBytes);
+}
+
+function hasControlCharacters(value) {
+  return [...value].some((character) => character.codePointAt(0) < 32 || character.codePointAt(0) === 127);
 }
 
 async function descriptorJson(directory, descriptor, archive) {
   return parseJson(await descriptorBytes(directory, descriptor, archive), `${archive} descriptor ${descriptor?.digest}`);
 }
 
-async function descriptorBytes(directory, descriptor, archive) {
+async function descriptorBytes(directory, descriptor, archive, { maximumBytes = MAX_JSON_DESCRIPTOR_BYTES } = {}) {
   const path = await descriptorPath(directory, descriptor, archive);
+  assert(descriptor.size <= maximumBytes,
+    `${archive} descriptor ${descriptor.digest} exceeds the ${maximumBytes}-byte JSON budget.`);
   return readFile(path);
 }
 
@@ -389,6 +490,10 @@ function canonicalJson(value) {
 
 function equalArrays(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function compareText(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function nonemptyString(value) {

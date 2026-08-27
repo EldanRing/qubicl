@@ -2,6 +2,8 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inspectOciArchive } from './oci-evidence.mjs';
 
+export const OCI_EFFICIENCY_REPORT_NAME = 'oci-efficiency.json';
+export const OCI_EFFICIENCY_MAX_REPORT_BYTES = 64 * 1024 * 1024;
 export const OCI_EFFICIENCY_IMAGE_NAMES = [
   'gateway',
   'file-system',
@@ -18,7 +20,11 @@ export async function inspectOciEfficiencyArchives(archives) {
   for (const name of OCI_EFFICIENCY_IMAGE_NAMES) {
     const archive = archives[name];
     assert(typeof archive === 'string' && archive.length > 0, `OCI efficiency archive ${name} must be a non-empty path.`);
-    inspections[name] = await inspectOciArchive(archive, { includeLayerMeasurements: true });
+    inspections[name] = await inspectOciArchive(archive, {
+      includeLayerMeasurements: true,
+      includePackageInventory: true,
+      requireAttestations: true,
+    });
   }
   return buildOciEfficiencyReport(inspections);
 }
@@ -27,7 +33,7 @@ export function buildOciEfficiencyReport(inspections) {
   assertExactImages(inspections, 'OCI efficiency inspections');
   const platforms = commonPlatforms(inspections);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     images: Object.fromEntries(OCI_EFFICIENCY_IMAGE_NAMES.map((name) => {
       const indexDigest = inspections[name]?.indexDigest;
       assert(DIGEST.test(indexDigest ?? ''), `OCI efficiency inspection ${name} has no valid index digest.`);
@@ -38,6 +44,15 @@ export function buildOciEfficiencyReport(inspections) {
       platformReport(inspections, platform),
     ])),
   };
+}
+
+export function serializeOciEfficiencyReport(report, { maximumBytes = OCI_EFFICIENCY_MAX_REPORT_BYTES } = {}) {
+  assert(Number.isSafeInteger(maximumBytes) && maximumBytes > 0,
+    'OCI efficiency report byte limit must be a positive safe integer.');
+  const serialized = `${JSON.stringify(report, null, 2)}\n`;
+  assert(Buffer.byteLength(serialized) <= maximumBytes,
+    `OCI efficiency report exceeds the ${maximumBytes}-byte serialized budget.`);
+  return serialized;
 }
 
 export function parseOciEfficiencyArgs(args) {
@@ -60,14 +75,17 @@ function platformReport(inspections, platform) {
   const compressed = new Map();
   const expanded = new Map();
   const imageLayers = {};
+  const packageGroups = new Map();
+  const imagePackages = {};
+  let aggregatePackageMetadataBytes = 0;
 
   for (const name of OCI_EFFICIENCY_IMAGE_NAMES) {
     const variant = inspections[name].platforms[platform];
     assert(variant && typeof variant === 'object', `OCI efficiency inspection ${name} has no ${platform} variant.`);
     assert(DIGEST.test(variant.digest ?? ''), `OCI efficiency inspection ${name} ${platform} has no valid manifest digest.`);
     assert(DIGEST.test(variant.configDigest ?? ''), `OCI efficiency inspection ${name} ${platform} has no valid config digest.`);
-    assert(Array.isArray(variant.layers) && variant.layers.length > 0,
-      `OCI efficiency inspection ${name} ${platform} has no measured layers.`);
+    assert(Array.isArray(variant.layers) && variant.layers.length > 0 && variant.layers.length <= 4096,
+      `OCI efficiency inspection ${name} ${platform} must contain between 1 and 4096 measured layers.`);
     const layers = variant.layers.map((layer, position) => validatedLayer(layer, name, platform, position));
     assert(JSON.stringify(variant.layerDigests) === JSON.stringify(layers.map(({ digest }) => digest)),
       `OCI efficiency inspection ${name} ${platform} compressed layer digests do not match its measurements.`);
@@ -80,6 +98,25 @@ function platformReport(inspections, platform) {
     assert(validBytes(variant.expandedBytes) && variant.expandedBytes === expandedLayerBytes,
       `OCI efficiency inspection ${name} ${platform} expanded size does not match its layers.`);
     imageLayers[name] = { variant, layers, compressedLayerBytes, expandedLayerBytes };
+
+    assert(Array.isArray(variant.packages), `OCI efficiency inspection ${name} ${platform} has no SPDX package inventory.`);
+    const packageInventory = variant.packages.map((entry, position) => validatedPackage(entry, name, platform, position));
+    const packageKeys = new Set();
+    for (const entry of packageInventory) {
+      const key = canonicalJson(entry);
+      assert(!packageKeys.has(key), `OCI efficiency inspection ${name} ${platform} contains a duplicate package identity.`);
+      packageKeys.add(key);
+      const existing = packageGroups.get(key);
+      if (existing) existing.images.add(name);
+      else {
+        assert(packageGroups.size < 50_000, `OCI efficiency ${platform} package inventory exceeds 50000 distinct identities.`);
+        aggregatePackageMetadataBytes += Buffer.byteLength(key);
+        assert(aggregatePackageMetadataBytes <= 12 * 1024 * 1024,
+          `OCI efficiency ${platform} package inventory exceeds the 12 MiB aggregate metadata budget.`);
+        packageGroups.set(key, { ...entry, images: new Set([name]) });
+      }
+    }
+    imagePackages[name] = packageKeys;
 
     for (const layer of layers) {
       addCompressedLayer(compressed, layer, name);
@@ -99,6 +136,12 @@ function platformReport(inspections, platform) {
     }));
   const compressedOwners = new Map(compressedLayers.map((layer) => [layer.digest, layer.images.length]));
   const expandedOwners = new Map(expandedLayers.map((layer) => [layer.diffId, layer.images.length]));
+  const packages = [...packageGroups.entries()]
+    .sort(([left], [right]) => compareText(left, right))
+    .map(([, entry]) => ({ ...entry, images: orderedImages(entry.images) }));
+  const sharedPackageKeys = new Set([...packageGroups.entries()]
+    .filter(([, entry]) => entry.images.size > 1)
+    .map(([key]) => key));
 
   return {
     images: Object.fromEntries(OCI_EFFICIENCY_IMAGE_NAMES.map((name) => {
@@ -109,6 +152,8 @@ function platformReport(inspections, platform) {
       const sharedExpandedBytes = sum(layers
         .filter(({ diffId }) => expandedOwners.get(diffId) > 1)
         .map(({ expandedBytes }) => expandedBytes));
+      const packageKeys = imagePackages[name];
+      const sharedPackages = [...packageKeys].filter((key) => sharedPackageKeys.has(key)).length;
       return [name, {
         manifestDigest: variant.digest,
         configDigest: variant.configDigest,
@@ -125,10 +170,17 @@ function platformReport(inspections, platform) {
           shared: sharedExpandedBytes,
           unique: expandedLayerBytes - sharedExpandedBytes,
         },
+        packageCounts: {
+          total: packageKeys.size,
+          shared: sharedPackages,
+          unique: packageKeys.size - sharedPackages,
+        },
       }];
     })),
     compressedLayers,
     expandedLayers,
+    packages,
+    packageCounts: aggregatePackageCounts(packages),
     compressedLayerBytes: aggregateLayerBytes(compressedLayers, 'compressedBytes'),
     expandedLayerBytes: aggregateLayerBytes(expandedLayers, 'expandedBytes'),
   };
@@ -188,6 +240,14 @@ function aggregateLayerBytes(layers, sizeKey) {
   };
 }
 
+function aggregatePackageCounts(packages) {
+  const logical = sum(packages.map(({ images }) => images.length));
+  const deduplicated = packages.length;
+  const shared = packages.filter(({ images }) => images.length > 1).length;
+  const unique = deduplicated - shared;
+  return { logical, deduplicated, shared, unique, duplicate: logical - deduplicated };
+}
+
 function validatedLayer(layer, image, platform, position) {
   assert(layer && DIGEST.test(layer.digest ?? ''),
     `OCI efficiency inspection ${image} ${platform} layer ${position} has no valid compressed digest.`);
@@ -201,6 +261,26 @@ function validatedLayer(layer, image, platform, position) {
     diffId: layer.diffId,
     compressedBytes: layer.compressedBytes,
     expandedBytes: layer.expandedBytes,
+  };
+}
+
+function validatedPackage(entry, image, platform, position) {
+  assert(entry && typeof entry === 'object' && !Array.isArray(entry),
+    `OCI efficiency inspection ${image} ${platform} package ${position} must be an object.`);
+  const expectedKeys = ['name', 'purls', 'version'];
+  assert(JSON.stringify(Object.keys(entry).sort()) === JSON.stringify(expectedKeys),
+    `OCI efficiency inspection ${image} ${platform} package ${position} has an invalid shape.`);
+  assert(validText(entry.name, 512), `OCI efficiency inspection ${image} ${platform} package ${position} has an invalid name.`);
+  assert(entry.version === null || validText(entry.version, 1024),
+    `OCI efficiency inspection ${image} ${platform} package ${position} has an invalid version.`);
+  assert(Array.isArray(entry.purls) && entry.purls.length <= 64
+    && JSON.stringify(entry.purls) === JSON.stringify([...new Set(entry.purls)].sort())
+    && entry.purls.every((purl) => validText(purl, 2048) && purl.startsWith('pkg:') && !/\s/u.test(purl)),
+  `OCI efficiency inspection ${image} ${platform} package ${position} has invalid purls.`);
+  return {
+    name: entry.name,
+    version: entry.version,
+    purls: [...entry.purls],
   };
 }
 
@@ -231,6 +311,15 @@ function validBytes(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
+function validText(value, maximumBytes) {
+  return typeof value === 'string' && value.length > 0 && value === value.trim()
+    && Buffer.byteLength(value) <= maximumBytes && !hasControlCharacters(value);
+}
+
+function hasControlCharacters(value) {
+  return [...value].some((character) => character.codePointAt(0) < 32 || character.codePointAt(0) === 127);
+}
+
 function sum(values) {
   return values.reduce((total, value) => {
     const next = total + value;
@@ -243,13 +332,21 @@ function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value).sort(([left], [right]) => compareText(left, right)).map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
 async function main() {
   const archives = parseOciEfficiencyArgs(process.argv.slice(2));
-  console.log(JSON.stringify(await inspectOciEfficiencyArchives(archives), null, 2));
+  process.stdout.write(serializeOciEfficiencyReport(await inspectOciEfficiencyArchives(archives)));
 }
 
 const invoked = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);

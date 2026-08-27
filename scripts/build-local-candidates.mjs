@@ -18,6 +18,12 @@ import {
   summarizeTrivyReports,
 } from './candidate-evidence.mjs';
 import { preserveFailedCandidate } from './candidate-lifecycle.mjs';
+import { requiresClientConformance } from './client-conformance.mjs';
+import {
+  OCI_EFFICIENCY_REPORT_NAME,
+  inspectOciEfficiencyArchives,
+  serializeOciEfficiencyReport,
+} from './oci-efficiency.mjs';
 import { inspectOciArchive } from './oci-evidence.mjs';
 import { createOciPlatformView } from './oci-platform-view.mjs';
 
@@ -114,12 +120,20 @@ try {
   const dependencyEvidenceName = 'dependency-evidence.json';
   await copyFile(dependencyEvidencePath, join(staging, dependencyEvidenceName));
   let catalogPath;
+  let imageEfficiency;
 
   if (buildImages) {
     // This first build creates only the image contexts. Final npm/native bytes are
     // built once after the exact OCI catalog exists.
     await run('npm', ['run', 'build'], { env: metadataEnvironment });
     for (const spec of imageSpecs) await buildImageCandidate(spec);
+    if (requiresClientConformance(version)) {
+      const archives = Object.fromEntries(imageSpecs.map(({ name }) => [name, join(staging, `qubicl-${name}.oci.tar`)]));
+      const reportPath = join(staging, OCI_EFFICIENCY_REPORT_NAME);
+      const report = await inspectOciEfficiencyArchives(archives);
+      await writeFile(reportPath, serializeOciEfficiencyReport(report), { mode: 0o644 });
+      imageEfficiency = { name: OCI_EFFICIENCY_REPORT_NAME, sha256: await sha256(reportPath) };
+    }
     catalogPath = join(staging, 'image-catalog.json');
     await run(process.execPath, [
       'scripts/generate-image-catalog.mjs',
@@ -257,6 +271,7 @@ try {
     dependencies: { name: dependencyEvidenceName, sha256: await sha256(join(staging, dependencyEvidenceName)) },
     modes: { binaryOnly, images: buildImages, scans: scanImages, exactArtifactAcceptance: buildImages },
     imageCatalog: { name: 'image-catalog.json', sha256: await sha256(catalogPath) },
+    ...(imageEfficiency ? { imageEfficiency } : {}),
     ...(security ? { security } : {}),
     artifacts,
   };
