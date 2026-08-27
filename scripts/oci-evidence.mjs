@@ -29,6 +29,7 @@ export async function inspectOciArchive(archive, {
   expectedManifest,
   requireAttestations = false,
   expectedPlatforms = OCI_PLATFORMS,
+  includeLayerMeasurements = false,
 } = {}) {
   assert(!(expectedManifest && expectedManifestPath), 'OCI inspection accepts expectedManifest or expectedManifestPath, not both.');
   const details = await lstat(archive);
@@ -75,13 +76,31 @@ export async function inspectOciArchive(archive, {
 
       let downloadBytes = manifestBytes.length + configBytes.length;
       let expandedBytes = 0;
+      const layerMeasurements = [];
       const contentDigests = new Set([descriptor.digest, manifest.config.digest]);
-      for (const layer of manifest.layers) {
+      for (const [index, layer] of manifest.layers.entries()) {
         const layerPath = await descriptorPath(extracted, layer, archive);
         const layerBytes = (await stat(layerPath)).size;
+        const layerExpandedBytes = await uncompressedBytes(layerPath, layer.mediaType);
         downloadBytes += layerBytes;
-        expandedBytes += await uncompressedBytes(layerPath, layer.mediaType);
+        expandedBytes += layerExpandedBytes;
         contentDigests.add(layer.digest);
+        if (includeLayerMeasurements) {
+          const diffId = config.rootfs?.diff_ids?.[index];
+          assert(/^sha256:[a-f0-9]{64}$/u.test(diffId ?? ''), `${archive} ${platform} layer ${index} has no valid rootfs diff ID.`);
+          layerMeasurements.push({
+            digest: layer.digest,
+            diffId,
+            compressedBytes: layerBytes,
+            expandedBytes: layerExpandedBytes,
+          });
+        }
+      }
+      if (includeLayerMeasurements) {
+        assert(config.rootfs?.type === 'layers'
+          && Array.isArray(config.rootfs.diff_ids)
+          && config.rootfs.diff_ids.length === manifest.layers.length,
+        `${archive} ${platform} rootfs diff IDs do not match its layers.`);
       }
 
       if (expectedVersion !== undefined) {
@@ -111,6 +130,7 @@ export async function inspectOciArchive(archive, {
         diffIds: [...(config.rootfs?.diff_ids ?? [])],
         downloadBytes,
         expandedBytes,
+        ...(includeLayerMeasurements ? { layers: layerMeasurements } : {}),
       };
       platformContent.set(descriptor.digest, contentDigests);
     }
