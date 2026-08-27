@@ -119,8 +119,9 @@ a bearer token.
 
 For Open WebUI, copy the generated configuration into **Admin Panel → Settings
 → Integrations → Open Terminal**. Qubicl supplies native durable-file browsing,
-chat uploads, screenshots, browser tools, and explicitly published local
-previews without joining Open WebUI's Docker network.
+bounded ZIP downloads, non-PTY managed processes, chat uploads, screenshots,
+browser tools, and explicitly published local previews without joining Open
+WebUI's Docker network.
 
 ## Review updates safely
 

@@ -600,6 +600,110 @@ export function buildOpenTerminalOpenApi(computerId: string, enabled: readonly T
       },
     },
   };
+  if (enabled.includes('exec_command')) {
+    const processResponse = {
+      description: 'Managed compatibility process state and bounded output page',
+      content: { 'application/json': { schema: { type: 'object' } } },
+    };
+    paths['/execute'] = {
+      get: {
+        operationId: 'list_compatibility_processes',
+        summary: 'List retained Open Terminal compatibility processes.',
+        security: [{ bearerAuth: [] }],
+        responses: { '200': { description: 'Compatibility process list', content: { 'application/json': { schema: { type: 'array', items: { type: 'object' } } } } } },
+      },
+      post: {
+        operationId: 'execute_compatibility_process',
+        summary: 'Start a non-PTY Open Terminal compatibility process.',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'wait', in: 'query', schema: { type: 'integer', minimum: 0, maximum: 30, default: 10 } },
+          { name: 'tail', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 1000, default: 100 } },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['command'],
+                properties: {
+                  command: { type: 'string', maxLength: 65536 },
+                  cwd: { type: 'string', maxLength: 4096 },
+                  env: { type: 'object', maxProperties: 0 },
+                },
+                additionalProperties: false,
+              },
+            },
+          },
+        },
+        responses: { '200': processResponse, '400': { description: 'Invalid request' }, '409': { description: 'Lease conflict' }, '413': { description: 'Command too large' } },
+      },
+    };
+    paths['/execute/{id}/status'] = {
+      get: {
+        operationId: 'attach_compatibility_process',
+        summary: 'Read a bounded, independently paginated process output page.',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'wait', in: 'query', schema: { type: 'integer', minimum: 0, maximum: 30, default: 0 } },
+          { name: 'offset', in: 'query', schema: { type: 'integer', minimum: 0, default: 0 } },
+          { name: 'tail', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 1000 } },
+        ],
+        responses: { '200': processResponse, '404': { description: 'Process not found' } },
+      },
+    };
+  }
+  if (enabled.includes('write_stdin')) {
+    paths['/execute/{id}/input'] = {
+      post: {
+        operationId: 'input_compatibility_process',
+        summary: 'Write bounded input to a running compatibility process.',
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['input'], properties: { input: { type: 'string', maxLength: 65536 } }, additionalProperties: false } } },
+        },
+        responses: { '200': { description: 'Input accepted' }, '409': { description: 'Process is not accepting input' }, '413': { description: 'Input too large' } },
+      },
+    };
+  }
+  if (enabled.includes('stop_process')) {
+    paths['/execute/{id}'] = {
+      delete: {
+        operationId: 'delete_compatibility_process',
+        summary: 'Stop and remove a compatibility process.',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'force', in: 'query', schema: { type: 'boolean', default: false } },
+        ],
+        responses: { '200': { description: 'Process killed and removed' }, '404': { description: 'Process not found' } },
+      },
+    };
+  }
+  if (enabled.includes('list_files') && enabled.includes('read_file')) {
+    paths['/files/archive'] = {
+      post: {
+        operationId: 'archive_files',
+        summary: 'Download a bounded multi-path ZIP archive.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['paths'], properties: { paths: { type: 'array', minItems: 1, maxItems: 128, items: { type: 'string', maxLength: 4096 } } }, additionalProperties: false } } },
+        },
+        responses: {
+          '200': { description: 'ZIP archive', content: { 'application/zip': { schema: { type: 'string', format: 'binary' } } } },
+          '400': { description: 'Invalid or unsupported entry' },
+          '413': { description: 'Archive limit exceeded' },
+          '429': { description: 'Archive concurrency limit reached' },
+          '504': { description: 'Archive creation or transfer timed out' },
+        },
+      },
+    };
+  }
   return document;
 }
 

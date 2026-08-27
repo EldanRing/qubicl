@@ -1,3 +1,5 @@
+import { createReadStream, fstatSync } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
 import { basename, extname, isAbsolute, join, resolve } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
@@ -13,6 +15,7 @@ import type { ToolExecutor } from './executor.js';
 import { mapFileSystemError, type FileErrorContext } from './file-errors.js';
 import type { LeaseProof } from './lease.js';
 import { BoundedPathError, type BoundedFileSystem } from './bounded-files.js';
+import { OPEN_TERMINAL_ARCHIVE_LIMITS, type OpenTerminalArchive } from './open-terminal-archive.js';
 
 const PREFIX = '/open-terminal';
 const FILE_SERVE_PREFIX = '/files/serve/';
@@ -28,6 +31,8 @@ const MAX_CONTENT_MATCHES_PER_FILE = 3;
 const MAX_CONTENT_SEARCH_FILE_SIZE = 1_048_576;
 const MAX_CONTENT_SEARCH_FILES = 500;
 const MAX_CONTENT_SEARCH_BYTES = 25_000_000;
+const MAX_COMPATIBILITY_PATH_BYTES = 4_096;
+const MAX_ARCHIVE_PATH_BYTES = 64 * 1024;
 const PROXY_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 
 interface SessionCwd {
@@ -121,6 +126,7 @@ export class OpenTerminalCompatibility {
       return;
     }
     if (PROXY_METHODS.has(request.method ?? '') && path.startsWith('/proxy/')) {
+      this.requireTools('list_ports');
       const match = path.match(/^\/proxy\/(\d+)(\/.*)?$/u);
       const port = match ? Number.parseInt(match[1]!, 10) : 0;
       if (!match || port < 1 || port > 65_535) throw new QubiclError('invalid_arguments', 'A valid published TCP port is required.', 400);
@@ -133,12 +139,83 @@ export class OpenTerminalCompatibility {
       if (!proxied) throw new QubiclError('port_not_published', `TCP port ${port} is not currently published by Qubicl.`, 404);
       return;
     }
+    if (request.method === 'GET' && path === '/execute') {
+      this.requireTools('exec_command');
+      const processes = await this.withLease(async (proof) => this.executor.compatibilityProcessList(proof));
+      sendJson(response, 200, processes);
+      return;
+    }
+    if (request.method === 'POST' && path === '/execute') {
+      this.requireTools('exec_command');
+      const body = await readJson(request);
+      const command = stringField(body, 'command');
+      rejectCompatibilityEnvironment(body.env);
+      const requestedCwd = body.cwd === undefined ? this.cwdFor(request) : stringField(body, 'cwd');
+      assertCompatibilityPath(requestedCwd, 'cwd');
+      const cwd = await this.resolvePath(requestedCwd, request, true, { operation: 'inspect', path: requestedCwd });
+      const info = await this.executor.files.info(cwd).catch((error: unknown) => {
+        throw mapFileSystemError(error, { operation: 'inspect', path: cwd });
+      });
+      if (!info.isDirectory()) throw new QubiclError('not_a_directory', `${cwd} is not a directory.`, 400);
+      const result = await this.withLease(async (proof) => this.executor.compatibilityProcessExecute(
+        command,
+        cwd,
+        proof,
+        {
+          waitMs: boundedIntegerQuery(url, 'wait', 10, 0, 30) * 1_000,
+          tail: boundedIntegerQuery(url, 'tail', 100, 1, 1_000),
+        },
+        compatibilitySessionId(request),
+      ));
+      sendJson(response, 200, result);
+      return;
+    }
+    const executeStatus = path.match(/^\/execute\/([A-Za-z0-9_-]{16,64})\/status$/u);
+    if (request.method === 'GET' && executeStatus) {
+      this.requireTools('exec_command');
+      const result = await this.withLease(async (proof) => this.executor.compatibilityProcessStatus(
+        executeStatus[1]!,
+        proof,
+        {
+          waitMs: boundedIntegerQuery(url, 'wait', 0, 0, 30) * 1_000,
+          offset: boundedIntegerQuery(url, 'offset', 0, 0, Number.MAX_SAFE_INTEGER),
+          ...(url.searchParams.has('tail') ? { tail: boundedIntegerQuery(url, 'tail', 100, 1, 1_000) } : {}),
+        },
+      ));
+      sendJson(response, 200, result);
+      return;
+    }
+    const executeInput = path.match(/^\/execute\/([A-Za-z0-9_-]{16,64})\/input$/u);
+    if (request.method === 'POST' && executeInput) {
+      this.requireTools('write_stdin');
+      const body = await readJson(request);
+      const result = await this.withLease(async (proof) => this.executor.compatibilityProcessInput(
+        executeInput[1]!,
+        stringValue(body.input, 'input'),
+        proof,
+      ));
+      sendJson(response, 200, result);
+      return;
+    }
+    const executeDelete = path.match(/^\/execute\/([A-Za-z0-9_-]{16,64})$/u);
+    if (request.method === 'DELETE' && executeDelete) {
+      this.requireTools('stop_process');
+      const result = await this.withLease(async (proof) => this.executor.compatibilityProcessDelete(
+        executeDelete[1]!,
+        proof,
+        booleanQuery(url, 'force', false),
+      ));
+      sendJson(response, 200, result);
+      return;
+    }
     if (request.method === 'GET' && path === '/files/cwd') {
+      this.requireTools('list_files');
       const cwd = this.cwdFor(request);
       sendJson(response, 200, { cwd, home: this.home, root: { path: this.home, label: 'Home' } });
       return;
     }
     if (request.method === 'POST' && path === '/files/cwd') {
+      this.requireTools('get_file_info');
       const body = await readJson(request);
       const requested = stringField(body, 'path');
       const target = await this.resolvePath(requested, request, true, { operation: 'inspect', path: requested });
@@ -149,6 +226,7 @@ export class OpenTerminalCompatibility {
       return;
     }
     if (request.method === 'GET' && path === '/files/list') {
+      this.requireTools('list_files');
       const requested = url.searchParams.get('directory') ?? '.';
       const target = await this.resolvePath(requested, request, true, { operation: 'list', path: requested });
       const entries = await Promise.all((await this.listCompatibilityFiles(target))
@@ -162,6 +240,7 @@ export class OpenTerminalCompatibility {
       return;
     }
     if (request.method === 'GET' && path === '/files/search') {
+      this.requireTools('list_files');
       const requested = url.searchParams.get('path') ?? '.';
       const target = await this.resolvePath(requested, request, true, { operation: 'list', path: requested });
       const limit = boundedIntegerQuery(url, 'limit', 20, 1, MAX_SEARCH_RESULTS);
@@ -187,6 +266,7 @@ export class OpenTerminalCompatibility {
       return;
     }
     if (request.method === 'GET' && path === '/files/matches') {
+      this.requireTools('list_files', 'read_file');
       const query = requiredQuery(url, 'query').trim();
       if (!query) throw new QubiclError('invalid_arguments', 'Query parameter query must not be blank.', 400);
       const requested = url.searchParams.get('path') ?? '.';
@@ -204,6 +284,7 @@ export class OpenTerminalCompatibility {
       return;
     }
     if (request.method === 'GET' && path === '/files/display') {
+      this.requireTools('get_file_info');
       const requested = requiredQuery(url, 'path');
       const candidate = await this.resolvePath(requested, request, false, { operation: 'read', path: requested });
       let target: string;
@@ -228,6 +309,7 @@ export class OpenTerminalCompatibility {
       return;
     }
     if (request.method === 'GET' && path === '/files/read') {
+      this.requireTools('read_file');
       const requested = requiredQuery(url, 'path');
       const target = await this.resolvePath(requested, request, true, { operation: 'read', path: requested });
       const result = await this.callTool('read_file', {
@@ -250,6 +332,7 @@ export class OpenTerminalCompatibility {
       return;
     }
     if (request.method === 'GET' && (path === '/files/view' || path.startsWith(FILE_SERVE_PREFIX))) {
+      this.requireTools('read_file');
       const requested = path === '/files/view'
         ? requiredQuery(url, 'path')
         : servedFilePath(path);
@@ -270,6 +353,7 @@ export class OpenTerminalCompatibility {
       return;
     }
     if (request.method === 'POST' && path === '/files/upload') {
+      this.requireTools('write_file');
       const requestedDirectory = url.searchParams.get('directory') ?? '.';
       const directory = await this.resolvePath(requestedDirectory, request, true, { operation: 'inspect', path: requestedDirectory });
       const info = await this.callTool('get_file_info', { path: directory }) as { type?: string };
@@ -287,6 +371,7 @@ export class OpenTerminalCompatibility {
       return;
     }
     if (request.method === 'POST' && path === '/files/mkdir') {
+      this.requireTools('write_file');
       const body = await readJson(request);
       const requested = stringField(body, 'path');
       const target = await this.resolvePath(requested, request, false, { operation: 'write', path: requested });
@@ -301,6 +386,7 @@ export class OpenTerminalCompatibility {
       return;
     }
     if (request.method === 'DELETE' && path === '/files/delete') {
+      this.requireTools('get_file_info', 'delete_path');
       const requested = requiredQuery(url, 'path');
       const target = await this.resolvePath(requested, request, true, { operation: 'delete', path: requested });
       if (target === this.home) throw new QubiclError('unsafe_delete', `Refusing to delete protected path ${this.home}.`, 400);
@@ -310,6 +396,7 @@ export class OpenTerminalCompatibility {
       return;
     }
     if (request.method === 'POST' && path === '/files/move') {
+      this.requireTools('move_path');
       const body = await readJson(request);
       const requestedSource = stringField(body, 'source');
       const requestedDestination = stringField(body, 'destination');
@@ -321,11 +408,28 @@ export class OpenTerminalCompatibility {
       return;
     }
     if (request.method === 'POST' && path === '/files/archive') {
-      throw new QubiclError(
-        'feature_unsupported',
-        'Multi-file archive downloads are not available in Qubicl Open Terminal compatibility v1; download files individually.',
-        501,
-      );
+      this.requireTools('list_files', 'read_file');
+      const body = await readJson(request);
+      const requested = stringArrayField(body, 'paths', 1, OPEN_TERMINAL_ARCHIVE_LIMITS.maximumPaths);
+      let pathBytes = 0;
+      for (const value of requested) {
+        assertCompatibilityPath(value, 'paths');
+        pathBytes += Buffer.byteLength(value, 'utf8');
+        if (pathBytes > MAX_ARCHIVE_PATH_BYTES) {
+          throw new QubiclError('invalid_arguments', `Archive paths exceed the ${MAX_ARCHIVE_PATH_BYTES}-byte aggregate limit.`, 400);
+        }
+      }
+      const targets = await Promise.all(requested.map((value) => this.resolveArchivePath(value, request)));
+      const cancellation = archiveCancellation(request, response);
+      let archive: OpenTerminalArchive | undefined;
+      try {
+        archive = await this.withLease(async (proof) => this.executor.compatibilityArchive(targets, proof, cancellation.signal));
+        await sendArchive(response, archive, cancellation.signal);
+      } finally {
+        cancellation.cleanup();
+        await archive?.cleanup();
+      }
+      return;
     }
     if (request.method === 'POST' && path.startsWith('/v1/tools/')) {
       const name = path.slice('/v1/tools/'.length);
@@ -344,6 +448,7 @@ export class OpenTerminalCompatibility {
   }
 
   private async callTool(name: ToolName, rawInput: unknown): Promise<unknown> {
+    this.requireTools(name);
     const input = objectInput(rawInput);
     if (!toolDefinitions[name].lease) return this.executor.call(name, input);
     const { lease: _ignored, ...withoutLease } = input;
@@ -434,14 +539,16 @@ export class OpenTerminalCompatibility {
     return { results: results.map(({ rank: _rank, ...result }) => result), truncated };
   }
 
-  private async withLease<T>(action: () => Promise<T>): Promise<T> {
+  private async withLease<T>(action: (proof: LeaseProof) => Promise<T>): Promise<T> {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const proof = await this.ensureLease();
+      let actionInvoked = false;
       try {
         this.executor.leases.verify(proof, true);
-        return await action();
+        actionInvoked = true;
+        return await action(proof);
       } catch (error) {
-        if (!(error instanceof QubiclError) || error.code !== 'stale_lease' || attempt > 0) throw error;
+        if (actionInvoked || !(error instanceof QubiclError) || error.code !== 'stale_lease' || attempt > 0) throw error;
         if (sameProof(this.lease, proof)) this.lease = undefined;
       }
     }
@@ -465,6 +572,18 @@ export class OpenTerminalCompatibility {
         this.acquiringLease = undefined;
       });
     return this.acquiringLease;
+  }
+
+  private requireTools(...names: ToolName[]): void {
+    const enabled = new Set(this.executor.enabledToolNames());
+    const unavailable = names.filter((name) => !enabled.has(name));
+    if (unavailable.length) {
+      throw new QubiclError(
+        'capability_unsupported',
+        `This Open Terminal compatibility route is unavailable because operator policy disables: ${unavailable.join(', ')}.`,
+        404,
+      );
+    }
   }
 
   private cwdFor(request: IncomingMessage): string {
@@ -516,6 +635,19 @@ export class OpenTerminalCompatibility {
     }
   }
 
+  private async resolveArchivePath(value: string, request: IncomingMessage): Promise<string> {
+    const candidate = resolve(isAbsolute(value) ? value : resolve(this.cwdFor(request), value));
+    try {
+      const bounded = this.executor.files.absolutePath(candidate);
+      return await this.executor.files.canonicalPath(bounded, false);
+    } catch (error) {
+      if (error instanceof BoundedPathError) {
+        throw new QubiclError('path_outside_home', `Open Terminal compatibility is restricted to ${this.home}.`, 403);
+      }
+      throw mapFileSystemError(error, { operation: 'inspect', path: value });
+    }
+  }
+
 }
 
 function objectInput(value: unknown): Record<string, unknown> {
@@ -529,6 +661,36 @@ function stringField(value: Record<string, unknown>, name: string): string {
   const field = value[name];
   if (typeof field !== 'string' || field.length === 0) throw new QubiclError('invalid_arguments', `${name} must be a non-empty string.`, 400);
   return field;
+}
+
+function stringValue(value: unknown, name: string): string {
+  if (typeof value !== 'string') throw new QubiclError('invalid_arguments', `${name} must be a string.`, 400);
+  return value;
+}
+
+function stringArrayField(value: Record<string, unknown>, name: string, minimum: number, maximum: number): string[] {
+  const field = value[name];
+  if (!Array.isArray(field) || field.some((entry) => typeof entry !== 'string' || entry.length === 0)
+    || field.length < minimum || field.length > maximum) {
+    throw new QubiclError('invalid_arguments', `${name} must contain ${minimum} through ${maximum} non-empty strings.`, 400);
+  }
+  return field as string[];
+}
+
+function rejectCompatibilityEnvironment(value: unknown): void {
+  if (value === undefined) return;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new QubiclError('invalid_arguments', 'env must be an object when provided.', 400);
+  }
+  if (Object.keys(value as Record<string, unknown>).length > 0) {
+    throw new QubiclError('environment_unsupported', 'Per-command environment overrides are unavailable in Qubicl compatibility mode.', 400);
+  }
+}
+
+function assertCompatibilityPath(value: string, name: string): void {
+  if (value.length > MAX_COMPATIBILITY_PATH_BYTES || Buffer.byteLength(value, 'utf8') > MAX_COMPATIBILITY_PATH_BYTES) {
+    throw new QubiclError('invalid_arguments', `${name} paths are limited to ${MAX_COMPATIBILITY_PATH_BYTES} UTF-8 bytes and code units.`, 400);
+  }
 }
 
 function numberField(value: Record<string, unknown>, name: string): number {
@@ -632,6 +794,11 @@ function servedFilePath(path: string): string {
 function sessionKey(request: IncomingMessage): string {
   const value = request.headers['x-session-id'];
   return typeof value === 'string' && value.length > 0 && value.length <= 256 ? value : 'default';
+}
+
+function compatibilitySessionId(request: IncomingMessage): string | null {
+  const value = request.headers['x-session-id'];
+  return typeof value === 'string' && value.length > 0 && value.length <= 256 ? value : null;
 }
 
 function sameProof(left: LeaseProof | undefined, right: LeaseProof): boolean {
@@ -739,12 +906,74 @@ function sendBytes(response: ServerResponse, status: number, value: Buffer, cont
   response.writeHead(status, {
     'content-type': contentType,
     'content-length': value.length,
-    'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(filename)}`,
+    'content-disposition': `${requiresAttachment(path) ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(filename)}`,
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
   });
   response.end(value);
+}
+
+async function sendArchive(response: ServerResponse, archive: OpenTerminalArchive, signal?: AbortSignal): Promise<void> {
+  if (response.headersSent) return;
+  if (signal?.aborted) throw new QubiclError('archive_cancelled', 'Archive transfer was cancelled because the client disconnected.', 499);
+  const info = fstatSync(archive.descriptor, { bigint: true });
+  if (!info.isFile() || info.nlink !== 0n || (info.mode & 0o222n) !== 0n
+    || info.dev !== archive.identity.dev || info.ino !== archive.identity.ino
+    || info.size !== archive.identity.size || info.size !== BigInt(archive.size)) {
+    throw new QubiclError('archive_output_changed', 'The completed ZIP archive changed before it could be sent.', 500);
+  }
+  response.writeHead(200, {
+    'content-type': 'application/zip',
+    'content-length': archive.size,
+    'content-disposition': "attachment; filename=\"archive.zip\"; filename*=UTF-8''archive.zip",
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+  });
+  const transfer = new AbortController();
+  const onAbort = (): void => transfer.abort(signal?.reason);
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener('abort', onAbort, { once: true });
+  const timeout = setTimeout(() => transfer.abort(new Error('archive send timeout')), OPEN_TERMINAL_ARCHIVE_LIMITS.sendTimeoutMs);
+  timeout.unref();
+  try {
+    await pipeline(createReadStream('', {
+      fd: archive.descriptor,
+      autoClose: false,
+      start: 0,
+      end: archive.size - 1,
+    }), response, { signal: transfer.signal });
+  } catch (error) {
+    if (transfer.signal.aborted) {
+      if (signal?.aborted) throw new QubiclError('archive_cancelled', 'Archive transfer was cancelled because the client disconnected.', 499);
+      throw new QubiclError('archive_send_timeout', `Archive transfer exceeded ${OPEN_TERMINAL_ARCHIVE_LIMITS.sendTimeoutMs} milliseconds.`, 504);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+function archiveCancellation(request: IncomingMessage, response: ServerResponse): { signal: AbortSignal; cleanup(): void } {
+  const controller = new AbortController();
+  const cancel = (): void => controller.abort(new Error('archive client disconnected'));
+  const close = (): void => { if (!response.writableFinished) cancel(); };
+  request.once('aborted', cancel);
+  response.once('close', close);
+  if (request.aborted || response.destroyed) cancel();
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      request.off('aborted', cancel);
+      response.off('close', close);
+    },
+  };
+}
+
+function requiresAttachment(path: string): boolean {
+  return ['.html', '.htm', '.js', '.mjs', '.ts', '.svg'].includes(extname(path).toLowerCase());
 }
 
 function sendToolImage(response: ServerResponse, value: unknown): void {

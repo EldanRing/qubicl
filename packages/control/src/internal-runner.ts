@@ -116,6 +116,31 @@ async function handleExecutor(
     case 'POST /v1/process/stop':
       send(response, 200, await processes.stop(string(body.id, 'id'), proof(body.owner), stopSignal(body.signal)));
       return;
+    case 'POST /v1/process/compatibility-execute':
+      send(response, 200, await processes.executeCompatibility(
+        string(body.command, 'command'),
+        string(body.cwd, 'cwd'),
+        proof(body.owner),
+        compatibilityStatusOptions(body.options),
+        nullableString(body.sessionId, 'sessionId'),
+      ));
+      return;
+    case 'POST /v1/process/compatibility-list':
+      send(response, 200, processes.listCompatibility(proof(body.owner)));
+      return;
+    case 'POST /v1/process/compatibility-status':
+      send(response, 200, await processes.statusCompatibility(
+        string(body.id, 'id'),
+        proof(body.owner),
+        compatibilityStatusOptions(body.options),
+      ));
+      return;
+    case 'POST /v1/process/compatibility-input':
+      send(response, 200, await processes.inputCompatibility(string(body.id, 'id'), string(body.input, 'input'), proof(body.owner)));
+      return;
+    case 'POST /v1/process/compatibility-delete':
+      send(response, 200, await processes.deleteCompatibility(string(body.id, 'id'), proof(body.owner), Boolean(body.force)));
+      return;
     case 'POST /v1/process/terminate-owner':
       send(response, 200, await processes.terminateOwner(body.owner === undefined ? undefined : proof(body.owner)));
       return;
@@ -249,6 +274,19 @@ function number(value: unknown, name: string): number {
 }
 function optionalNumber(value: unknown, name: string): number | undefined {
   return value === undefined ? undefined : number(value, name);
+}
+function nullableString(value: unknown, name: string): string | null {
+  if (value === null || value === undefined) return null;
+  return string(value, name);
+}
+function compatibilityStatusOptions(value: unknown): { waitMs?: number; offset?: number; tail?: number } {
+  if (value === undefined) return {};
+  const candidate = object(value, 'options');
+  return {
+    ...(candidate.waitMs === undefined ? {} : { waitMs: number(candidate.waitMs, 'options.waitMs') }),
+    ...(candidate.offset === undefined ? {} : { offset: number(candidate.offset, 'options.offset') }),
+    ...(candidate.tail === undefined ? {} : { tail: number(candidate.tail, 'options.tail') }),
+  };
 }
 function proof(value: unknown): LeaseProof {
   if (!value || typeof value !== 'object') throw new QubiclError('invalid_arguments', 'owner must be a lease proof.');

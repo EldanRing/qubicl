@@ -8,7 +8,14 @@ import { QubiclError } from './errors.js';
 import { creationTime, mapFileSystemError, type FileErrorContext } from './file-errors.js';
 import { DesktopApplicationManager } from './desktop-applications.js';
 import { LeaseManager, type LeaseProof } from './lease.js';
-import { ProcessManager, type ProcessOutputMode, type StopSignal } from './processes.js';
+import {
+  ProcessManager,
+  type CompatibilityProcessOutput,
+  type CompatibilityProcessSummary,
+  type CompatibilityStatusOptions,
+  type ProcessOutputMode,
+  type StopSignal,
+} from './processes.js';
 import { readEffectiveResourceLimits } from './resource-limits.js';
 import { developmentComputerManifest } from './image-manifest.js';
 import { withFileMutation } from './file-mutations.js';
@@ -22,6 +29,7 @@ import { SkillManager } from './skills.js';
 import { RuntimePolicy } from './policy.js';
 import { ViewerPointerStore, type ViewerPointerUpdate } from './viewer-actions.js';
 import { BoundedFileSystem, BoundedPathError } from './bounded-files.js';
+import { createOpenTerminalArchive, OPEN_TERMINAL_ARCHIVE_LIMITS, type OpenTerminalArchive } from './open-terminal-archive.js';
 
 type ToolInput = Record<string, unknown>;
 
@@ -37,10 +45,21 @@ export interface ToolExecutorOptions {
   web?: WebController;
   viewerPointers?: ViewerPointerStore;
   files?: BoundedFileSystem;
+  archiveFactory?: typeof createOpenTerminalArchive;
 }
 
-type ProcessController = Pick<ProcessManager, 'exec' | 'write' | 'stop' | 'terminateOwner'> & {
+type ProcessController = Pick<ProcessManager,
+  | 'exec'
+  | 'write'
+  | 'stop'
+  | 'executeCompatibility'
+  | 'statusCompatibility'
+  | 'inputCompatibility'
+  | 'deleteCompatibility'
+  | 'terminateOwner'
+> & {
   count(): number | Promise<number>;
+  listCompatibility(owner: LeaseProof): ReturnType<ProcessManager['listCompatibility']> | Promise<ReturnType<ProcessManager['listCompatibility']>>;
   status?(): Promise<RemoteProcessStatus>;
 };
 type DesktopApplicationController = Pick<DesktopApplicationManager, 'open' | 'close' | 'shutdown'> & {
@@ -86,6 +105,9 @@ export class ToolExecutor {
   readonly manifestSha256: string;
   readonly durableRoot: string;
   readonly files: BoundedFileSystem;
+  private readonly archiveFactory: typeof createOpenTerminalArchive;
+  private activeArchives = 0;
+  private reservedArchiveBytes = 0;
   private gatewayEpoch: string | undefined;
   private gatewayTransition: Promise<void> | undefined;
 
@@ -96,6 +118,7 @@ export class ToolExecutor {
     this.viewerPointers = options.viewerPointers ?? new ViewerPointerStore();
     this.durableRoot = resolve(options.durableRoot ?? options.files?.root ?? '/home/qubicl');
     this.files = options.files ?? new BoundedFileSystem(this.durableRoot);
+    this.archiveFactory = options.archiveFactory ?? createOpenTerminalArchive;
     if (this.files.root !== this.durableRoot) throw new Error('The bounded filesystem root must match the durable root.');
     this.processes = options.processes ?? configuredProcessController(this.durableRoot);
     this.desktopApplications = options.desktopApplications ?? configuredDesktopApplicationController(contract.manifest.compatibility, this.durableRoot);
@@ -432,10 +455,168 @@ export class ToolExecutor {
 
   enabledToolNames(): ToolName[] { return this.policy.enabledTools(); }
 
+  compatibilityProcessList(proof: LeaseProof): Promise<CompatibilityProcessSummary[]> {
+    return this.compatibilityProcessOperation('exec_command', 'process-list', proof, async (owner) => this.processes.listCompatibility(owner));
+  }
+
+  compatibilityProcessExecute(
+    command: string,
+    cwd: string,
+    proof: LeaseProof,
+    options: CompatibilityStatusOptions,
+    sessionId: string | null,
+  ): Promise<CompatibilityProcessOutput> {
+    return this.compatibilityProcessOperation('exec_command', 'process-start', proof, (owner) => {
+      if (Buffer.byteLength(command, 'utf8') > 64 * 1024) {
+        throw new QubiclError('command_too_large', 'command exceeds the 65536-byte UTF-8 limit.', 413);
+      }
+      if (sessionId !== null && (sessionId.length < 1 || sessionId.length > 256)) {
+        throw new QubiclError('invalid_arguments', 'The compatibility session identifier is invalid.', 400);
+      }
+      const workingDirectory = commandWorkingDirectory(this.durableRoot, cwd);
+      return this.processes.executeCompatibility(command, workingDirectory, owner, options, sessionId);
+    }, {}, true);
+  }
+
+  compatibilityProcessStatus(id: string, proof: LeaseProof, options: CompatibilityStatusOptions): Promise<CompatibilityProcessOutput> {
+    return this.compatibilityProcessOperation('exec_command', 'process-attach', proof, (owner) => (
+      this.processes.statusCompatibility(id, owner, options)
+    ), { processId: id });
+  }
+
+  compatibilityProcessInput(id: string, input: string, proof: LeaseProof): Promise<{ status: 'ok' }> {
+    const bytes = Buffer.byteLength(input, 'utf8');
+    return this.compatibilityProcessOperation('write_stdin', 'process-input', proof, (owner) => {
+      if (bytes > 64 * 1024) throw new QubiclError('input_too_large', 'input exceeds the 65536-byte UTF-8 limit.', 413);
+      return this.processes.inputCompatibility(id, input, owner);
+    }, { processId: id, bytes }, true);
+  }
+
+  compatibilityProcessDelete(id: string, proof: LeaseProof, force: boolean): Promise<{ status: 'killed' }> {
+    return this.compatibilityProcessOperation('stop_process', 'process-stop', proof, (owner) => (
+      this.processes.deleteCompatibility(id, owner, force)
+    ), { processId: id, force });
+  }
+
+  async compatibilityArchive(paths: readonly string[], proof: LeaseProof, signal?: AbortSignal): Promise<OpenTerminalArchive> {
+    const started = Date.now();
+    let releaseReservation: (() => void) | undefined;
+    try {
+      for (const name of ['list_files', 'read_file'] as const) {
+        if (!this.policy.isToolEnabled(name)) {
+          throw new QubiclError('capability_unsupported', `Tool ${name} is not supported because it is disabled by this computer's operator policy or capability contract.`, 404);
+        }
+      }
+      this.leases.verify(proof, true);
+      if (signal?.aborted) throw new QubiclError('archive_cancelled', 'Archive creation was cancelled because the client disconnected.', 499);
+      releaseReservation = this.reserveArchive();
+      const bounded = paths.map((path) => this.workspacePath(path));
+      const archive = await this.archiveFactory(this.files, bounded, signal ? { signal } : {});
+      try {
+        if (signal?.aborted) throw new QubiclError('archive_cancelled', 'Archive creation was cancelled because the client disconnected.', 499);
+        for (const name of ['list_files', 'read_file'] as const) {
+          if (!this.policy.isToolEnabled(name)) {
+            throw new QubiclError('capability_unsupported', `Tool ${name} was disabled while the compatibility operation was in progress.`, 404);
+          }
+        }
+        this.leases.verify(proof, true);
+        this.audit.record({ type: 'tool', tool: 'read_file', compatibility: 'open-terminal', operation: 'archive-read', status: 'ok', durationMs: Date.now() - started, pathCount: paths.length });
+        const release = releaseReservation;
+        releaseReservation = undefined;
+        let cleaned = false;
+        return {
+          ...archive,
+          cleanup: async () => {
+            if (cleaned) return;
+            cleaned = true;
+            try { await archive.cleanup(); }
+            finally { release?.(); }
+          },
+        };
+      } catch (error) {
+        await archive.cleanup();
+        throw error;
+      }
+    } catch (error) {
+      this.audit.record({ type: 'tool', tool: 'read_file', compatibility: 'open-terminal', operation: 'archive-read', status: 'error', durationMs: Date.now() - started, pathCount: paths.length, code: error instanceof QubiclError ? error.code : 'internal_error' });
+      throw error;
+    } finally {
+      releaseReservation?.();
+    }
+  }
+
+  private reserveArchive(): () => void {
+    const reservedBytes = OPEN_TERMINAL_ARCHIVE_LIMITS.maximumOutputBytes;
+    if (this.activeArchives >= OPEN_TERMINAL_ARCHIVE_LIMITS.maximumConcurrentArchives
+      || this.reservedArchiveBytes + reservedBytes > OPEN_TERMINAL_ARCHIVE_LIMITS.maximumReservedOutputBytes) {
+      throw new QubiclError(
+        'archive_busy',
+        `This computer already has ${this.activeArchives} active archive download${this.activeArchives === 1 ? '' : 's'}. Wait for one to finish before starting another.`,
+        429,
+      );
+    }
+    this.activeArchives += 1;
+    this.reservedArchiveBytes += reservedBytes;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.activeArchives = Math.max(0, this.activeArchives - 1);
+      this.reservedArchiveBytes = Math.max(0, this.reservedArchiveBytes - reservedBytes);
+    };
+  }
+
   applyViewerPointerUpdate(update: ViewerPointerUpdate): boolean {
     const lease = this.leases.snapshot();
     if (lease.controller !== 'agent' || lease.generation !== update.generation) return false;
     return this.viewerPointers.apply(update);
+  }
+
+  private async compatibilityProcessOperation<T>(
+    tool: 'exec_command' | 'write_stdin' | 'stop_process',
+    operation: string,
+    proof: LeaseProof,
+    action: (owner: LeaseProof) => Promise<T> | T,
+    metadata: Record<string, unknown> = {},
+    fenceAmbiguousFailure = false,
+  ): Promise<T> {
+    const started = Date.now();
+    try {
+      if (!this.policy.isToolEnabled(tool)) {
+        throw new QubiclError('capability_unsupported', `Tool ${tool} is not supported because it is disabled by this computer's operator policy or capability contract.`, 404);
+      }
+      const owner = this.leases.verify(proof, true);
+      let result: T;
+      try {
+        result = await action(owner);
+      } catch (error) {
+        if (fenceAmbiguousFailure && error instanceof QubiclError && error.code === 'internal_runner_ambiguous') {
+          try { await this.leases.revokeAgentControlFor(owner); }
+          catch (fenceError) {
+            throw new QubiclError(
+              'process_fencing_failed',
+              `The isolated process operation had an ambiguous result. The lease was invalidated, but Qubicl could not confirm owner fencing: ${(fenceError as Error).message}`,
+              500,
+            );
+          }
+        }
+        throw error;
+      }
+      try {
+        if (!this.policy.isToolEnabled(tool)) {
+          throw new QubiclError('capability_unsupported', `Tool ${tool} was disabled while the compatibility operation was in progress.`, 404);
+        }
+        this.leases.verify(owner, true);
+      } catch (boundaryError) {
+        await this.leases.revokeAgentControlFor(owner);
+        throw boundaryError;
+      }
+      this.audit.record({ type: 'tool', tool, compatibility: 'open-terminal', operation, status: 'ok', durationMs: Date.now() - started, ...metadata });
+      return result;
+    } catch (error) {
+      this.audit.record({ type: 'tool', tool, compatibility: 'open-terminal', operation, status: 'error', durationMs: Date.now() - started, ...metadata, code: error instanceof QubiclError ? error.code : 'internal_error' });
+      throw error;
+    }
   }
 
   private async browserExtract(url: string, format: 'markdown' | 'text', maxChars: number): Promise<Record<string, unknown>> {

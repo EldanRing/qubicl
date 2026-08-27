@@ -24,6 +24,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   deterministic gateway-first order before confirmation. Pending updates also
   appear in `status`, with default-off bundled-catalog notices available as a
   private local preference.
+- Open Terminal compatibility now includes bounded non-PTY process execution,
+  listing, attachment, stdin, output pagination, and cleanup plus bounded
+  multi-path ZIP download for regular files and directories.
 
 ### Changed
 
@@ -79,6 +82,13 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   topology, image identities, and preserved running/stopped/absent state;
   read-only status and preview paths cannot rewrite or resurrect a pending
   journal.
+- Open Terminal process journals and ZIP inputs/outputs use private,
+  descriptor-pinned identities with bounded record and inventory metadata.
+  Policy or lease changes and ambiguous runner responses fence work without
+  replay; links, special files, pathname swaps, hidden-start failures, output
+  substitution, excess archive concurrency, and disconnected transfers fail
+  closed. Native responses for HTML, HTM, JavaScript, TypeScript, and SVG files
+  are forced to download instead of rendering inline.
 
 ## 0.1.1 - 2026-08-27
 

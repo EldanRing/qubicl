@@ -110,6 +110,16 @@ export class LeaseManager {
     return this.revoke(revoked);
   }
 
+  async revokeAgentControlFor(proof: LeaseProof): Promise<LeaseRevocationReport> {
+    const current = this.lease;
+    this.lease = undefined;
+    if (current) this.generation += 1;
+    this.clearTimer();
+    const proofs = [proof];
+    if (current && !sameProof(current, proof)) proofs.push(current);
+    return this.revokeExact(proofs);
+  }
+
   async takeHumanControl(): Promise<HumanTakeoverSnapshot> {
     if (this.human) {
       if (this.revocation) await this.revocation;
@@ -183,4 +193,35 @@ export class LeaseManager {
     }, () => undefined);
     return pending;
   }
+
+  private revokeExact(proofs: readonly LeaseProof[]): Promise<LeaseRevocationReport> {
+    const previous = this.revocation;
+    const pending = (async () => {
+      let failure: unknown;
+      if (previous) {
+        try { await previous; }
+        catch (error) { failure = error; }
+      }
+      let terminatedManagedProcesses = 0;
+      for (const proof of proofs) {
+        try {
+          const report = await this.onRevoked(proof);
+          terminatedManagedProcesses += report?.terminatedManagedProcesses ?? 0;
+        } catch (error) {
+          failure ??= error;
+        }
+      }
+      if (failure) throw failure;
+      return { terminatedManagedProcesses };
+    })();
+    this.revocation = pending;
+    void pending.then(() => {
+      if (this.revocation === pending) this.revocation = undefined;
+    }, () => undefined);
+    return pending;
+  }
+}
+
+function sameProof(left: LeaseProof, right: LeaseProof): boolean {
+  return left.id === right.id && left.generation === right.generation && left.epoch === right.epoch;
 }

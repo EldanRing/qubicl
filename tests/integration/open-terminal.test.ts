@@ -1,15 +1,23 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 import { OpenTerminalCompatibility } from '@qubicl/control/open-terminal';
 import { ToolExecutor } from '@qubicl/control/executor';
 import { PreviewManager } from '../../packages/control/dist/previews.js';
+import { QubiclError } from '../../packages/control/dist/errors.js';
 import type { BrowserManager } from '@qubicl/control/browser';
 import { enabledToolNames, PRESET_DEFINITIONS } from '@qubicl/core';
 import { BoundedFileSystem, type BoundedFileHookEvent } from '@qubicl/control/bounded-files';
+import { unzipSync } from 'fflate';
+import { createOpenTerminalArchive } from '../../packages/control/dist/open-terminal-archive.js';
+import { RemoteProcessManager } from '../../packages/control/dist/remote-runners.js';
+
+const execFileAsync = promisify(execFile);
 
 test('Open Terminal compatibility provides native files through a transparent fenced lease', async (context) => {
   const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-'));
@@ -81,6 +89,11 @@ test('Open Terminal compatibility provides native files through a transparent fe
   assert.equal(Object.hasOwn(spec.paths, '/v1/tools/web_search'), true);
   assert.equal(Object.hasOwn(spec.paths, '/v1/tools/web_extract'), true);
   assert.equal(Object.hasOwn(spec.paths, '/files/display'), true);
+  assert.equal(Object.hasOwn(spec.paths, '/execute'), true);
+  assert.equal(Object.hasOwn(spec.paths, '/execute/{id}/status'), true);
+  assert.equal(Object.hasOwn(spec.paths, '/execute/{id}/input'), true);
+  assert.equal(Object.hasOwn(spec.paths, '/execute/{id}'), true);
+  assert.equal(Object.hasOwn(spec.paths, '/files/archive'), true);
 
   assert.deepEqual(await json(`${base}/ports`), { ports: [] });
   const unpublishedProxy = await fetch(`${base}/proxy/${previewPort}/before`);
@@ -225,6 +238,21 @@ test('Open Terminal compatibility provides native files through a transparent fe
   assert.match(served.headers.get('content-type') ?? '', /^text\/plain/);
   assert.equal(await served.text(), 'native file browser works\n');
 
+  for (const [name, content, contentType] of [
+    ['active.html', '<script>window.top.location="https://example.invalid"</script>', /^text\/html/],
+    ['active.js', 'window.top.location="https://example.invalid"', /^(?:text|application)\/javascript/],
+    ['active.svg', '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', /^image\/svg\+xml/],
+  ] as const) {
+    const activePath = join(home, 'documents', name);
+    await writeFile(activePath, content);
+    const activeResponse = await fetch(`${base}/files/view?path=${encodeURIComponent(activePath)}`);
+    assert.match(activeResponse.headers.get('content-disposition') ?? '', /^attachment;/, name);
+    assert.match(activeResponse.headers.get('content-type') ?? '', contentType, name);
+  }
+  const nativeImage = await fetch(`${base}/files/view?path=${encodeURIComponent(imagePath)}`);
+  assert.match(nativeImage.headers.get('content-disposition') ?? '', /^inline;/);
+  assert.equal(nativeImage.headers.get('content-type'), 'image/png');
+
   const servedOutside = await fetch(`${base}/files/serve/${tmpdir().slice(1)}`);
   assert.equal(servedOutside.status, 403);
   assert.match(JSON.stringify(await servedOutside.json()), /path_outside_home/);
@@ -247,10 +275,56 @@ test('Open Terminal compatibility provides native files through a transparent fe
   const archive = await fetch(`${base}/files/archive`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ paths: [join(home, 'moved.txt')] }),
+    body: JSON.stringify({ paths: [join(home, 'moved.txt'), join(home, 'documents')] }),
   });
-  assert.equal(archive.status, 501);
-  assert.match(JSON.stringify(await archive.json()), /feature_unsupported/);
+  assert.equal(archive.status, 200);
+  assert.equal(archive.headers.get('content-type'), 'application/zip');
+  assert.equal(
+    archive.headers.get('content-disposition'),
+    "attachment; filename=\"archive.zip\"; filename*=UTF-8''archive.zip",
+  );
+  const archived = unzipSync(new Uint8Array(await archive.arrayBuffer()));
+  assert.equal(Buffer.from(archived['moved.txt']!).toString('utf8'), 'written without a caller lease');
+  assert.equal(Buffer.from(archived['documents/note.txt']!).toString('utf8'), 'native file browser works\n');
+
+  const startedResponse = await fetch(`${base}/execute?wait=0&tail=100`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-session-id': 'chat-one' },
+    body: JSON.stringify({
+      command: `${JSON.stringify(process.execPath)} -e "process.stdin.on('data', value => { console.log('echo:' + value.toString().trim()); process.exit(0); });"`,
+      cwd: home,
+      env: {},
+    }),
+  });
+  assert.equal(startedResponse.status, 200);
+  const startedProcess = await startedResponse.json() as { id: string; status: string; session_id: string | null; log_path: null };
+  assert.equal(startedProcess.status, 'running');
+  assert.equal(startedProcess.session_id, 'chat-one');
+  assert.equal(startedProcess.log_path, null);
+  const listedProcesses = await json(`${base}/execute`) as Array<{ id: string }>;
+  assert.equal(listedProcesses.some(({ id }) => id === startedProcess.id), true);
+  const inputResponse = await fetch(`${base}/execute/${startedProcess.id}/input`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ input: 'hello\n' }),
+  });
+  assert.deepEqual(await inputResponse.json(), { status: 'ok' });
+  let attached = await json(`${base}/execute/${startedProcess.id}/status?wait=2&offset=0`) as {
+    status: string; output: Array<{ type: string; data: string }>; next_offset: number;
+  };
+  const attachedOutput = [...attached.output];
+  while (attached.status === 'running') {
+    attached = await json(`${base}/execute/${startedProcess.id}/status?wait=2&offset=${attached.next_offset}`) as typeof attached;
+    attachedOutput.push(...attached.output);
+  }
+  assert.equal(attached.status, 'done');
+  assert.match(attachedOutput.map(({ data }) => data).join(''), /echo:hello/);
+  assert.ok(attached.next_offset > 0);
+  const removedProcess = await fetch(`${base}/execute/${startedProcess.id}?force=true`, { method: 'DELETE' });
+  assert.deepEqual(await removedProcess.json(), { status: 'killed' });
+  const environmentRejected = await fetch(`${base}/execute?wait=0`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command: 'true', env: { SECRET: 'blocked' } }),
+  });
+  assert.equal(environmentRejected.status, 400);
+  assert.doesNotMatch(await environmentRejected.text(), /blocked/);
 
   const outside = await fetch(`${base}/files/list?directory=${encodeURIComponent(tmpdir())}`);
   assert.equal(outside.status, 403);
@@ -398,6 +472,674 @@ test('Open Terminal direct file routes stay descriptor-anchored during determini
   assertHook();
   assert.equal(await readFile(join(displacedUploadParent, 'upload.txt'), 'utf8'), 'inside upload');
   await assert.rejects(lstat(join(outside, 'upload-parent', 'upload.txt')), { code: 'ENOENT' });
+
+  const archiveSource = join(home, 'archive-source.txt');
+  const displacedArchiveSource = join(home, 'archive-source-pinned.txt');
+  await writeFile(archiveSource, 'inventory identity');
+  const temporaryArchivesBefore = new Set((await readdir(tmpdir())).filter((name) => name.startsWith('qubicl-open-terminal-archive-')));
+  assertHook = arm(
+    (event) => event.operation === 'read' && event.stage === 'parent-resolved' && event.path === archiveSource,
+    async () => { await rename(archiveSource, displacedArchiveSource); await writeFile(archiveSource, 'replacement identity'); },
+  );
+  const swappedArchive = await fetch(`${base}/files/archive`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paths: [archiveSource] }),
+  });
+  assert.equal(swappedArchive.status, 409);
+  assert.match(await swappedArchive.text(), /path_changed/);
+  assertHook();
+  assert.deepEqual(
+    new Set((await readdir(tmpdir())).filter((name) => name.startsWith('qubicl-open-terminal-archive-'))),
+    temporaryArchivesBefore,
+  );
+
+  await symlink('archive-source-pinned.txt', join(home, 'archive-link'));
+  const linkedArchive = await fetch(`${base}/files/archive`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paths: [join(home, 'archive-link')] }),
+  });
+  assert.equal(linkedArchive.status, 400);
+  assert.match(await linkedArchive.text(), /path_invalid|archive_entry_invalid/);
+
+  const fifo = join(home, 'archive-fifo');
+  await execFileAsync('/usr/bin/mkfifo', [fifo]);
+  const fifoStartedAt = Date.now();
+  const fifoArchive = await fetch(`${base}/files/archive`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paths: [fifo] }),
+  });
+  assert.equal(fifoArchive.status, 400);
+  assert.ok(Date.now() - fifoStartedAt < 1_000, 'FIFO inventory must not block the archive deadline');
+
+  const oversizedCwd = await fetch(`${base}/execute?wait=0`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command: 'true', cwd: 'a'.repeat(4_097) }),
+  });
+  assert.equal(oversizedCwd.status, 400);
+  const oversizedArchivePath = await fetch(`${base}/files/archive`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paths: ['😀'.repeat(1_025)] }),
+  });
+  assert.equal(oversizedArchivePath.status, 400);
+});
+
+test('Open Terminal process aliases recheck live policy inside ToolExecutor and audit metadata without command or input content', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-policy-'));
+  const work = join(home, 'work');
+  await mkdir(work);
+  const auditPath = join(home, 'audit.jsonl');
+  let execEnabled = true;
+  let readEnabled = true;
+  let disableOnInspect = true;
+  let disableReadOnArchive = false;
+  const maximumTools = enabledToolNames(PRESET_DEFINITIONS.workstation.capabilities);
+  const policy = {
+    enabledTools: () => maximumTools.filter((name) => (name !== 'exec_command' || execEnabled) && (name !== 'read_file' || readEnabled)),
+    isToolEnabled: (name: string) => (name !== 'exec_command' || execEnabled) && (name !== 'read_file' || readEnabled),
+    enabledCatalogSkills: () => [],
+    expectedSkillRegistrySha256: () => undefined,
+    snapshot: () => ({ revision: 'test-live-policy' }),
+  };
+  const files = new BoundedFileSystem(home, {
+    beforeUse: (event) => {
+      if (disableReadOnArchive && event.operation === 'read') {
+        disableReadOnArchive = false;
+        readEnabled = false;
+      }
+      if (disableOnInspect && event.operation === 'inspect') {
+        disableOnInspect = false;
+        execEnabled = false;
+      }
+    },
+  });
+  const previousAuditPath = process.env.QUBICL_AUDIT_PATH;
+  process.env.QUBICL_AUDIT_PATH = auditPath;
+  const executor = new ToolExecutor(undefined, { durableRoot: home, files, policy: policy as never });
+  if (previousAuditPath === undefined) delete process.env.QUBICL_AUDIT_PATH;
+  else process.env.QUBICL_AUDIT_PATH = previousAuditPath;
+  const compatibility = new OpenTerminalCompatibility(executor, maximumTools, { home });
+  const server = createServer(async (request, response) => {
+    const handled = await compatibility.handle(request, response, new URL(request.url ?? '/', 'http://test.local'));
+    if (!handled) { response.writeHead(404); response.end(); }
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+  const base = `http://127.0.0.1:${port}/open-terminal`;
+  context.after(async () => {
+    await compatibility.shutdown();
+    await executor.shutdown();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(home, { recursive: true, force: true });
+  });
+
+  const secretCommand = 'printf OPEN_TERMINAL_AUDIT_SECRET';
+  const raced = await fetch(`${base}/execute?wait=0`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command: secretCommand, cwd: work }),
+  });
+  assert.equal(raced.status, 404);
+  assert.match(await raced.text(), /capability_unsupported/);
+
+  execEnabled = true;
+  const started = await fetch(`${base}/execute?wait=0`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command: 'cat >/dev/null', cwd: work }),
+  });
+  assert.equal(started.status, 200);
+  const processId = (await started.json() as { id: string }).id;
+  assert.equal((await fetch(`${base}/execute`)).status, 200);
+  assert.equal((await fetch(`${base}/execute/${processId}/status?wait=0&offset=0`)).status, 200);
+  assert.equal((await fetch(`${base}/execute/${processId}/input`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ input: 'AUDIT_INPUT_SECRET' }),
+  })).status, 200);
+  assert.equal((await fetch(`${base}/execute/${processId}?force=true`, { method: 'DELETE' })).status, 200);
+
+  const archiveAuditPath = join(work, 'archive-audit.txt');
+  await writeFile(archiveAuditPath, 'archive audit content');
+  disableReadOnArchive = true;
+  const racedArchive = await fetch(`${base}/files/archive`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paths: [archiveAuditPath] }),
+  });
+  assert.equal(racedArchive.status, 404);
+  assert.match(await racedArchive.text(), /disabled while the compatibility operation was in progress/u);
+  readEnabled = true;
+  const auditedArchive = await fetch(`${base}/files/archive`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paths: [archiveAuditPath] }),
+  });
+  assert.equal(auditedArchive.status, 200);
+  await auditedArchive.arrayBuffer();
+
+  await executor.audit.flush();
+  const auditText = await readFile(auditPath, 'utf8');
+  assert.doesNotMatch(auditText, /OPEN_TERMINAL_AUDIT_SECRET|AUDIT_INPUT_SECRET|cat >\/dev\/null/);
+  const events = auditText.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(events.some((event) => event.compatibility === 'open-terminal' && event.operation === 'process-start'
+    && event.status === 'error' && event.code === 'capability_unsupported'), true);
+  assert.equal(events.some((event) => event.compatibility === 'open-terminal' && event.operation === 'process-start' && event.status === 'ok'), true);
+  assert.equal(events.some((event) => event.compatibility === 'open-terminal' && event.operation === 'process-list' && event.status === 'ok'), true);
+  assert.equal(events.some((event) => event.compatibility === 'open-terminal' && event.operation === 'process-attach' && event.status === 'ok'), true);
+  assert.equal(events.some((event) => event.compatibility === 'open-terminal' && event.operation === 'process-input' && event.status === 'ok'), true);
+  assert.equal(events.some((event) => event.compatibility === 'open-terminal' && event.operation === 'process-stop' && event.status === 'ok'), true);
+  assert.equal(events.some((event) => event.compatibility === 'open-terminal' && event.operation === 'archive-read'
+    && event.status === 'ok' && event.pathCount === 1), true);
+  assert.equal(events.some((event) => event.compatibility === 'open-terminal' && event.operation === 'archive-read'
+    && event.status === 'error' && event.code === 'capability_unsupported'), true);
+});
+
+test('a delayed compatibility start is fenced again when policy reload revokes its lease in flight', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-delayed-policy-'));
+  let execEnabled = true;
+  let actionEntered!: () => void;
+  let releaseAction!: () => void;
+  const entered = new Promise<void>((resolve) => { actionEntered = resolve; });
+  const actionGate = new Promise<void>((resolve) => { releaseAction = resolve; });
+  const terminatedOwners: Array<{ id: string; generation: number; epoch: string }> = [];
+  const processes = {
+    exec: async () => { throw new Error('not used'); },
+    write: async () => { throw new Error('not used'); },
+    stop: async () => { throw new Error('not used'); },
+    executeCompatibility: async (_command: string, cwd: string, owner: { id: string; generation: number; epoch: string }) => {
+      actionEntered();
+      await actionGate;
+      return {
+        id: 'delayed-process', command: 'redacted', status: 'running' as const, exit_code: null, log_path: null,
+        cwd, session_id: null, started_at: Date.now() / 1000, finished_at: null,
+        output: [], truncated: false, next_offset: 0,
+        owner,
+      };
+    },
+    listCompatibility: () => [],
+    statusCompatibility: async () => { throw new Error('not used'); },
+    inputCompatibility: async () => { throw new Error('not used'); },
+    deleteCompatibility: async () => { throw new Error('not used'); },
+    terminateOwner: async (owner: { id: string; generation: number; epoch: string } | undefined) => {
+      if (owner) terminatedOwners.push({ id: owner.id, generation: owner.generation, epoch: owner.epoch });
+      return { terminatedManagedProcesses: owner ? 1 : 0 };
+    },
+    count: () => 0,
+  };
+  const maximumTools = enabledToolNames(PRESET_DEFINITIONS.workstation.capabilities);
+  const policy = {
+    enabledTools: () => maximumTools.filter((name) => name !== 'exec_command' || execEnabled),
+    isToolEnabled: (name: string) => name !== 'exec_command' || execEnabled,
+    enabledCatalogSkills: () => [],
+    expectedSkillRegistrySha256: () => undefined,
+    snapshot: () => ({ revision: execEnabled ? 'before' : 'after' }),
+    load: async () => {
+      execEnabled = false;
+      return { changed: true, revision: 'after' };
+    },
+  };
+  const executor = new ToolExecutor(undefined, { durableRoot: home, processes: processes as never, policy: policy as never });
+  context.after(async () => {
+    releaseAction();
+    await executor.shutdown();
+    await rm(home, { recursive: true, force: true });
+  });
+  const lease = executor.leases.acquire(60);
+  const pending = executor.compatibilityProcessExecute('true', home, lease, {}, null);
+  await entered;
+  await executor.reloadPolicy();
+  assert.equal(terminatedOwners.length, 1, 'policy revocation fences the prior owner before the delayed start returns');
+  releaseAction();
+  await assert.rejects(pending, /disabled while the compatibility operation was in progress/u);
+  assert.equal(terminatedOwners.length, 2, 'the post-action check fences work created after revocation');
+  for (const owner of terminatedOwners) {
+    assert.deepEqual(owner, { id: lease.id, generation: lease.generation, epoch: lease.epoch });
+  }
+});
+
+test('ambiguous remote execute and stdin responses fence the owner without replay', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-ambiguous-runner-'));
+  let executeCalls = 0;
+  let inputCalls = 0;
+  let fenced = 0;
+  const processes = {
+    exec: async () => { throw new Error('not used'); },
+    write: async () => { throw new Error('not used'); },
+    stop: async () => { throw new Error('not used'); },
+    executeCompatibility: async () => {
+      executeCalls += 1;
+      throw new QubiclError('internal_runner_ambiguous', 'response lost after start', 503);
+    },
+    listCompatibility: () => [],
+    statusCompatibility: async () => { throw new Error('not used'); },
+    inputCompatibility: async () => {
+      inputCalls += 1;
+      throw new QubiclError('internal_runner_ambiguous', 'response lost after input', 503);
+    },
+    deleteCompatibility: async () => { throw new Error('not used'); },
+    terminateOwner: async () => { fenced += 1; return { terminatedManagedProcesses: 1 }; },
+    count: () => 0,
+  };
+  const executor = new ToolExecutor(undefined, { durableRoot: home, processes: processes as never });
+  context.after(async () => {
+    await executor.shutdown();
+    await rm(home, { recursive: true, force: true });
+  });
+  const executeLease = executor.leases.acquire(60);
+  await assert.rejects(executor.compatibilityProcessExecute('true', home, executeLease, {}, null), /response lost after start/u);
+  assert.throws(() => executor.leases.verify(executeLease), /stale/u);
+  const inputLease = executor.leases.acquire(60);
+  await assert.rejects(executor.compatibilityProcessInput('abcdefghijklmnop', 'one input', inputLease), /response lost after input/u);
+  assert.throws(() => executor.leases.verify(inputLease), /stale/u);
+  assert.equal(executeCalls, 1);
+  assert.equal(inputCalls, 1);
+  assert.equal(fenced, 2);
+});
+
+test('an invalid remote fence acknowledgement leaves ambiguous process work fail closed', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-invalid-fence-'));
+  let executeCalls = 0;
+  let fenceCalls = 0;
+  const server = createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    if (request.url === '/v1/process/compatibility-execute') {
+      executeCalls += 1;
+      response.end('{}');
+      return;
+    }
+    if (request.url === '/v1/process/terminate-owner') {
+      fenceCalls += 1;
+      response.end('{}');
+      return;
+    }
+    response.end('{}');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  context.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(home, { recursive: true, force: true });
+  });
+  const port = (server.address() as { port: number }).port;
+  const remote = new RemoteProcessManager(`http://127.0.0.1:${port}`, 'test-key');
+  const executor = new ToolExecutor(undefined, { durableRoot: home, processes: remote });
+  const lease = executor.leases.acquire(60);
+
+  await assert.rejects(
+    executor.compatibilityProcessExecute('true', home, lease, {}, null),
+    (error: unknown) => error instanceof QubiclError && error.code === 'process_fencing_failed',
+  );
+  assert.throws(() => executor.leases.verify(lease), /stale/u);
+  assert.throws(
+    () => executor.leases.acquire(60),
+    (error: unknown) => error instanceof QubiclError && error.code === 'lease_transition',
+  );
+  assert.equal(executeCalls, 1);
+  assert.equal(fenceCalls, 1);
+});
+
+test('a late ambiguous start re-fences its exact expired owner and keeps a failed fence closed', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-late-ambiguous-'));
+  let executeCalls = 0;
+  const fencedOwners: Array<{ id: string; generation: number; epoch: string }> = [];
+  let actionEntered!: () => void;
+  let releaseAction!: () => void;
+  const entered = new Promise<void>((resolve) => { actionEntered = resolve; });
+  const gate = new Promise<void>((resolve) => { releaseAction = resolve; });
+  const processes = {
+    exec: async () => { throw new Error('not used'); },
+    write: async () => { throw new Error('not used'); },
+    stop: async () => { throw new Error('not used'); },
+    executeCompatibility: async () => {
+      executeCalls += 1;
+      actionEntered();
+      await gate;
+      throw new QubiclError('internal_runner_ambiguous', 'late response lost after start', 503);
+    },
+    listCompatibility: () => [],
+    statusCompatibility: async () => { throw new Error('not used'); },
+    inputCompatibility: async () => { throw new Error('not used'); },
+    deleteCompatibility: async () => { throw new Error('not used'); },
+    terminateOwner: async (owner: { id: string; generation: number; epoch: string } | undefined) => {
+      if (owner) fencedOwners.push({ id: owner.id, generation: owner.generation, epoch: owner.epoch });
+      if (fencedOwners.length === 2) throw new Error('second exact fence could not be confirmed');
+      return { terminatedManagedProcesses: owner ? 1 : 0 };
+    },
+    count: () => 0,
+  };
+  const executor = new ToolExecutor(undefined, { durableRoot: home, processes: processes as never });
+  context.after(async () => {
+    releaseAction();
+    await executor.shutdown();
+    await rm(home, { recursive: true, force: true });
+  });
+  const lease = executor.leases.acquire(60);
+  const pending = executor.compatibilityProcessExecute('true', home, lease, {}, null);
+  await entered;
+  await executor.leases.revokeAgentControl();
+  releaseAction();
+
+  await assert.rejects(
+    pending,
+    (error: unknown) => error instanceof QubiclError && error.code === 'process_fencing_failed',
+  );
+  assert.deepEqual(fencedOwners, [
+    { id: lease.id, generation: lease.generation, epoch: lease.epoch },
+    { id: lease.id, generation: lease.generation, epoch: lease.epoch },
+  ]);
+  assert.equal(executeCalls, 1);
+  assert.throws(() => executor.leases.verify(lease), /stale/u);
+  assert.throws(
+    () => executor.leases.acquire(60),
+    (error: unknown) => error instanceof QubiclError && error.code === 'lease_transition',
+  );
+});
+
+test('remote process aliases reject invalid success bodies as ambiguous only for non-idempotent operations', async (context) => {
+  const server = createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(request.url?.includes('compatibility-execute') ? '{}' : '{invalid');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  context.after(async () => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as { port: number }).port;
+  const remote = new RemoteProcessManager(`http://127.0.0.1:${port}`, 'test-key');
+  await assert.rejects(
+    remote.executeCompatibility('true', '/tmp', { id: 'lease', generation: 1, epoch: 'epoch' }),
+    (error: unknown) => error instanceof QubiclError && error.code === 'internal_runner_ambiguous',
+  );
+  await assert.rejects(
+    remote.statusCompatibility('abcdefghijklmnop', { id: 'lease', generation: 1, epoch: 'epoch' }),
+    (error: unknown) => error instanceof QubiclError && error.code === 'internal_runner_invalid_response',
+  );
+});
+
+test('Open Terminal never replays execute or stdin after a post-action stale lease', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-no-replay-'));
+  let executeCalls = 0;
+  let inputCalls = 0;
+  let executeEntered!: () => void;
+  let releaseExecute!: () => void;
+  let inputEntered!: () => void;
+  let releaseInput!: () => void;
+  const executeStarted = new Promise<void>((resolve) => { executeEntered = resolve; });
+  const executeGate = new Promise<void>((resolve) => { releaseExecute = resolve; });
+  const inputStarted = new Promise<void>((resolve) => { inputEntered = resolve; });
+  const inputGate = new Promise<void>((resolve) => { releaseInput = resolve; });
+  const processes = {
+    exec: async () => { throw new Error('not used'); },
+    write: async () => { throw new Error('not used'); },
+    stop: async () => { throw new Error('not used'); },
+    executeCompatibility: async (command: string, cwd: string) => {
+      executeCalls += 1;
+      if (executeCalls === 1) {
+        executeEntered();
+        await executeGate;
+      }
+      return {
+        id: 'abcdefghijklmnop', command, status: 'running' as const, exit_code: null, log_path: null,
+        cwd, session_id: null, started_at: Date.now() / 1000, finished_at: null,
+        output: [], truncated: false, next_offset: 0,
+      };
+    },
+    listCompatibility: () => [],
+    statusCompatibility: async () => { throw new Error('not used'); },
+    inputCompatibility: async () => {
+      inputCalls += 1;
+      if (inputCalls === 1) {
+        inputEntered();
+        await inputGate;
+      }
+      return { status: 'ok' as const };
+    },
+    deleteCompatibility: async () => { throw new Error('not used'); },
+    terminateOwner: async () => ({ terminatedManagedProcesses: 1 }),
+    count: () => 0,
+  };
+  const executor = new ToolExecutor(undefined, { durableRoot: home, processes: processes as never });
+  const compatibility = new OpenTerminalCompatibility(
+    executor,
+    enabledToolNames(PRESET_DEFINITIONS.workstation.capabilities),
+    { home },
+  );
+  const server = createServer(async (request, response) => {
+    const handled = await compatibility.handle(request, response, new URL(request.url ?? '/', 'http://test.local'));
+    if (!handled) { response.writeHead(404); response.end(); }
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+  const base = `http://127.0.0.1:${port}/open-terminal`;
+  context.after(async () => {
+    releaseExecute();
+    releaseInput();
+    await compatibility.shutdown();
+    await executor.shutdown();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(home, { recursive: true, force: true });
+  });
+
+  const executing = fetch(`${base}/execute?wait=0`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command: 'true', cwd: home }),
+  });
+  await executeStarted;
+  await executor.leases.revokeAgentControl();
+  releaseExecute();
+  const executeResponse = await executing;
+  assert.equal(executeResponse.status, 409);
+  assert.match(await executeResponse.text(), /stale_lease/u);
+  assert.equal(executeCalls, 1);
+
+  const writing = fetch(`${base}/execute/abcdefghijklmnop/input`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ input: 'one write only' }),
+  });
+  await inputStarted;
+  await executor.leases.revokeAgentControl();
+  releaseInput();
+  const inputResponse = await writing;
+  assert.equal(inputResponse.status, 409);
+  assert.match(await inputResponse.text(), /stale_lease/u);
+  assert.equal(inputCalls, 1);
+});
+
+test('completed archive output is served from an unlinked verified descriptor and cleanup closes it', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-output-descriptor-'));
+  try {
+    const source = join(home, 'source.txt');
+    await writeFile(source, 'descriptor-bound archive');
+    const archive = await createOpenTerminalArchive(new BoundedFileSystem(home), [source]);
+    const descriptorPath = `/proc/self/fd/${archive.descriptor}`;
+    try {
+      assert.match(await readlink(descriptorPath), / \(deleted\)$/u);
+      assert.equal(Number((await stat(descriptorPath, { bigint: true })).mode & 0o777n), 0o400);
+      const parentDescriptorPath = `/proc/${process.pid}/fd/${archive.descriptor}`;
+      const probe = await execFileAsync(process.execPath, ['-e', [
+        "const {openSync}=require('node:fs');",
+        "try { openSync(process.argv[1], 'r+'); process.stdout.write('opened'); }",
+        "catch (error) { process.stdout.write(error.code ?? error.name); }",
+      ].join(''), parentDescriptorPath]);
+      assert.match(probe.stdout, /EACCES|EPERM/u);
+      await writeFile(join(home, 'archive.zip'), 'replacement bytes');
+      const contents = unzipSync(new Uint8Array(await readFile(descriptorPath)));
+      assert.equal(Buffer.from(contents['source.txt']!).toString('utf8'), 'descriptor-bound archive');
+    } finally {
+      await archive.cleanup();
+    }
+    await assert.rejects(lstat(descriptorPath), { code: 'ENOENT' });
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('archive inventory streams wide trees and retains compact ancestry evidence within hard budgets', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-inventory-bounds-'));
+  try {
+    const wide = join(home, 'wide');
+    await mkdir(wide);
+    await Promise.all(Array.from({ length: 12 }, (_, index) => writeFile(join(wide, `${index}.txt`), 'x')));
+    const files = new BoundedFileSystem(home);
+    await assert.rejects(
+      files.walkArchive(wide, { maximumEntries: 4, maximumMetadataBytes: 64 * 1024, deadline: Date.now() + 5_000 }),
+      (error: unknown) => error instanceof Error && (error as NodeJS.ErrnoException).code === 'EFBIG',
+    );
+
+    let deep = join(home, 'deep');
+    await mkdir(deep);
+    for (let index = 0; index < 32; index += 1) {
+      deep = join(deep, `d${index}`);
+      await mkdir(deep);
+    }
+    const leaf = join(deep, 'leaf.txt');
+    await writeFile(leaf, 'compact identity');
+    const identity = await files.archiveIdentity(leaf, { deadline: Date.now() + 5_000 });
+    assert.ok(identity.chainLength > 32);
+    assert.match(identity.chainDigest, /^[a-f0-9]{64}$/u);
+    assert.equal(Object.hasOwn(identity, 'chain'), false);
+    await assert.rejects(
+      files.archiveIdentity(leaf, { deadline: Date.now() - 1 }),
+      (error: unknown) => error instanceof Error && (error as NodeJS.ErrnoException).code === 'ETIMEDOUT',
+    );
+    await assert.rejects(
+      files.walkArchive(home, { maximumEntries: 100, maximumMetadataBytes: 128, deadline: Date.now() + 5_000 }),
+      (error: unknown) => error instanceof Error && (error as NodeJS.ErrnoException).code === 'EFBIG',
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('archive reservations bound concurrency and release after cancellation and cleanup', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-archive-reservations-'));
+  const source = join(home, 'source.txt');
+  await writeFile(source, 'reserved archive');
+  let entered = 0;
+  let bothEntered!: () => void;
+  let release!: () => void;
+  const enteredGate = new Promise<void>((resolve) => { bothEntered = resolve; });
+  const creationGate = new Promise<void>((resolve) => { release = resolve; });
+  const factory: typeof createOpenTerminalArchive = async (files, paths, hooks) => {
+    entered += 1;
+    if (entered === 2) bothEntered();
+    await creationGate;
+    return createOpenTerminalArchive(files, paths, hooks);
+  };
+  const executor = new ToolExecutor(undefined, { durableRoot: home, archiveFactory: factory });
+  context.after(async () => {
+    release();
+    await executor.shutdown();
+    await rm(home, { recursive: true, force: true });
+  });
+  const lease = executor.leases.acquire(60);
+  const firstPending = executor.compatibilityArchive([source], lease);
+  const secondPending = executor.compatibilityArchive([source], lease);
+  await enteredGate;
+  await assert.rejects(executor.compatibilityArchive([source], lease), /active archive downloads/u);
+  release();
+  const [first, second] = await Promise.all([firstPending, secondPending]);
+  await first.cleanup();
+  await second.cleanup();
+
+  const controller = new AbortController();
+  let cancelNext = true;
+  const temporaryArchivesBefore = new Set((await readdir(tmpdir())).filter((name) => name.startsWith('qubicl-open-terminal-archive-')));
+  const cancellingExecutor = new ToolExecutor(undefined, {
+    durableRoot: home,
+    archiveFactory: (files, paths, hooks) => createOpenTerminalArchive(files, paths, cancelNext ? {
+      ...hooks,
+      afterOutputOpened: () => { cancelNext = false; controller.abort(); },
+    } : hooks),
+  });
+  context.after(async () => cancellingExecutor.shutdown());
+  const cancellingLease = cancellingExecutor.leases.acquire(60);
+  await assert.rejects(
+    cancellingExecutor.compatibilityArchive([source], cancellingLease, controller.signal),
+    /cancelled because the client disconnected/u,
+  );
+  assert.deepEqual(
+    new Set((await readdir(tmpdir())).filter((name) => name.startsWith('qubicl-open-terminal-archive-'))),
+    temporaryArchivesBefore,
+  );
+  const afterCancellation = await cancellingExecutor.compatibilityArchive([source], cancellingLease);
+  await afterCancellation.cleanup();
+  const recovered = await executor.compatibilityArchive([source], lease);
+  await recovered.cleanup();
+});
+
+test('an aborted archive HTTP request cancels creation and releases its reservation', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-archive-http-abort-'));
+  const source = join(home, 'source.txt');
+  await writeFile(source, 'archive after abort');
+  let calls = 0;
+  let entered!: () => void;
+  let observedAbort!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const aborted = new Promise<void>((resolve) => { observedAbort = resolve; });
+  const executor = new ToolExecutor(undefined, {
+    durableRoot: home,
+    archiveFactory: async (files, paths, hooks) => {
+      calls += 1;
+      if (calls > 1) return createOpenTerminalArchive(files, paths, hooks);
+      entered();
+      return new Promise<never>((_resolve, reject) => {
+        const signal = hooks?.signal;
+        if (!signal) return reject(new Error('missing archive cancellation signal'));
+        const cancel = (): void => {
+          observedAbort();
+          reject(new QubiclError('archive_cancelled', 'archive request aborted', 499));
+        };
+        if (signal.aborted) cancel();
+        else signal.addEventListener('abort', cancel, { once: true });
+      });
+    },
+  });
+  const compatibility = new OpenTerminalCompatibility(
+    executor,
+    enabledToolNames(PRESET_DEFINITIONS.workstation.capabilities),
+    { home },
+  );
+  const server = createServer(async (request, response) => {
+    const handled = await compatibility.handle(request, response, new URL(request.url ?? '/', 'http://test.local'));
+    if (!handled) { response.writeHead(404); response.end(); }
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+  context.after(async () => {
+    await compatibility.shutdown();
+    await executor.shutdown();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(home, { recursive: true, force: true });
+  });
+  const controller = new AbortController();
+  const request = fetch(`http://127.0.0.1:${port}/open-terminal/files/archive`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ paths: [source] }),
+    signal: controller.signal,
+  });
+  await started;
+  controller.abort();
+  await assert.rejects(request, /abort/u);
+  await aborted;
+
+  const retry = await fetch(`http://127.0.0.1:${port}/open-terminal/files/archive`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paths: [source] }),
+  });
+  assert.equal(retry.status, 200);
+  assert.equal(Buffer.from(unzipSync(new Uint8Array(await retry.arrayBuffer()))['source.txt']!).toString('utf8'), 'archive after abort');
+});
+
+test('archive temp-directory substitution cannot redirect output or recursively delete the replacement', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-output-directory-'));
+  const source = join(home, 'source.txt');
+  await writeFile(source, 'pinned archive directory');
+  let displacedDirectory = '';
+  let replacementDirectory = '';
+  try {
+    const archive = await createOpenTerminalArchive(new BoundedFileSystem(home), [source], {
+      afterDirectoryPinned: async (directory) => {
+        replacementDirectory = directory;
+        displacedDirectory = `${directory}.displaced`;
+        await rename(directory, displacedDirectory);
+        await mkdir(replacementDirectory);
+        await writeFile(join(replacementDirectory, 'sentinel.txt'), 'replacement must survive');
+      },
+    });
+    try {
+      const contents = unzipSync(new Uint8Array(await readFile(`/proc/self/fd/${archive.descriptor}`)));
+      assert.equal(Buffer.from(contents['source.txt']!).toString('utf8'), 'pinned archive directory');
+    } finally {
+      await archive.cleanup();
+    }
+    assert.equal(await readFile(join(replacementDirectory, 'sentinel.txt'), 'utf8'), 'replacement must survive');
+    assert.deepEqual(await readdir(displacedDirectory), [], 'the descriptor-pinned original directory contains no persisted ZIP');
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    if (replacementDirectory) await rm(replacementDirectory, { recursive: true, force: true });
+    if (displacedDirectory) await rm(displacedDirectory, { recursive: true, force: true });
+  }
 });
 
 async function json(url: string): Promise<unknown> {

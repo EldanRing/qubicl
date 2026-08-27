@@ -645,9 +645,13 @@ function handleBrowserPreflight(request: IncomingMessage, response: ServerRespon
 function browserMethods(suffix: string): string[] {
   if (suffix === '/openapi.json') return ['GET'];
   if (suffix.startsWith('/v1/tools/')) return ['POST'];
+  if (suffix.endsWith('/open-terminal/execute')) return ['GET', 'POST'];
+  if (/\/open-terminal\/execute\/[A-Za-z0-9_-]{16,64}\/status$/u.test(suffix)) return ['GET'];
+  if (/\/open-terminal\/execute\/[A-Za-z0-9_-]{16,64}\/input$/u.test(suffix)) return ['POST'];
+  if (/\/open-terminal\/execute\/[A-Za-z0-9_-]{16,64}$/u.test(suffix)) return ['DELETE'];
+  if (suffix.endsWith('/open-terminal/files/cwd')) return ['GET', 'POST'];
   if (suffix.endsWith('/files/delete')) return ['DELETE'];
   if (suffix.includes('/v1/tools/')
-    || suffix.endsWith('/files/cwd')
     || suffix.endsWith('/files/upload')
     || suffix.endsWith('/files/mkdir')
     || suffix.endsWith('/files/move')

@@ -92,3 +92,22 @@ test('new controllers cannot acquire while the previous process group is being f
   await releasing;
   assert.equal(leases.acquire(60).epoch, leases.epoch);
 });
+
+test('late exact-owner revocation fences both the captured and a distinct current lease', async () => {
+  const leases = new LeaseManager();
+  const revoked: string[] = [];
+  leases.setRevocationHandler((proof) => {
+    if (proof) revoked.push(proof.id);
+    return { terminatedManagedProcesses: proof ? 1 : 0 };
+  });
+  const original = leases.acquire(60);
+  await leases.revokeAgentControl();
+  const current = leases.acquire(60);
+
+  const result = await leases.revokeAgentControlFor(original);
+
+  assert.equal(result.terminatedManagedProcesses, 2);
+  assert.deepEqual(revoked, [original.id, original.id, current.id]);
+  assert.throws(() => leases.verify(current), /stale/i);
+  assert.equal(leases.acquire(60).epoch, leases.epoch);
+});

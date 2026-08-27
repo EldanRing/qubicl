@@ -7,6 +7,7 @@ import {
   mkdir,
   mkdtemp,
   open,
+  opendir,
   readlink,
   readdir,
   rm,
@@ -15,7 +16,7 @@ import {
   unlink,
   type FileHandle,
 } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -97,6 +98,31 @@ export interface BoundedReadResult {
   info: Stats;
   identity: FileIdentity;
   namedIdentity: FileIdentity;
+}
+
+export interface BoundedArchiveEntryIdentity {
+  info: Stats;
+  identity: FileIdentity;
+  chainDigest: string;
+  chainLength: number;
+}
+
+export interface BoundedArchiveWalkEntry {
+  name: string;
+  type: 'directory' | 'file' | 'symlink' | 'other';
+}
+
+export interface BoundedArchiveWalkResult {
+  entries: BoundedArchiveWalkEntry[];
+  metadataBytes: number;
+}
+
+export interface BoundedArchiveReadOptions {
+  expected: BoundedArchiveEntryIdentity;
+  maximumBytes: number;
+  deadline: number;
+  signal?: AbortSignal;
+  onChunk(chunk: Buffer): Promise<void> | void;
 }
 
 export interface BoundedListResult {
@@ -256,6 +282,115 @@ export class BoundedFileSystem {
           identity: opened.identity,
           namedIdentity: opened.namedIdentity,
         };
+      } finally {
+        await opened.handle.close();
+      }
+    });
+  }
+
+  async archiveIdentity(value: string, options: { deadline?: number; signal?: AbortSignal } = {}): Promise<BoundedArchiveEntryIdentity> {
+    const path = this.absolutePath(value);
+    return this.withRoot(async (root) => {
+      const opened = await this.openNoSymlinks(root, path, 'inspect', options.deadline, options.signal);
+      try {
+        return {
+          info: opened.info,
+          identity: opened.identity,
+          chainDigest: opened.chainDigest,
+          chainLength: opened.chainLength,
+        };
+      } finally {
+        await opened.handle.close();
+      }
+    });
+  }
+
+  async walkArchive(
+    value: string,
+    options: { maximumEntries: number; maximumMetadataBytes: number; deadline: number; signal?: AbortSignal },
+  ): Promise<BoundedArchiveWalkResult> {
+    const path = this.absolutePath(value);
+    positiveSafeInteger(options.maximumEntries, 'maximumEntries');
+    positiveSafeInteger(options.maximumMetadataBytes, 'maximumMetadataBytes');
+    return this.withRoot(async (root) => {
+      const opened = await this.openNoSymlinks(root, path, 'list', options.deadline, options.signal);
+      try {
+        if (!opened.info.isDirectory()) throw fileError('ENOTDIR', path);
+        const entries: BoundedArchiveWalkEntry[] = [];
+        let metadataBytes = 0;
+        const visit = async (directory: FileHandle, prefix: string): Promise<void> => {
+          assertBeforeArchiveDeadline(options.deadline, path, options.signal);
+          const stream = await opendir(this.descriptorPath(directory));
+          try {
+            for (;;) {
+              assertBeforeArchiveDeadline(options.deadline, path, options.signal);
+              const entry = await stream.read();
+              assertBeforeArchiveDeadline(options.deadline, path, options.signal);
+              if (!entry) break;
+              const entryPath = this.childPath(directory, entry.name);
+              let info: Stats;
+              try { info = await lstat(entryPath); }
+              catch (error) {
+                if (errnoCode(error) === 'ENOENT') continue;
+                throw error;
+              }
+              const name = prefix ? join(prefix, entry.name) : entry.name;
+              const type = entryType(info);
+              if (entries.length >= options.maximumEntries) throw fileError('EFBIG', path);
+              const entryMetadataBytes = Buffer.byteLength(name, 'utf8') + 128;
+              if (metadataBytes + entryMetadataBytes > options.maximumMetadataBytes) throw fileError('EFBIG', path);
+              entries.push({ name, type });
+              metadataBytes += entryMetadataBytes;
+              if (!info.isDirectory()) continue;
+              const expected = await identityAt(entryPath);
+              const child = await open(entryPath, READ_DIRECTORY_FLAGS);
+              try {
+                if (!sameIdentity(expected, await handleIdentity(child))) throw changedError(path);
+                await visit(child, name);
+              } finally {
+                await child.close();
+              }
+            }
+          } finally {
+            await stream.close().catch(() => undefined);
+          }
+        };
+        await visit(opened.handle, '');
+        entries.sort((left, right) => left.name.localeCompare(right.name));
+        return { entries, metadataBytes };
+      } finally {
+        await opened.handle.close();
+      }
+    });
+  }
+
+  async readArchiveFile(value: string, options: BoundedArchiveReadOptions): Promise<number> {
+    const path = this.absolutePath(value);
+    if (!Number.isSafeInteger(options.maximumBytes) || options.maximumBytes < 0) throw new TypeError('maximumBytes must be a non-negative safe integer.');
+    return this.withRoot(async (root) => {
+      const opened = await this.openNoSymlinks(root, path, 'read', options.deadline, options.signal);
+      try {
+        if (!opened.info.isFile()) throw fileError('EISDIR', path);
+        if (opened.chainLength !== options.expected.chainLength
+          || opened.chainDigest !== options.expected.chainDigest
+          || !sameIdentity(opened.identity, options.expected.identity)) {
+          throw changedError(path);
+        }
+        if (!Number.isSafeInteger(opened.info.size) || opened.info.size < 0 || opened.info.size > options.maximumBytes) {
+          throw fileError('EFBIG', path);
+        }
+        let position = 0;
+        while (position < opened.info.size) {
+          assertBeforeArchiveDeadline(options.deadline, path, options.signal);
+          const buffer = Buffer.allocUnsafe(Math.min(COPY_BUFFER_BYTES, opened.info.size - position));
+          const { bytesRead } = await opened.handle.read(buffer, 0, buffer.length, position);
+          if (!bytesRead) throw changedError(path);
+          position += bytesRead;
+          await options.onChunk(buffer.subarray(0, bytesRead));
+        }
+        const after = await handleIdentity(opened.handle);
+        if (!sameIdentity(after, options.expected.identity)) throw changedError(path);
+        return position;
       } finally {
         await opened.handle.close();
       }
@@ -817,6 +952,90 @@ export class BoundedFileSystem {
         await closeOwned(parent.handle, parent.owned);
       }
     }
+  }
+
+  private async openNoSymlinks(
+    root: FileHandle,
+    path: string,
+    operation: BoundedFileOperation,
+    deadline?: number,
+    signal?: AbortSignal,
+  ): Promise<OpenedResolution & { chainDigest: string; chainLength: number }> {
+    const parts = this.relativeParts(path);
+    let current = root;
+    let owned = false;
+    assertBeforeArchiveDeadline(deadline, path, signal);
+    const chain = createHash('sha256');
+    let chainLength = 0;
+    updateIdentityDigest(chain, await handleIdentity(root));
+    chainLength += 1;
+    if (!parts.length) {
+      assertBeforeArchiveDeadline(deadline, path, signal);
+      const handle = await open(this.descriptorPath(root), constants.O_RDONLY | constants.O_DIRECTORY);
+      try {
+        const [info, identity] = await Promise.all([handle.stat(), handleIdentity(handle)]);
+        assertBeforeArchiveDeadline(deadline, path, signal);
+        return {
+          handle,
+          info,
+          identity,
+          namedIdentity: identity,
+          resolvedParts: [],
+          chainDigest: chain.digest('hex'),
+          chainLength,
+        };
+      } catch (error) {
+        await handle.close().catch(() => undefined);
+        throw error;
+      }
+    }
+    try {
+      for (const [index, name] of parts.entries()) {
+        assertBeforeArchiveDeadline(deadline, path, signal);
+        const entryPath = this.childPath(current, name);
+        const info = await lstat(entryPath);
+        if (info.isSymbolicLink()) throw fileError('ELOOP', path);
+        const namedIdentity = await identityAt(entryPath);
+        const final = index === parts.length - 1;
+        if (!final && !info.isDirectory()) throw fileError('ENOTDIR', path);
+        if (final) await this.hook({ operation, stage: 'parent-resolved', path });
+        assertBeforeArchiveDeadline(deadline, path, signal);
+        const flags = final && operation === 'inspect'
+          ? LINUX_O_PATH | constants.O_NOFOLLOW
+          : info.isDirectory() ? READ_DIRECTORY_FLAGS : READ_FLAGS;
+        const next = await open(entryPath, flags);
+        try {
+          const [openedInfo, identity] = await Promise.all([next.stat(), handleIdentity(next)]);
+          assertBeforeArchiveDeadline(deadline, path, signal);
+          if (!sameIdentity(namedIdentity, identity)) throw changedError(path);
+          updateIdentityDigest(chain, identity);
+          chainLength += 1;
+          if (final) {
+            await closeOwned(current, owned);
+            owned = false;
+            return {
+              handle: next,
+              info: openedInfo,
+              identity,
+              namedIdentity,
+              resolvedParts: parts,
+              chainDigest: chain.digest('hex'),
+              chainLength,
+            };
+          }
+          await closeOwned(current, owned);
+          current = next;
+          owned = true;
+        } catch (error) {
+          await next.close().catch(() => undefined);
+          throw error;
+        }
+      }
+    } catch (error) {
+      await closeOwned(current, owned).catch(() => undefined);
+      throw error;
+    }
+    throw fileError('ENOENT', path);
   }
 
   private async resolveParent(root: FileHandle, path: string, createParents: boolean): Promise<NamedResolution> {
@@ -1500,6 +1719,26 @@ async function identityAt(path: string): Promise<FileIdentity> {
 
 function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.ctimeNs === right.ctimeNs && left.size === right.size;
+}
+
+function updateIdentityDigest(hash: ReturnType<typeof createHash>, identity: FileIdentity): void {
+  hash.update(identity.dev.toString(10));
+  hash.update('\0');
+  hash.update(identity.ino.toString(10));
+  hash.update('\0');
+  hash.update(identity.ctimeNs.toString(10));
+  hash.update('\0');
+  hash.update(identity.size.toString(10));
+  hash.update('\n');
+}
+
+function assertBeforeArchiveDeadline(deadline: number | undefined, path: string, signal?: AbortSignal): void {
+  signal?.throwIfAborted();
+  if (deadline !== undefined && Date.now() > deadline) throw fileError('ETIMEDOUT', path);
+}
+
+function positiveSafeInteger(value: number, name: string): void {
+  if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`${name} must be a positive safe integer.`);
 }
 
 function sameObjectIdentity(left: FileIdentity, right: FileIdentity): boolean {

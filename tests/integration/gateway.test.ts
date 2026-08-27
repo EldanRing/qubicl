@@ -253,19 +253,39 @@ test('gateway exposes the isolated Open Terminal compatibility namespace with bo
   const base = `http://127.0.0.1:${port}/computers/${id}/open-terminal`;
   const origin = 'http://localhost:3000';
 
-  const preflight = await fetch(`${base}/files/cwd`, {
-    method: 'OPTIONS',
-    headers: {
-      origin,
-      'access-control-request-method': 'POST',
-      'access-control-request-headers': 'authorization, content-type, x-session-id',
-    },
-  });
-  assert.equal(preflight.status, 204);
-  assert.equal(preflight.headers.get('access-control-allow-origin'), origin);
-  assert.equal(preflight.headers.get('access-control-allow-methods'), 'POST');
-  assert.match(preflight.headers.get('access-control-allow-headers') ?? '', /X-Session-Id/);
+  for (const method of ['GET', 'POST'] as const) {
+    const preflight = await fetch(`${base}/files/cwd`, {
+      method: 'OPTIONS',
+      headers: {
+        origin,
+        'access-control-request-method': method,
+        'access-control-request-headers': 'authorization, content-type, x-session-id',
+      },
+    });
+    assert.equal(preflight.status, 204, `${method} /files/cwd`);
+    assert.equal(preflight.headers.get('access-control-allow-origin'), origin);
+    assert.equal(preflight.headers.get('access-control-allow-methods'), 'GET, POST');
+    assert.match(preflight.headers.get('access-control-allow-headers') ?? '', /X-Session-Id/);
+  }
   assert.equal(proxied.length, 0);
+
+  const executePreflight = await fetch(`${base}/execute`, {
+    method: 'OPTIONS',
+    headers: { origin, 'access-control-request-method': 'POST', 'access-control-request-headers': 'authorization, content-type, x-session-id' },
+  });
+  assert.equal(executePreflight.status, 204);
+  assert.equal(executePreflight.headers.get('access-control-allow-methods'), 'GET, POST');
+  for (const [path, method] of [
+    ['/execute/abcdefghijklmnop/status', 'GET'],
+    ['/execute/abcdefghijklmnop/input', 'POST'],
+    ['/execute/abcdefghijklmnop', 'DELETE'],
+  ] as const) {
+    const processPreflight = await fetch(`${base}${path}`, {
+      method: 'OPTIONS', headers: { origin, 'access-control-request-method': method, 'access-control-request-headers': 'authorization, content-type' },
+    });
+    assert.equal(processPreflight.status, 204, `${method} ${path}`);
+    assert.equal(processPreflight.headers.get('access-control-allow-methods'), method);
+  }
 
   const rejected = await fetch(`${base}/files/delete`, {
     method: 'OPTIONS',

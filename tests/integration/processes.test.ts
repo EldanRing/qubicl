@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -13,13 +14,48 @@ import { BoundedFileSystem, type BoundedFileHookEvent } from '@qubicl/control/bo
 
 const owner = { id: 'test-lease', generation: 1, epoch: 'test-epoch' };
 
+function processState(pid: number): string {
+  try {
+    const value = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const close = value.lastIndexOf(')');
+    return close >= 0 ? value.slice(close + 2).split(/\s+/u)[0] ?? 'unknown' : 'unknown';
+  } catch {
+    return 'missing';
+  }
+}
+
 test('managed process safety bounds reject zero and fractional configuration', () => {
   assert.throws(() => new ProcessManager({ maxProcesses: 0 }), /maxProcesses/);
+  assert.throws(() => new ProcessManager({ maxCompletedProcesses: 0 }), /maxCompletedProcesses/);
   assert.throws(() => new ProcessManager({ maxRetainedOutputBytes: 0 }), /maxRetainedOutputBytes/);
   assert.throws(() => new ProcessManager({ completedTtlMs: 0 }), /completedTtlMs/);
   assert.throws(() => new ProcessManager({ maxFullOutputBytes: 0 }), /maxFullOutputBytes/);
+  assert.throws(() => new ProcessManager({ maxAggregateOutputBytes: 0 }), /maxAggregateOutputBytes/);
+  assert.throws(() => new ProcessManager({ maxJournalRecords: 0 }), /maxJournalRecords/);
+  assert.throws(() => new ProcessManager({ maxAggregateJournalRecords: 0 }), /maxAggregateJournalRecords/);
+  assert.throws(() => new ProcessManager({ maxLifetimeMs: 0 }), /maxLifetimeMs/);
+  assert.throws(() => new ProcessManager({ stdinWriteTimeoutMs: 0 }), /stdinWriteTimeoutMs/);
   assert.throws(() => new ProcessManager({ outputTtlMs: 0 }), /outputTtlMs/);
   assert.throws(() => new ProcessManager({ maxProcesses: 1.5 }), /maxProcesses/);
+});
+
+test('ordinary MCP commands and stdin preserve the existing payload range above compatibility limits', async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'qubicl-standard-process-payloads-'));
+  try {
+    const processes = new ProcessManager({ outputDirectory });
+    const longCommand = `printf command-ok # ${'x'.repeat(70 * 1024)}`;
+    const command = await processes.exec(longCommand, '/tmp', 2_000, 1_000, owner);
+    assert.equal(command.running, false);
+    assert.equal(command.output, 'command-ok');
+
+    const started = await processes.exec('wc -c', '/tmp', 10, 1_000, owner);
+    assert.equal(started.running, true);
+    const completed = await processes.write(started.processId, 'i'.repeat(70 * 1024), true, 2_000, owner);
+    assert.equal(completed.running, false);
+    assert.match(completed.output!, /71680/u);
+  } finally {
+    await rm(outputDirectory, { recursive: true, force: true });
+  }
 });
 
 test('model commands receive a least-privilege environment without control credentials', async () => {
@@ -100,6 +136,20 @@ test('full command output files have an independent safety cap', async () => {
     assert.equal((await readFile(result.truncation!.continuation!.path)).length, 64);
     assert.deepEqual(result.truncation?.retainedLog, { limitBytes: 64 });
     assert.equal(result.truncation?.continuation?.retainedLogTruncated, true);
+  } finally {
+    await rm(outputDirectory, { recursive: true, force: true });
+  }
+});
+
+test('standard MCP continuation logs preserve raw output bytes exactly', async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'qubicl-process-raw-output-'));
+  try {
+    const bytes = Buffer.from([0xff, 0x00, 0xf0, 0x9f, 0x98, 0x80, 0x80]);
+    const script = `process.stdout.write(Buffer.from('${bytes.toString('base64')}','base64'))`;
+    const processes = new ProcessManager({ outputDirectory });
+    const result = await processes.exec(`${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`, '/tmp', 1_000, 1, owner);
+    assert.equal(result.running, false);
+    assert.deepEqual(await readFile(result.truncation!.continuation!.path), bytes);
   } finally {
     await rm(outputDirectory, { recursive: true, force: true });
   }
@@ -294,6 +344,309 @@ test('unclaimed completed results expire', async () => {
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(processes.count(), 0);
   assert.equal(processes.retainedOutputBytes(), 0);
+});
+
+test('Open Terminal compatibility sessions retain completed output without changing standard process ID lifetime', async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'qubicl-compatibility-processes-'));
+  try {
+    const processes = new ProcessManager({ outputDirectory });
+    const standard = await processes.exec('printf standard', '/tmp', 1_000, 1_000, owner);
+    assert.equal(standard.running, false);
+    await assert.rejects(processes.write(standard.processId, '', false, 0, owner), /not found/i);
+
+    const retained = await processes.executeCompatibility('printf retained', '/tmp', owner, { waitMs: 1_000, tail: 100 }, 'session-one');
+    assert.equal(retained.status, 'done');
+    assert.equal(retained.log_path, null);
+    assert.equal(retained.session_id, 'session-one');
+    assert.equal(retained.output.map(({ data }) => data).join(''), 'retained');
+    const repeated = await processes.statusCompatibility(retained.id, owner, { offset: 0 });
+    assert.deepEqual(repeated.output, retained.output);
+    assert.equal(processes.listCompatibility(owner).some(({ id }) => id === retained.id), true);
+    assert.deepEqual(await processes.deleteCompatibility(retained.id, owner, true), { status: 'killed' });
+    await assert.rejects(processes.statusCompatibility(retained.id, owner), /not found/i);
+  } finally {
+    await rm(outputDirectory, { recursive: true, force: true });
+  }
+});
+
+test('compatibility output pagination is independent, line-bounded, and preserves UTF-8 across pipe and record boundaries', async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'qubicl-compatibility-pages-'));
+  try {
+    const processes = new ProcessManager({ outputDirectory });
+    const script = [
+      "const prefix = Buffer.from('a'.repeat(65535));",
+      "const emoji = Buffer.from('😀');",
+      'process.stdout.write(Buffer.concat([prefix, emoji.subarray(0, 1)]));',
+      'setTimeout(() => {',
+      "  process.stdout.write(Buffer.concat([emoji.subarray(1), Buffer.from('\\n')]));",
+      "  process.stdout.write(Array.from({ length: 1001 }, (_, index) => `line-${index}\\n`).join(''));",
+      '}, 10);',
+    ].join(' ');
+    const encodedScript = Buffer.from(script).toString('base64');
+    const started = await processes.executeCompatibility(`${JSON.stringify(process.execPath)} -e "eval(Buffer.from('${encodedScript}','base64').toString())"`, '/tmp', owner, { waitMs: 2_000 });
+    assert.equal(started.status, 'done');
+    const first = await processes.statusCompatibility(started.id, owner, { offset: 0 });
+    const repeated = await processes.statusCompatibility(started.id, owner, { offset: 0 });
+    assert.deepEqual(repeated.output, first.output);
+    assert.equal(first.output.length, 1_000);
+    assert.equal(first.truncated, true);
+    const second = await processes.statusCompatibility(started.id, owner, { offset: first.next_offset });
+    const combined = [...first.output, ...second.output].map(({ data }) => data).join('');
+    assert.equal(combined.includes('\ufffd'), false);
+    assert.match(combined, new RegExp(`^${'a'.repeat(100)}.*😀\\nline-0\\n`, 'su'));
+    assert.match(combined, /line-1000\n$/u);
+    await processes.deleteCompatibility(started.id, owner, true);
+  } finally {
+    await rm(outputDirectory, { recursive: true, force: true });
+  }
+});
+
+test('compatibility journal pages reject symlink and same-path identity substitutions', async () => {
+  const outputParent = await mkdtemp(join(tmpdir(), 'qubicl-compatibility-journal-identity-'));
+  try {
+    const processes = new ProcessManager({ outputDirectory: outputParent });
+    const result = await processes.executeCompatibility('printf original-journal', '/tmp', owner, { waitMs: 1_000 });
+    assert.equal(result.status, 'done');
+    const privateRoots = (await readdir(outputParent, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith('.qubicl-command-output-'));
+    assert.equal(privateRoots.length, 1);
+    const privateRoot = join(outputParent, privateRoots[0]!.name);
+    const journalNames = await readdir(privateRoot);
+    assert.equal(journalNames.length, 1);
+    const journal = join(privateRoot, journalNames[0]!);
+    const displaced = `${journal}.displaced`;
+    await rename(journal, displaced);
+    await symlink(displaced, journal);
+    const unavailableJournal = (error: unknown): boolean => (
+      error instanceof Error && (error as Error & { code?: string }).code === 'process_journal_unavailable'
+    );
+    await assert.rejects(processes.statusCompatibility(result.id, owner), unavailableJournal);
+
+    await rm(journal, { force: true });
+    await writeFile(journal, 'replacement-journal');
+    await assert.rejects(processes.statusCompatibility(result.id, owner), unavailableJournal);
+    await processes.deleteCompatibility(result.id, owner, true);
+    assert.equal(await readFile(journal, 'utf8'), 'replacement-journal', 'cleanup must not unlink a substituted path');
+  } finally {
+    await rm(outputParent, { recursive: true, force: true });
+  }
+});
+
+test('an initial compatibility-page failure fences and removes the otherwise hidden process', async (context) => {
+  const outputParent = await mkdtemp(join(tmpdir(), 'qubicl-compatibility-initial-page-'));
+  const pidPath = join(outputParent, 'leader.pid');
+  let leaderPid: number | undefined;
+  context.after(async () => {
+    if (leaderPid !== undefined) try { process.kill(leaderPid, 'SIGKILL'); } catch { /* already fenced */ }
+    await rm(outputParent, { recursive: true, force: true });
+  });
+  const processes = new ProcessManager({ outputDirectory: outputParent });
+  const pending = processes.executeCompatibility(
+    `echo $$ > ${JSON.stringify(pidPath)}; sleep 30`,
+    '/tmp',
+    owner,
+    { waitMs: 500 },
+  );
+  const readinessDeadline = Date.now() + 2_000;
+  let journal = '';
+  while ((!journal || leaderPid === undefined) && Date.now() < readinessDeadline) {
+    try { leaderPid = Number((await readFile(pidPath, 'utf8')).trim()); } catch { /* command has not written it yet */ }
+    const privateRoot = (await readdir(outputParent, { withFileTypes: true }))
+      .find((entry) => entry.isDirectory() && entry.name.startsWith('.qubicl-command-output-'));
+    if (privateRoot) {
+      const names = await readdir(join(outputParent, privateRoot.name));
+      if (names[0]) journal = join(outputParent, privateRoot.name, names[0]);
+    }
+    if (!journal || leaderPid === undefined) await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.ok(journal);
+  assert.ok(leaderPid !== undefined && Number.isSafeInteger(leaderPid));
+  await rename(journal, `${journal}.displaced`);
+  await writeFile(journal, 'substituted initial page');
+  await assert.rejects(
+    pending,
+    (error: unknown) => error instanceof Error && (error as Error & { code?: string }).code === 'process_journal_unavailable',
+  );
+  assert.equal(processes.count(), 0);
+  assert.deepEqual(processes.listCompatibility(owner), []);
+  assert.ok(['missing', 'Z'].includes(processState(leaderPid)));
+  assert.equal(await readFile(journal, 'utf8'), 'substituted initial page');
+});
+
+test('managed output setup rejects a preplaced symlink parent without writing through it', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'qubicl-process-output-parent-'));
+  const outside = await mkdtemp(join(tmpdir(), 'qubicl-process-output-outside-'));
+  try {
+    const linkedParent = join(directory, 'linked-output');
+    await symlink(outside, linkedParent);
+    const processes = new ProcessManager({ outputDirectory: linkedParent });
+    await assert.rejects(
+      processes.executeCompatibility('printf should-not-run', '/tmp', owner, { waitMs: 1_000 }),
+      /must be a real directory, not a symbolic link/u,
+    );
+    assert.deepEqual(await readdir(outside), []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test('compatibility process limits cover UTF-8 command/input bytes, completion retention, and lifetime', async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'qubicl-compatibility-limits-'));
+  try {
+    const processes = new ProcessManager({ outputDirectory, maxCompletedProcesses: 2, maxLifetimeMs: 40 });
+    await assert.rejects(
+      processes.executeCompatibility('😀'.repeat(16_385), '/tmp', owner),
+      (error: unknown) => error instanceof Error && /65536-byte UTF-8 limit/.test(error.message),
+    );
+    const interactive = await processes.executeCompatibility('cat >/dev/null', '/tmp', owner, { waitMs: 0 });
+    await assert.rejects(
+      processes.inputCompatibility(interactive.id, '😀'.repeat(16_385), owner),
+      (error: unknown) => error instanceof Error && /65536-byte/.test(error.message),
+    );
+    await assert.rejects(
+      processes.statusCompatibility(interactive.id, { ...owner, generation: 2 }),
+      /different lease generation/i,
+    );
+    await assert.rejects(processes.statusCompatibility(interactive.id, owner, { waitMs: 30_001 }), /wait must be an integer/u);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const expired = await processes.statusCompatibility(interactive.id, owner);
+    assert.equal(expired.status, 'killed');
+
+    const completed = [];
+    for (const value of ['one', 'two', 'three']) {
+      completed.push(await processes.executeCompatibility(`printf ${value}`, '/tmp', owner, { waitMs: 1_000 }));
+    }
+    await assert.rejects(processes.statusCompatibility(completed[0]!.id, owner), /not found/i);
+    assert.equal(processes.listCompatibility(owner).filter(({ status }) => status !== 'running').length, 2);
+    await processes.terminateOwner(owner);
+  } finally {
+    await rm(outputDirectory, { recursive: true, force: true });
+  }
+});
+
+test('compatibility journals enforce per-process, aggregate, page-byte, and stdin-queue ceilings', async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'qubicl-compatibility-resource-limits-'));
+  try {
+    const capped = new ProcessManager({ outputDirectory, maxFullOutputBytes: 32, maxAggregateOutputBytes: 48 });
+    const first = await capped.executeCompatibility("printf '%040d' 0", '/tmp', owner, { waitMs: 1_000 });
+    const second = await capped.executeCompatibility("printf '%040d' 0", '/tmp', owner, { waitMs: 1_000 });
+    assert.equal(Buffer.byteLength(first.output.map(({ data }) => data).join('')), 32);
+    assert.equal(Buffer.byteLength(second.output.map(({ data }) => data).join('')), 16);
+    assert.equal(first.truncated, true);
+    assert.equal(second.truncated, true);
+    assert.equal(capped.journalOutputBytes(), 48);
+    await capped.deleteCompatibility(first.id, owner, true);
+    assert.equal(capped.journalOutputBytes(), 16);
+    await capped.deleteCompatibility(second.id, owner, true);
+
+    const paged = new ProcessManager({ outputDirectory, stdinWriteTimeoutMs: 100 });
+    const encoded = Buffer.from("process.stdout.write(('x'.repeat(65530)+'\\n').repeat(5))").toString('base64');
+    const output = await paged.executeCompatibility(`${JSON.stringify(process.execPath)} -e "eval(Buffer.from('${encoded}','base64').toString())"`, '/tmp', owner, { waitMs: 2_000 });
+    const pageBytes = output.output.reduce((total, entry) => total + Buffer.byteLength(entry.data), 0);
+    assert.ok(pageBytes <= 256 * 1024);
+    assert.ok(output.output.length <= 1_000);
+    assert.equal(output.truncated, true);
+    const remainder = await paged.statusCompatibility(output.id, owner, { offset: output.next_offset });
+    assert.ok(remainder.output.length > 0);
+    await paged.deleteCompatibility(output.id, owner, true);
+
+    const queued = await paged.executeCompatibility('sleep 30', '/tmp', owner, { waitMs: 0 });
+    const writes = await Promise.allSettled(Array.from({ length: 5 }, () => paged.inputCompatibility(queued.id, 'i'.repeat(64 * 1024), owner)));
+    assert.equal(writes.some((result) => result.status === 'rejected' && /queued input bytes/u.test(String(result.reason))), true);
+    await paged.deleteCompatibility(queued.id, owner, true);
+  } finally {
+    await rm(outputDirectory, { recursive: true, force: true });
+  }
+});
+
+test('compatibility journal metadata stays bounded for dense newline output', async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'qubicl-compatibility-record-limits-'));
+  try {
+    const processes = new ProcessManager({
+      outputDirectory,
+      maxJournalRecords: 8,
+      maxAggregateJournalRecords: 12,
+    });
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("process.stdout.write('\\n'.repeat(100000))")}`;
+    const first = await processes.executeCompatibility(command, '/tmp', owner, { waitMs: 2_000 });
+    assert.equal(first.output.length, 8);
+    assert.equal(first.next_offset, 8);
+    assert.equal(first.truncated, true);
+    assert.equal(processes.journalRecordCount(), 8);
+
+    const second = await processes.executeCompatibility(command, '/tmp', owner, { waitMs: 2_000 });
+    assert.equal(second.output.length, 4);
+    assert.equal(second.truncated, true);
+    assert.equal(processes.journalRecordCount(), 12);
+
+    await processes.deleteCompatibility(first.id, owner, true);
+    assert.equal(processes.journalRecordCount(), 4);
+    await processes.deleteCompatibility(second.id, owner, true);
+    assert.equal(processes.journalRecordCount(), 0);
+  } finally {
+    await rm(outputDirectory, { recursive: true, force: true });
+  }
+});
+
+test('lease revocation force-kills authenticated descendants of a completed retained process group', async (context) => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'qubicl-compatibility-descendants-'));
+  const pidPath = join(outputDirectory, 'background.pid');
+  const processes = new ProcessManager({ outputDirectory });
+  let backgroundPid: number | undefined;
+  context.after(async () => {
+    if (backgroundPid !== undefined) try { process.kill(backgroundPid, 'SIGKILL'); } catch { /* already fenced */ }
+    await rm(outputDirectory, { recursive: true, force: true });
+  });
+  const result = await processes.executeCompatibility(`sleep 30 >/dev/null 2>&1 & echo $! > ${JSON.stringify(pidPath)}`, '/tmp', owner, { waitMs: 2_000 });
+  assert.equal(result.status, 'done');
+  backgroundPid = Number((await readFile(pidPath, 'utf8')).trim());
+  assert.ok(Number.isSafeInteger(backgroundPid) && backgroundPid > 1);
+  assert.equal(processState(backgroundPid), 'S');
+  await processes.terminateOwner(owner);
+  const deadline = Date.now() + 2_000;
+  while (!['missing', 'Z'].includes(processState(backgroundPid)) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(['missing', 'Z'].includes(processState(backgroundPid)));
+});
+
+test('explicit deletion, expiry, and standard completion do not orphan redirected background group members', async (context) => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'qubicl-compatibility-discard-'));
+  const processes = new ProcessManager({ outputDirectory, completedTtlMs: 40 });
+  const pids: number[] = [];
+  context.after(async () => {
+    for (const pid of pids) try { process.kill(pid, 'SIGKILL'); } catch { /* already fenced */ }
+    await rm(outputDirectory, { recursive: true, force: true });
+  });
+  const startBackground = async (label: string): Promise<{ id: string; pid: number }> => {
+    const pidPath = join(outputDirectory, `${label}.pid`);
+    const result = await processes.executeCompatibility(`sleep 30 >/dev/null 2>&1 & echo $! > ${JSON.stringify(pidPath)}`, '/tmp', owner, { waitMs: 2_000 });
+    const pid = Number((await readFile(pidPath, 'utf8')).trim());
+    pids.push(pid);
+    assert.equal(result.status, 'done');
+    assert.equal(processState(pid), 'S');
+    return { id: result.id, pid };
+  };
+
+  const explicit = await startBackground('explicit');
+  await processes.deleteCompatibility(explicit.id, owner, true);
+  assert.ok(['missing', 'Z'].includes(processState(explicit.pid)));
+
+  const expiring = await startBackground('expiry');
+  const expiryDeadline = Date.now() + 2_000;
+  while (!['missing', 'Z'].includes(processState(expiring.pid)) && Date.now() < expiryDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(['missing', 'Z'].includes(processState(expiring.pid)));
+  await assert.rejects(processes.statusCompatibility(expiring.id, owner), /not found/i);
+
+  const standardPidPath = join(outputDirectory, 'standard.pid');
+  const standard = await processes.exec(`sleep 30 >/dev/null 2>&1 & echo $! > ${JSON.stringify(standardPidPath)}`, '/tmp', 2_000, 1_000, owner);
+  assert.equal(standard.running, false);
+  const standardPid = Number((await readFile(standardPidPath, 'utf8')).trim());
+  pids.push(standardPid);
+  assert.ok(['missing', 'Z'].includes(processState(standardPid)));
 });
 
 test('file metadata reports symbolic links without following them', async () => {

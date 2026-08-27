@@ -169,6 +169,15 @@ correct when the client itself runs inside WSL.
 
 For Open WebUI, regenerate the adapter with `qubicl connect <name> --client open-webui` and add it under **Admin Panel → Settings → Integrations → Open Terminal**. Docker Desktop installations should use the printed `host.docker.internal` URL; Open WebUI running directly on the host should use `127.0.0.1`. Confirm the advanced OpenAPI path is `/openapi.json`, authentication is Bearer, and the key is the separate output of `qubicl token show <name>`. Verification should identify the service as **Terminal**. A 404 usually means the Qubicl computer image predates the compatibility route and must be rebuilt/refreshed; a 401 means the token is wrong; `human_control_active` means the viewer currently owns the computer.
 
+Qubicl exposes Open WebUI's managed process and ZIP-download compatibility, but
+continues to report interactive terminal and notebook capabilities as disabled.
+Process or archive limit errors are intentional and name the exceeded boundary;
+split the work or download fewer/smaller paths rather than raising limits in a
+running computer. Only two archive creations/transfers can be active for one
+computer at once; wait for an existing download when `archive_busy` appears.
+Human takeover or a policy change invalidates the compatibility lease and fences
+its retained processes.
+
 If a llama.cpp-backed model reports `Failed to initialize samplers: failed to parse grammar`, fetch the compatibility OpenAPI document and confirm model-facing `date-time` fields contain `format: date-time` without a generated regex `pattern`. Current Qubicl builds sanitize that presentation while retaining strict runtime validation.
 
 ## A root-installed package disappeared

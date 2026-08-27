@@ -142,8 +142,9 @@ smaller file, semantic-browser, visual-browser, or desktop catalog.
 
 For Open WebUI, copy the generated configuration into **Admin Panel → Settings
 → Integrations → Open Terminal**. Qubicl supplies native durable-file browsing
-and search, filesystem-backed chat uploads, screenshots, browser tools, and
-explicitly published local previews without joining Open WebUI's Docker network.
+and search, bounded ZIP downloads, non-PTY managed processes, filesystem-backed
+chat uploads, screenshots, browser tools, and explicitly published local
+previews without joining Open WebUI's Docker network.
 
 See [Client setup](docs/clients.md) for exact instructions.
 

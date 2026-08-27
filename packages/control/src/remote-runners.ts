@@ -2,7 +2,14 @@ import type { DesktopApplicationName } from '@qubicl/core';
 import type { DesktopApplicationRecord } from './desktop-applications.js';
 import { QubiclError } from './errors.js';
 import type { LeaseProof } from './lease.js';
-import type { ProcessOutputMode, ProcessResult, StopSignal } from './processes.js';
+import type {
+  CompatibilityProcessOutput,
+  CompatibilityProcessSummary,
+  CompatibilityStatusOptions,
+  ProcessOutputMode,
+  ProcessResult,
+  StopSignal,
+} from './processes.js';
 import { BrowserManager, type BrowserComputerAction, type BrowserMouseButton } from './browser.js';
 import type { WebExtractRenderedInput } from './web.js';
 import type { ListeningPort } from './ports.js';
@@ -25,15 +32,45 @@ export class RemoteProcessManager {
   stop(id: string, owner: LeaseProof, signal: StopSignal = 'SIGTERM'): Promise<ProcessResult> {
     return this.request('/v1/process/stop', { id, owner, signal });
   }
-  terminateOwner(owner: LeaseProof | undefined): Promise<{ terminatedManagedProcesses: number }> {
-    return this.request('/v1/process/terminate-owner', { owner });
+  async executeCompatibility(command: string, cwd: string, owner: LeaseProof, options: CompatibilityStatusOptions = {}, sessionId: string | null = null): Promise<CompatibilityProcessOutput> {
+    return compatibilityOutput(
+      await this.request<unknown>('/v1/process/compatibility-execute', { command, cwd, owner, options, sessionId }, 'POST', true),
+      true,
+    );
+  }
+  async listCompatibility(owner: LeaseProof): Promise<CompatibilityProcessSummary[]> {
+    const value = await this.request<unknown>('/v1/process/compatibility-list', { owner });
+    if (!Array.isArray(value)) throw invalidRunnerResult(false);
+    return value.map((entry) => compatibilitySummary(entry));
+  }
+  async statusCompatibility(id: string, owner: LeaseProof, options: CompatibilityStatusOptions = {}): Promise<CompatibilityProcessOutput> {
+    return compatibilityOutput(await this.request<unknown>('/v1/process/compatibility-status', { id, owner, options }), false);
+  }
+  async inputCompatibility(id: string, input: string, owner: LeaseProof): Promise<{ status: 'ok' }> {
+    const value = await this.request<unknown>('/v1/process/compatibility-input', { id, input, owner }, 'POST', true);
+    if (!isRecord(value) || value.status !== 'ok') throw invalidRunnerResult(true);
+    return { status: 'ok' };
+  }
+  async deleteCompatibility(id: string, owner: LeaseProof, force = false): Promise<{ status: 'killed' }> {
+    const value = await this.request<unknown>('/v1/process/compatibility-delete', { id, owner, force });
+    if (!isRecord(value) || value.status !== 'killed') throw invalidRunnerResult(false);
+    return { status: 'killed' };
+  }
+  async terminateOwner(owner: LeaseProof | undefined): Promise<{ terminatedManagedProcesses: number }> {
+    const value = await this.request<unknown>('/v1/process/terminate-owner', { owner });
+    if (!isRecord(value)
+      || !Number.isSafeInteger(value.terminatedManagedProcesses)
+      || (value.terminatedManagedProcesses as number) < 0) {
+      throw invalidRunnerResult(false);
+    }
+    return { terminatedManagedProcesses: value.terminatedManagedProcesses as number };
   }
   async count(): Promise<number> {
     return (await this.status()).managedProcesses;
   }
   status(): Promise<RemoteProcessStatus> { return this.request('/v1/status', undefined, 'GET'); }
-  private request<T>(path: string, body?: unknown, method = 'POST'): Promise<T> {
-    return runnerRequest(this.baseUrl, this.key, path, body, method);
+  private request<T>(path: string, body?: unknown, method = 'POST', ambiguousOnFailure = false): Promise<T> {
+    return runnerRequest(this.baseUrl, this.key, path, body, method, 'x-qubicl-runner-key', ambiguousOnFailure);
   }
 }
 
@@ -142,7 +179,15 @@ export class RemoteBrowserManager extends BrowserManager {
   }
 }
 
-async function runnerRequest<T>(baseUrl: string, key: string, path: string, body?: unknown, method = 'POST', keyHeader = 'x-qubicl-runner-key'): Promise<T> {
+async function runnerRequest<T>(
+  baseUrl: string,
+  key: string,
+  path: string,
+  body?: unknown,
+  method = 'POST',
+  keyHeader = 'x-qubicl-runner-key',
+  ambiguousOnFailure = false,
+): Promise<T> {
   let response: Response;
   try {
     response = await fetch(new URL(path, baseUrl), {
@@ -156,12 +201,77 @@ async function runnerRequest<T>(baseUrl: string, key: string, path: string, body
       : baseUrl.includes('web') ? 'web'
         : baseUrl.includes('egress') ? 'egress'
           : 'desktop-session';
-    throw new QubiclError('internal_runner_unavailable', `The isolated ${role} runner is unavailable: ${(error as Error).message}`, 503);
+    throw new QubiclError(
+      ambiguousOnFailure ? 'internal_runner_ambiguous' : 'internal_runner_unavailable',
+      `The isolated ${role} runner ${ambiguousOnFailure ? 'response was lost after the operation may have started' : 'is unavailable'}: ${(error as Error).message}`,
+      503,
+    );
   }
-  const value = await response.json().catch(() => undefined) as T | { error?: { code?: string; message?: string } } | undefined;
+  let value: T | { error?: { code?: string; message?: string } } | undefined;
+  try {
+    value = await response.json() as T | { error?: { code?: string; message?: string } };
+  } catch (error) {
+    if (response.ok && ambiguousOnFailure) {
+      throw new QubiclError('internal_runner_ambiguous', `The isolated runner returned an invalid success response after the operation may have started: ${(error as Error).message}`, 503);
+    }
+    if (response.ok) throw new QubiclError('internal_runner_invalid_response', `The isolated runner returned an invalid success response: ${(error as Error).message}`, 502);
+  }
   if (!response.ok) {
     const payload = value as { error?: { code?: string; message?: string } } | undefined;
     throw new QubiclError(payload?.error?.code ?? 'internal_runner_error', payload?.error?.message ?? `Internal runner returned HTTP ${response.status}.`, response.status);
   }
+  if (value === undefined) throw new QubiclError('internal_runner_invalid_response', 'The isolated runner returned an empty success response.', 502);
   return value as T;
+}
+
+function compatibilityOutput(value: unknown, ambiguous: boolean): CompatibilityProcessOutput {
+  const summary = compatibilitySummary(value, ambiguous);
+  if (!isRecord(value)
+    || !Array.isArray(value.output)
+    || !value.output.every((entry) => isRecord(entry)
+      && (entry.type === 'stdout' || entry.type === 'stderr')
+      && typeof entry.data === 'string')
+    || typeof value.truncated !== 'boolean'
+    || !Number.isSafeInteger(value.next_offset)
+    || (value.next_offset as number) < 0) {
+    throw invalidRunnerResult(ambiguous);
+  }
+  return {
+    ...summary,
+    output: value.output as CompatibilityProcessOutput['output'],
+    truncated: value.truncated,
+    next_offset: value.next_offset as number,
+  };
+}
+
+function compatibilitySummary(value: unknown, ambiguous = false): CompatibilityProcessSummary {
+  if (!isRecord(value)
+    || typeof value.id !== 'string'
+    || typeof value.command !== 'string'
+    || typeof value.status !== 'string'
+    || !['running', 'done', 'killed'].includes(value.status)
+    || !(value.exit_code === null || Number.isSafeInteger(value.exit_code))
+    || value.log_path !== null
+    || typeof value.cwd !== 'string'
+    || !(value.session_id === null || typeof value.session_id === 'string')
+    || typeof value.started_at !== 'number'
+    || !Number.isFinite(value.started_at)
+    || !(value.finished_at === null || (typeof value.finished_at === 'number' && Number.isFinite(value.finished_at)))) {
+    throw invalidRunnerResult(ambiguous);
+  }
+  return value as unknown as CompatibilityProcessSummary;
+}
+
+function invalidRunnerResult(ambiguous: boolean): QubiclError {
+  return new QubiclError(
+    ambiguous ? 'internal_runner_ambiguous' : 'internal_runner_invalid_response',
+    ambiguous
+      ? 'The isolated runner returned an invalid success result after the operation may have started.'
+      : 'The isolated runner returned an invalid success result.',
+    ambiguous ? 503 : 502,
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
