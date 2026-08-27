@@ -12,11 +12,17 @@ import {
   validateClientConformance,
 } from './client-conformance.mjs';
 import { publicKeyFingerprint, signEvidence, verifyEvidenceSignature } from './evidence-signature.mjs';
+import {
+  PLATFORM_SUPPORT_REQUIREMENTS_NAME,
+  PLATFORM_SUPPORT_REQUIREMENTS_PATH,
+  loadPlatformSupportRequirements,
+  validatePlatformConformance,
+} from './platform-support.mjs';
 import { verifyReleaseSet } from './release-set.mjs';
 
 const root = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const LEGACY_CLIENTS = ['codex', 'claude-code', 'claude-desktop', 'cursor', 'vscode', 'open-webui', 'mcp-stdio', 'mcp-http', 'openapi'];
-const PLATFORMS = ['linux-x64', 'linux-arm64', 'macos-intel', 'macos-apple-silicon', 'windows-wsl2-x64'];
+const LEGACY_PLATFORMS = ['linux-x64', 'linux-arm64', 'macos-intel', 'macos-apple-silicon', 'windows-wsl2-x64'];
 const WORKFLOWS = ['upgrade', 'backupRestoreInterruption', 'restart', 'physicalReboot', 'fullTopologyPerformance', 'multipleComputers', 'sustainedDogfooding'];
 
 export async function validateAcceptanceEvidence(evidence, context) {
@@ -44,18 +50,27 @@ export async function validateAcceptanceEvidence(evidence, context) {
       validateResult(result, label, evidenceDirectory, releaseSet.createdAt, now)
     ));
   }
-  await requiredRows(evidence.platforms, PLATFORMS, 'platform', evidenceDirectory, releaseSet.createdAt, now, (row) => {
-    assert(row.minimumVersionsPassed === true && row.restartPassed === true && row.physicalRebootPassed === true, `${row.id} lacks minimum/restart/reboot evidence.`);
-    for (const field of ['osVersion', 'architecture', 'node', 'dockerEngine', 'dockerCompose']) assert(version(row[field]), `${row.id} requires ${field}.`);
-    assert(row.dockerDesktop === null || version(row.dockerDesktop), `${row.id} has invalid dockerDesktop evidence.`);
-    if (row.id === 'windows-wsl2-x64') {
-      assert(version(row.windowsBuild) && version(row.wslVersion) && version(row.wslKernel) && version(row.distribution), `${row.id} requires exact Windows, WSL, kernel, and distribution versions.`);
-      assert(version(row.dockerDesktop), `${row.id} requires Docker Desktop version evidence.`);
-      for (const field of ['wslShutdownPassed', 'windowsHostRebootPassed', 'linuxFilesystemPassed', 'windowsBackedStateRejected', 'windowsLocalhostPassed', 'windowsStdioPassed', 'viewerHandoffPassed']) {
-        assert(row[field] === true, `${row.id} requires ${field}.`);
+  let platformSummary;
+  if (evidence.schemaVersion === 3) {
+    await requiredRows(evidence.platforms, LEGACY_PLATFORMS, 'platform', evidenceDirectory, releaseSet.createdAt, now, (row) => {
+      assert(row.minimumVersionsPassed === true && row.restartPassed === true && row.physicalRebootPassed === true, `${row.id} lacks minimum/restart/reboot evidence.`);
+      for (const field of ['osVersion', 'architecture', 'node', 'dockerEngine', 'dockerCompose']) assert(version(row[field]), `${row.id} requires ${field}.`);
+      assert(row.dockerDesktop === null || version(row.dockerDesktop), `${row.id} has invalid dockerDesktop evidence.`);
+      if (row.id === 'windows-wsl2-x64') {
+        assert(version(row.windowsBuild) && version(row.wslVersion) && version(row.wslKernel) && version(row.distribution), `${row.id} requires exact Windows, WSL, kernel, and distribution versions.`);
+        assert(version(row.dockerDesktop), `${row.id} requires Docker Desktop version evidence.`);
+        for (const field of ['wslShutdownPassed', 'windowsHostRebootPassed', 'linuxFilesystemPassed', 'windowsBackedStateRejected', 'windowsLocalhostPassed', 'windowsStdioPassed', 'viewerHandoffPassed']) {
+          assert(row[field] === true, `${row.id} requires ${field}.`);
+        }
       }
-    }
-  });
+    });
+    platformSummary = { platforms: evidence.platforms.length };
+  } else {
+    const requirements = await verifyPlatformSupportRequirements(evidence, evidenceDirectory);
+    platformSummary = await validatePlatformConformance(evidence, requirements, (result, label) => (
+      validateResult(result, label, evidenceDirectory, releaseSet.createdAt, now)
+    ));
+  }
   assert(evidence.workflows && typeof evidence.workflows === 'object', 'Acceptance workflows are required.');
   for (const id of WORKFLOWS) await validateResult(evidence.workflows[id], `workflow ${id}`, evidenceDirectory, releaseSet.createdAt, now);
 
@@ -65,12 +80,13 @@ export async function validateAcceptanceEvidence(evidence, context) {
   for (const topic of ['processBoundary', 'internalAuthentication', 'browserSurface', 'filesystemRaces', 'networkReconciliation', 'releaseIntegrity']) {
     assert(evidence.securityReview.topics?.[topic] === true, `Security review lacks ${topic}.`);
   }
-  return { schemaVersion: evidence.schemaVersion, ...conformance, platforms: evidence.platforms.length, workflows: WORKFLOWS.length };
+  return { schemaVersion: evidence.schemaVersion, ...conformance, ...platformSummary, workflows: WORKFLOWS.length };
 }
 
 export function acceptanceEvidenceFiles(evidence, directory) {
   const references = [
     evidence.conformance?.requirements,
+    evidence.platformConformance?.requirements,
     ...clientConformanceEvidenceReferences(evidence),
     ...(evidence.platforms ?? []).map(({ evidence: value }) => value),
     ...Object.values(evidence.workflows ?? {}).map((value) => value?.evidence),
@@ -89,6 +105,16 @@ async function verifyConformanceRequirements(evidence, directory) {
   assert(reference.sha256 === await sha256(CLIENT_CONFORMANCE_REQUIREMENTS_PATH),
     'Client conformance evidence does not bind the exact reviewed requirements.');
   return loadClientConformanceRequirements(join(directory, reference.path));
+}
+
+async function verifyPlatformSupportRequirements(evidence, directory) {
+  const reference = evidence.platformConformance?.requirements;
+  assert(reference?.path === PLATFORM_SUPPORT_REQUIREMENTS_NAME,
+    `Platform support requirements must use ${PLATFORM_SUPPORT_REQUIREMENTS_NAME}.`);
+  await validateEvidenceFile(reference, directory, 'platform support requirements');
+  assert(reference.sha256 === await sha256(PLATFORM_SUPPORT_REQUIREMENTS_PATH),
+    'Platform conformance evidence does not bind the exact reviewed requirements.');
+  return loadPlatformSupportRequirements(join(directory, reference.path));
 }
 
 async function requiredRows(rows, ids, label, directory, notBefore, now, extra) {

@@ -64,7 +64,8 @@ Requirements: Linux with Docker Engine or Docker Desktop, macOS with Docker
 Desktop, or Windows 11 through WSL 2 and Docker Desktop—plus Node.js 22 or 24
 and Docker Compose 2.24+. Native Windows execution and WSL 1 are not supported;
 WSL installations must keep Qubicl state and computer homes in the WSL Linux
-filesystem under `/home`.
+filesystem under `/home`. See [Platform support](docs/platforms.md) before
+installing on a best-effort host.
 
 ```sh
 qubicl setup
@@ -207,10 +208,11 @@ compromise, or another user who controls the host account. The default
 Qubicl `0.1.x` is the initial public series. It is ready for real use, but its
 interfaces and state format may evolve before 1.0. Linux x64, Apple Silicon
 macOS with Docker Desktop, and Windows 11 x64 through Ubuntu 24.04 on WSL 2
-with Docker Desktop are directly exercised for the first release. Linux ARM64,
-Intel macOS, Windows on ARM, and other WSL distributions remain best-effort.
+with Docker Desktop are directly tested for the first release. Linux ARM64,
+Intel macOS, Windows on ARM, and other WSL 2 distributions remain best-effort.
 Native Windows and WSL 1 are unsupported; Qubicl computers remain Linux
-containers on every host. Back up important computer homes before upgrades.
+containers on every host. The versioned [Platform support](docs/platforms.md)
+matrix is authoritative. Back up important computer homes before upgrades.
 
 ## Documentation
 
@@ -218,7 +220,7 @@ containers on every host. Back up important computer homes before upgrades.
 | --- | --- |
 | Architecture and boundaries | [Architecture](docs/architecture.md) · [Security model](docs/security-model.md) |
 | Persistence and recovery | [Persistence](docs/persistence.md) · [Troubleshooting](docs/troubleshooting.md) |
-| Windows hosts | [Windows Subsystem for Linux](docs/wsl.md) |
+| Host platforms | [Platform support](docs/platforms.md) · [Windows Subsystem for Linux](docs/wsl.md) |
 | Clients and workflows | [Client setup](docs/clients.md) · [Daily-driver workflows](docs/daily-driver.md) |
 | Skills and research | [Skills](docs/skills.md) · [Web research](docs/web-research.md) |
 | Custom environments | [Custom images](docs/custom-images.md) |

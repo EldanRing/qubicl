@@ -11,6 +11,8 @@ Desktop, and Windows 11 x64 through Ubuntu 24.04 on WSL 2 with Docker Desktop
 are directly exercised hosts. Native Windows and WSL 1 are unsupported; Linux
 ARM64, Intel macOS, Windows on ARM, and other WSL distributions are best-effort.
 Missing external client or best-effort hardware coverage does not block 0.1.
+The versioned [platform support matrix](conformance/platform-support-v1.json)
+is the source of truth for these support and evidence classifications.
 
 An initial candidate must still:
 
@@ -240,3 +242,13 @@ runs distinct from MCP stdio/HTTP, OpenAPI, and Open Terminal protocol probes,
 while retaining Claude Desktop, Cursor, and VS Code coverage. Adding this gate
 does not produce the evidence: complete real-client runs must still be performed
 against the frozen candidate before acceptance is signed.
+
+Schema 4 also hash-binds `platform-support-v1.json`. Its five acceptance rows
+must match the reviewed OS, architecture, execution mode, Linux-container
+runtime, exact platform/runtime versions, and required restart/reboot checks.
+The Windows row is constrained to the directly tested Windows 11 x64 and Ubuntu
+24.04 WSL 2 shape; other current WSL 2 distributions and Windows on ARM remain
+best-effort. macOS rows require Docker Desktop restart evidence. Native Windows
+and WSL 1 remain unsupported. The matrix records policy—it does not claim that
+new physical-host runs occurred—so every schema-4 row still needs post-freeze,
+hash-bound evidence from the frozen candidate before signing.

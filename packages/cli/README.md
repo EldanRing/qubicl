@@ -60,8 +60,13 @@ your model or agent
 ## Quick start
 
 Requirements: Node.js 22 or 24, Docker Engine 24.0 or Docker Desktop 4.29+, and
-Docker Compose 2.24+. Qubicl supports Linux, Apple Silicon macOS with Docker
-Desktop, and Windows 11 x64 through Ubuntu 24.04 on WSL 2 with Docker Desktop.
+Docker Compose 2.24+. Directly tested hosts are Linux x64, Apple Silicon
+macOS with Docker Desktop, and Windows 11 x64 through Ubuntu 24.04 on WSL 2
+with Docker Desktop. Linux ARM64, Intel macOS, Windows on ARM, and other WSL 2
+distributions are best-effort. Native Windows and WSL 1 are unsupported;
+Qubicl computers remain Linux containers on every host. See the versioned
+[Platform support](https://github.com/EldanRing/qubicl/blob/main/docs/platforms.md)
+matrix before installing on a best-effort host.
 
 ```sh
 qubicl setup
@@ -140,7 +145,14 @@ Read the complete [security model](https://github.com/EldanRing/qubicl/blob/main
 before relying on the boundary.
 
 Qubicl `0.1.x` is the initial public series. Interfaces and state formats may
-evolve before 1.0; back up important computer homes before upgrades.
+evolve before 1.0. Linux x64, Apple Silicon macOS with Docker Desktop, and
+Windows 11 x64 through Ubuntu 24.04 on WSL 2 with Docker Desktop are directly
+tested. Linux ARM64, Intel macOS, Windows on ARM, and other WSL 2 distributions
+remain best-effort. Native Windows and WSL 1 are unsupported; Qubicl computers
+remain Linux containers on every host. Read the
+[platform matrix](https://github.com/EldanRing/qubicl/blob/main/docs/platforms.md)
+and [WSL guide](https://github.com/EldanRing/qubicl/blob/main/docs/wsl.md) for
+the exact boundaries. Back up important computer homes before upgrades.
 
 Explore the [source and full documentation](https://github.com/EldanRing/qubicl).
 Source code and documentation are Apache-2.0. Designated Qubicl brand artwork

@@ -68,6 +68,37 @@ The validator performs no network lookup and does not run or install clients.
 Passing evidence must come from maintainer-supplied real clients and accounts;
 the schema and its unit tests are not a claim that those runs occurred.
 
+## Platform conformance acceptance
+
+Acceptance schema 4 also requires the exact
+[`platform-support-v1.json`](conformance/platform-support-v1.json) matrix. The
+acceptance directory carries a byte-identical sibling copy and records it under
+`platformConformance`; the validator checks that copy against the clean reviewed
+source revision before accepting any platform row. Schema-3 v0.1 evidence keeps
+its original five-row validation and does not require this newer file.
+
+The matrix separates support policy from evidence status. Linux x64, Apple
+Silicon macOS, and Windows 11 x64 through Ubuntu 24.04 on WSL 2 retain their
+directly tested baseline. Linux ARM64 and Intel macOS remain best-effort, while
+other WSL 2 distributions and Windows on ARM are explicitly best-effort outside
+the five-row acceptance set. Native Windows and WSL 1 are unsupported. Every
+host still runs Qubicl computers as Linux containers rather than native host
+workloads or a VM security boundary.
+
+Each schema-4 platform row is checked against its reviewed host OS,
+architecture, execution mode, Linux-container runtime, exact version fields,
+and required restart/reboot results. macOS rows additionally require an exact
+Docker Desktop version and Docker Desktop restart result. The Windows row must
+identify Windows 11 x64 and Ubuntu 24.04, and retains the WSL shutdown, Windows
+reboot, Linux-filesystem, DrvFS rejection, localhost, pinned stdio launcher, and
+viewer-handoff checks. Each row still requires a tester, post-freeze UTC time,
+passing result, and SHA-256-bound local evidence file.
+
+The matrix and validator do not perform hardware tests. A v0.2 acceptance
+bundle can pass only after maintainers execute these rows on the frozen
+candidate bytes and retain the actual reports. Completing a best-effort row for
+one candidate does not by itself change the public support policy.
+
 ## Native archives
 
 Windows users run the Linux archive/package inside a supported WSL 2

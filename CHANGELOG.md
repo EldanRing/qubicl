@@ -11,6 +11,15 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   OpenCode, OpenClaw, Hermes Agent, Open WebUI, retained desktop/editor clients,
   and the applicable MCP, OpenAPI, and Open Terminal surfaces. Schema-3 v0.1
   evidence remains verifiable but cannot satisfy a v0.2 release.
+- A versioned platform support matrix now separates support policy from direct
+  test evidence and binds schema-4 acceptance to exact Linux, macOS, and Windows
+  through WSL 2 host facts without promoting best-effort platforms.
+
+### Changed
+
+- Platform documentation now gives macOS Docker Desktop preflight and recovery
+  steps plus a shorter WSL 2 install, doctor-report, pinned-launcher, and Windows
+  browser-handoff path while retaining the WSL 1 and native-Windows boundaries.
 
 ### Fixed
 

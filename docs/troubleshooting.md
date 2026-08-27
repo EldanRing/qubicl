@@ -30,6 +30,29 @@ qubicl config set --gateway-port 4321
 
 Qubicl never scans silently for a different port.
 
+### macOS and Docker Desktop
+
+Apple Silicon macOS with Docker Desktop is directly tested; Intel macOS is
+best-effort. Confirm the Mac is using the native Qubicl/npm architecture and
+that Docker Desktop's local Linux engine is ready:
+
+```sh
+uname -m
+docker context show
+docker version
+docker compose version
+docker info --format '{{.OSType}}/{{.Architecture}}'
+qubicl doctor
+```
+
+If the daemon is unavailable, start Docker Desktop and wait for its engine
+rather than retrying setup with `sudo`. If doctor reports a remote context or
+`DOCKER_HOST`, explicitly restore a local Docker Desktop context and remove the
+unintended override. A non-Linux Docker server is unsupported. For a bind-probe
+failure, confirm Docker Desktop may share the selected local `QUBICL_HOME` path
+and that the normal user owns it. See [Platform support](platforms.md) for the
+architecture and evidence boundaries.
+
 ### Windows through WSL 2
 
 Qubicl supports Windows 11 through WSL 2 and Docker Desktop, not through native
@@ -37,6 +60,12 @@ Windows execution. Keep Qubicl state on the WSL Linux filesystem; DrvFS and
 Windows-backed 9P mounts are rejected even when mounted somewhere other than
 `/mnt/c`. Enable Docker Desktop integration for the active distribution. See
 the complete [WSL guide](wsl.md).
+
+From PowerShell, confirm `wsl --list --verbose` reports version 2. From the
+selected distribution, confirm `$WSL_DISTRO_NAME`, `cmd.exe /c echo interop-ok`,
+`docker version`, and `qubicl doctor`. The `--client-host windows` adapter
+prints a pinned `wsl.exe` launcher configuration but never edits the Windows
+client's files.
 
 ## Offline setup fails
 
@@ -123,5 +152,14 @@ That is expected after recreation. Only `/home` is durable. Put permanent system
 Ctrl-C exits 130. Before the setup journal exists, prior defaults are unchanged; Docker may retain cache. After journaling, state contains a recoverable target. Do not edit YAML. Preserve the state root, restore Docker if needed, and run the exact follow-up named by the error—normally `qubicl setup` or `qubicl up`—then `qubicl doctor`.
 
 ## Sharing diagnostics
+
+Save a structured report locally when it helps:
+
+```sh
+qubicl doctor --json > qubicl-doctor.json
+```
+
+Review the doctor JSON before sharing it and include only the fields needed to
+reproduce the failure. Qubicl does not upload reports automatically.
 
 Remove bearer tokens, `secrets.yaml`, viewer tickets, private URLs/data, home contents, and unrelated host paths. Security reports use the private process in [SECURITY.md](../SECURITY.md), not a public issue.

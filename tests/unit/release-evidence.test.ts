@@ -93,9 +93,10 @@ test('v0.1 schema-3 acceptance remains verifiable and rejects fake or incomplete
   }
 });
 
-test('v0.2 schema-4 acceptance requires exact app versions and post-freeze evidence for every applicable surface', async () => {
+test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to reviewed matrices', async () => {
   const acceptance = await import(pathToFileURL(join(root, 'scripts', 'acceptance-evidence.mjs')).href);
   const conformance = await import(pathToFileURL(join(root, 'scripts', 'client-conformance.mjs')).href);
+  const platformSupport = await import(pathToFileURL(join(root, 'scripts', 'platform-support.mjs')).href);
   const directory = await mkdtemp(join(tmpdir(), 'qubicl-conformance-acceptance-'));
   try {
     const reportPath = join(directory, 'conformance-results.json');
@@ -104,6 +105,9 @@ test('v0.2 schema-4 acceptance requires exact app versions and post-freeze evide
     const requirements = await conformance.loadClientConformanceRequirements();
     const requirementsPath = join(directory, conformance.CLIENT_CONFORMANCE_REQUIREMENTS_NAME);
     await copyFile(conformance.CLIENT_CONFORMANCE_REQUIREMENTS_PATH, requirementsPath);
+    const platformRequirements = await platformSupport.loadPlatformSupportRequirements();
+    const platformRequirementsPath = join(directory, platformSupport.PLATFORM_SUPPORT_REQUIREMENTS_NAME);
+    await copyFile(platformSupport.PLATFORM_SUPPORT_REQUIREMENTS_PATH, platformRequirementsPath);
     const checked = {
       passed: true,
       testedAt: '2026-08-23T12:30:00.000Z',
@@ -118,44 +122,41 @@ test('v0.2 schema-4 acceptance requires exact app versions and post-freeze evide
       ...checked,
       surfaces: Object.fromEntries(profile.requiredSurfaces.map((surface) => [surface, { ...checked }])),
     }));
-    const platformResult = { ...checked, version: '1.2.3' };
-    const platforms: Array<Record<string, any>> = ['linux-x64', 'linux-arm64', 'macos-intel', 'macos-apple-silicon'].map((id) => ({
-      id,
+    const platformResult = { ...checked, version: 'candidate 0.2.0' };
+    const platformVersions: Record<string, Record<string, string | null>> = {
+      'linux-x64': {
+        osVersion: 'Ubuntu 24.04.3 LTS', node: '22.23.2', dockerEngine: '28.4.0',
+        dockerCompose: '2.39.2', dockerDesktop: null,
+      },
+      'linux-arm64': {
+        osVersion: 'Ubuntu 24.04.3 LTS', node: '22.23.2', dockerEngine: '28.4.0',
+        dockerCompose: '2.39.2', dockerDesktop: null,
+      },
+      'macos-intel': {
+        osVersion: 'macOS 15.6.1 (24G90)', node: '22.23.2', dockerEngine: '28.4.0',
+        dockerCompose: '2.39.2', dockerDesktop: '4.50.0',
+      },
+      'macos-apple-silicon': {
+        osVersion: 'macOS 15.6.1 (24G90)', node: '22.23.2', dockerEngine: '28.4.0',
+        dockerCompose: '2.39.2', dockerDesktop: '4.50.0',
+      },
+      'windows-wsl2-x64': {
+        osVersion: 'Windows 11 10.0.26200.8875', windowsBuild: '10.0.26200.8875',
+        wslVersion: '2.7.12.0', wslKernel: '6.18.33.2', distribution: 'Ubuntu 24.04.3 LTS',
+        node: '22.22.2', dockerEngine: '29.7.2', dockerCompose: '5.4.0', dockerDesktop: '4.50.0',
+      },
+    };
+    const platforms: Array<Record<string, any>> = platformRequirements.acceptancePlatforms.map((profile: {
+      id: string;
+      requiredValues: Record<string, string>;
+      requiredChecks: string[];
+    }) => ({
+      id: profile.id,
       ...platformResult,
-      minimumVersionsPassed: true,
-      restartPassed: true,
-      physicalRebootPassed: true,
-      osVersion: '13.1',
-      architecture: 'x64-1',
-      node: '22.23.2',
-      dockerEngine: '28.4.0',
-      dockerCompose: '2.39.2',
-      dockerDesktop: null,
+      ...profile.requiredValues,
+      ...platformVersions[profile.id],
+      ...Object.fromEntries(profile.requiredChecks.map((check) => [check, true])),
     }));
-    platforms.push({
-      id: 'windows-wsl2-x64',
-      ...platformResult,
-      minimumVersionsPassed: true,
-      restartPassed: true,
-      physicalRebootPassed: true,
-      osVersion: 'Windows 11 10.0.26200.8875',
-      windowsBuild: '10.0.26200.8875',
-      architecture: 'x64-1',
-      wslVersion: '2.7.12.0',
-      wslKernel: '6.18.33.2',
-      distribution: 'Ubuntu 24.04',
-      node: '22.22.2',
-      dockerEngine: '29.7.2',
-      dockerCompose: '5.4.0',
-      dockerDesktop: '4.50.0',
-      wslShutdownPassed: true,
-      windowsHostRebootPassed: true,
-      linuxFilesystemPassed: true,
-      windowsBackedStateRejected: true,
-      windowsLocalhostPassed: true,
-      windowsStdioPassed: true,
-      viewerHandoffPassed: true,
-    });
     const review = (reviewedBy: string) => ({
       passed: true,
       reviewedAt: '2026-08-23T12:35:00.000Z',
@@ -175,6 +176,13 @@ test('v0.2 schema-4 acceptance requires exact app versions and post-freeze evide
         requirements: {
           path: conformance.CLIENT_CONFORMANCE_REQUIREMENTS_NAME,
           sha256: await sha256(requirementsPath),
+        },
+      },
+      platformConformance: {
+        schemaVersion: 1,
+        requirements: {
+          path: platformSupport.PLATFORM_SUPPORT_REQUIREMENTS_NAME,
+          sha256: await sha256(platformRequirementsPath),
         },
       },
       owner: 'release-owner',
@@ -208,7 +216,10 @@ test('v0.2 schema-4 acceptance requires exact app versions and post-freeze evide
       platforms: 5,
       workflows: 7,
     });
-    assert.deepEqual(acceptance.acceptanceEvidenceFiles(evidence, directory).sort(), [requirementsPath, reportPath].sort());
+    assert.deepEqual(
+      acceptance.acceptanceEvidenceFiles(evidence, directory).sort(),
+      [requirementsPath, platformRequirementsPath, reportPath].sort(),
+    );
 
     const missingClient = structuredClone(evidence);
     missingClient.clients = missingClient.clients.filter(({ id }) => id !== 'opencode');
@@ -231,6 +242,26 @@ test('v0.2 schema-4 acceptance requires exact app versions and post-freeze evide
     const detachedSurface = structuredClone(evidence);
     detachedSurface.clients[0]!.surfaces.discovery!.evidence.sha256 = '9'.repeat(64);
     await assert.rejects(acceptance.validateAcceptanceEvidence(detachedSurface, context), /evidence file hash does not match/);
+    const missingPlatformContract: Partial<typeof evidence> = structuredClone(evidence);
+    delete missingPlatformContract.platformConformance;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(missingPlatformContract, context), /platform-support-v1\.json/);
+    const wrongArchitecture = structuredClone(evidence);
+    wrongArchitecture.platforms[0]!.architecture = 'arm64';
+    await assert.rejects(acceptance.validateAcceptanceEvidence(wrongArchitecture, context), /architecture as x64/);
+    const floatingHostVersion = structuredClone(evidence);
+    floatingHostVersion.platforms[0]!.osVersion = 'latest';
+    await assert.rejects(acceptance.validateAcceptanceEvidence(floatingHostVersion, context), /exact osVersion/);
+    const wrongDistribution = structuredClone(evidence);
+    wrongDistribution.platforms[4]!.distribution = 'Debian 13.1';
+    await assert.rejects(acceptance.validateAcceptanceEvidence(wrongDistribution, context), /identify Ubuntu 24\.04/);
+    const missingDesktopRestart = structuredClone(evidence);
+    missingDesktopRestart.platforms[2]!.dockerDesktopRestartPassed = false;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(missingDesktopRestart, context), /dockerDesktopRestartPassed/);
+
+    await writeFile(platformRequirementsPath, `${JSON.stringify({ ...platformRequirements, id: 'weakened-platform-support' }, null, 2)}\n`);
+    const weakenedPlatformRequirements = structuredClone(evidence);
+    weakenedPlatformRequirements.platformConformance.requirements.sha256 = await sha256(platformRequirementsPath);
+    await assert.rejects(acceptance.validateAcceptanceEvidence(weakenedPlatformRequirements, context), /exact reviewed requirements/);
 
     await writeFile(requirementsPath, `${JSON.stringify({ ...requirements, id: 'weakened-requirements' }, null, 2)}\n`);
     const weakenedRequirements = structuredClone(evidence);

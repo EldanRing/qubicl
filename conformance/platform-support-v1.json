@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "id": "qubicl-platform-support",
+  "acceptanceSchemaVersion": 4,
+  "statusVocabulary": {
+    "supportLevels": ["supported", "best-effort", "unsupported"],
+    "validationLevels": ["directly-tested", "not-directly-tested"]
+  },
+  "acceptancePlatforms": [
+    {
+      "id": "linux-x64",
+      "supportLevel": "supported",
+      "validationLevel": "directly-tested",
+      "evidenceBaseline": "v0.1.0",
+      "requiredValues": {
+        "hostOs": "linux",
+        "architecture": "x64",
+        "executionMode": "native",
+        "computerRuntime": "linux-container"
+      },
+      "requiredVersionFields": ["osVersion", "node", "dockerEngine", "dockerCompose"],
+      "nullableVersionFields": ["dockerDesktop"],
+      "requiredPrefixes": {},
+      "requiredChecks": ["minimumVersionsPassed", "restartPassed", "physicalRebootPassed"]
+    },
+    {
+      "id": "linux-arm64",
+      "supportLevel": "best-effort",
+      "validationLevel": "not-directly-tested",
+      "evidenceBaseline": null,
+      "requiredValues": {
+        "hostOs": "linux",
+        "architecture": "arm64",
+        "executionMode": "native",
+        "computerRuntime": "linux-container"
+      },
+      "requiredVersionFields": ["osVersion", "node", "dockerEngine", "dockerCompose"],
+      "nullableVersionFields": ["dockerDesktop"],
+      "requiredPrefixes": {},
+      "requiredChecks": ["minimumVersionsPassed", "restartPassed", "physicalRebootPassed"]
+    },
+    {
+      "id": "macos-intel",
+      "supportLevel": "best-effort",
+      "validationLevel": "not-directly-tested",
+      "evidenceBaseline": null,
+      "requiredValues": {
+        "hostOs": "macos",
+        "architecture": "x64",
+        "executionMode": "native",
+        "computerRuntime": "linux-container"
+      },
+      "requiredVersionFields": ["osVersion", "node", "dockerEngine", "dockerCompose", "dockerDesktop"],
+      "nullableVersionFields": [],
+      "requiredPrefixes": {},
+      "requiredChecks": ["minimumVersionsPassed", "restartPassed", "physicalRebootPassed", "dockerDesktopRestartPassed"]
+    },
+    {
+      "id": "macos-apple-silicon",
+      "supportLevel": "supported",
+      "validationLevel": "directly-tested",
+      "evidenceBaseline": "v0.1.0",
+      "requiredValues": {
+        "hostOs": "macos",
+        "architecture": "arm64",
+        "executionMode": "native",
+        "computerRuntime": "linux-container"
+      },
+      "requiredVersionFields": ["osVersion", "node", "dockerEngine", "dockerCompose", "dockerDesktop"],
+      "nullableVersionFields": [],
+      "requiredPrefixes": {},
+      "requiredChecks": ["minimumVersionsPassed", "restartPassed", "physicalRebootPassed", "dockerDesktopRestartPassed"]
+    },
+    {
+      "id": "windows-wsl2-x64",
+      "supportLevel": "supported",
+      "validationLevel": "directly-tested",
+      "evidenceBaseline": "v0.1.0",
+      "requiredValues": {
+        "hostOs": "windows",
+        "architecture": "x64",
+        "executionMode": "wsl2",
+        "computerRuntime": "linux-container"
+      },
+      "requiredVersionFields": ["osVersion", "windowsBuild", "wslVersion", "wslKernel", "distribution", "node", "dockerEngine", "dockerCompose", "dockerDesktop"],
+      "nullableVersionFields": [],
+      "requiredPrefixes": {
+        "osVersion": "Windows 11",
+        "distribution": "Ubuntu 24.04"
+      },
+      "requiredChecks": ["minimumVersionsPassed", "restartPassed", "physicalRebootPassed", "dockerDesktopRestartPassed", "wslShutdownPassed", "windowsHostRebootPassed", "linuxFilesystemPassed", "windowsBackedStateRejected", "windowsLocalhostPassed", "windowsStdioPassed", "viewerHandoffPassed"]
+    }
+  ],
+  "additionalHostClaims": [
+    {
+      "id": "windows-wsl2-x64-other-distribution",
+      "supportLevel": "best-effort",
+      "validationLevel": "not-directly-tested",
+      "hostOs": "windows",
+      "architecture": "x64",
+      "executionMode": "wsl2"
+    },
+    {
+      "id": "windows-wsl2-arm64",
+      "supportLevel": "best-effort",
+      "validationLevel": "not-directly-tested",
+      "hostOs": "windows",
+      "architecture": "arm64",
+      "executionMode": "wsl2"
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "native-windows-cli",
+      "scope": "host-execution",
+      "supportLevel": "unsupported",
+      "validationLevel": "not-directly-tested"
+    },
+    {
+      "id": "wsl1",
+      "scope": "host-execution",
+      "supportLevel": "unsupported",
+      "validationLevel": "not-directly-tested"
+    },
+    {
+      "id": "computer-runtime-linux-container",
+      "scope": "computer-runtime",
+      "supportLevel": "supported",
+      "validationLevel": "directly-tested",
+      "runtimeOs": "linux",
+      "nativeHostWorkload": false,
+      "vmSecurityBoundary": false
+    }
+  ]
+}

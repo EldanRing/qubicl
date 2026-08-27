@@ -5,9 +5,14 @@ runtime inside a WSL 2 distribution. Docker Desktop provides the validated
 local Linux Docker daemon. Windows applications can connect over localhost or
 launch Qubicl's stdio bridge through an explicit `wsl.exe` adapter.
 
+Ubuntu 24.04 is the directly tested distribution. Other current WSL 2
+distributions and Windows on ARM remain best-effort; native Windows and WSL 1
+are unsupported. See the versioned [platform support matrix](platforms.md) for
+the complete policy.
+
 This is a host-platform contract, not a Codex integration:
 
-| Boundary | v0.1 support |
+| Boundary | Current support |
 | --- | --- |
 | Qubicl CLI | Runs inside WSL 2 as the normal Linux user |
 | Docker | Docker Desktop WSL 2 engine with integration enabled for the distribution |
@@ -21,6 +26,36 @@ Ubuntu 24.04 on WSL 2 is the Windows release-validation distribution. Other
 current WSL 2 distributions with the documented Node, Docker, Compose, and
 glibc behavior may work, but should not be advertised as directly validated
 until they complete the same matrix.
+
+## Fast path
+
+For a new supported Windows 11 x64 installation, open PowerShell and install or
+update WSL, then confirm Ubuntu 24.04 reports version 2:
+
+```powershell
+wsl --install -d Ubuntu-24.04
+wsl --update
+wsl --list --verbose
+```
+
+Install Docker Desktop, enable **Use the WSL 2 based engine**, and enable the
+Ubuntu 24.04 distribution under **Settings > Resources > WSL Integration**.
+Start the distribution, install a supported Node.js 22 or 24 release as the
+normal WSL user, and run:
+
+```sh
+node --version
+npm install --global qubicl-cli
+docker version
+docker compose version
+qubicl setup
+qubicl doctor
+```
+
+Keep the checkout, npm installation, `QUBICL_HOME`, and every computer home in
+the WSL Linux filesystem under `/home`. Do not install a second Docker Engine
+inside the distribution. If any fast-path check fails, stop before creating a
+computer and use the focused checks below.
 
 ## Host preparation
 
@@ -141,6 +176,7 @@ qubicl setup --preset computer --cpus 2 --memory 3g \
   --gateway-port 3211 --create qubicl-1 --yes
 qubicl status qubicl-1
 qubicl doctor
+qubicl doctor --json > qubicl-doctor.json
 curl --fail --silent --show-error http://127.0.0.1:3211/health
 ```
 
@@ -148,6 +184,12 @@ Setup and doctor identify WSL 1, interop availability, the state filesystem,
 Docker context and server platform, Compose, resources, localhost port, and the
 real bind behavior used by computer homes. The bind probe runs with the host
 UID/GID and tolerates Docker Desktop's brief bind metadata propagation.
+
+The JSON report is intended for diagnosis, not automatic upload. Review it
+before sharing and remove unrelated local paths or host details. Never attach
+credentials, bearer tokens, protected state, computer-home contents, or viewer
+URLs. Record the exact Windows, WSL, kernel, distribution, Docker Desktop,
+Docker Engine, Compose, Node, and Qubicl versions separately for acceptance.
 
 `qubicl view qubicl-1` prints the one-time loopback viewer URL and opens it with
 the Windows default browser through `explorer.exe`. With interoperability
@@ -177,9 +219,10 @@ qubicl connect qubicl-1 --client opencode --client-host windows
 ```
 
 The generated configuration uses `wsl.exe`, pins `$WSL_DISTRO_NAME`, and pins
-the absolute Node and Qubicl entrypoint paths. It does not depend on the
-Windows application's `PATH` or on shell startup files. Re-run `connect` after
-moving or reinstalling Node or Qubicl.
+the absolute Node and Qubicl entrypoint paths. `connect` prints that pinned
+launcher configuration; it does not create or edit client configuration files.
+The launcher does not depend on the Windows application's `PATH` or on shell
+startup files. Re-run `connect` after moving or reinstalling Node or Qubicl.
 
 Windows reaches services listening in WSL on `localhost` under WSL's default
 NAT networking, so generic HTTP MCP and OpenAPI snippets need no host rewrite:
@@ -193,7 +236,7 @@ Qubicl stays bound to `127.0.0.1`. Do not change it to `0.0.0.0` for WSL
 convenience. Mirrored networking is optional and is not required for the
 supported Windows-to-WSL localhost path.
 
-## v0.1 acceptance matrix
+## Candidate acceptance matrix
 
 Record exact Windows, WSL, distribution, Docker Desktop, Docker Engine,
 Compose, Node, and npm versions with the candidate. A Windows support claim
@@ -241,3 +284,6 @@ contents, or viewer URLs in the acceptance evidence.
   and check interop with `explorer.exe https://example.com`.
 - **Source identity changed:** rebuild all development images and reinstall the
   CLI before retrying setup.
+- **A report is needed:** save `qubicl doctor --json` locally, review it, and
+  share only the fields needed for diagnosis. Do not upload it automatically or
+  include protected state, viewer URLs, tokens, or computer-home contents.
