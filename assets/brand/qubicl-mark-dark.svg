@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 1500" role="img" aria-labelledby="title">
   <title id="title">Qubicl open workspace and cursor mark</title>
-  <path fill="#f7f8fc" d="M720 315H315v873h513v-126H441V441c93.843-.427 185.157.427 279 0V315Z"/>
-  <path fill="#f7f8fc" d="M783 315h405v522h-126V441c-93.843-.427-185.157.427-279 0V315Z"/>
+  <path fill="#fff" d="M675 315H315v873h513V1062H441V441c93.843-.427 140.157.427 234 0V315Z"/>
+  <path fill="#fff" d="M828 315h360v522h-126V441c-93.843-.427-140.157.427-234 0V315Z"/>
   <path fill="#b8e34a" d="m1080.066 1089.059-77.988 143.18-102.108-350.247 330.876 162.014-150.78 45.053Z"/>
 </svg>

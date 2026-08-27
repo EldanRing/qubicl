@@ -1,62 +1,147 @@
-# Qubicl CLI
+<div align="center">
 
-Qubicl is a local computer layer for AI agents. It gives a compatible MCP or OpenAPI client a private Docker computer with durable files, bounded terminal/process tools, keyless web research, optional Chromium/desktop workflows, and explicit human takeover. The model stays outside Qubicl.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EldanRing/qubicl/main/assets/brand/qubicl-mark-dark.svg">
+  <img alt="Qubicl" src="https://raw.githubusercontent.com/EldanRing/qubicl/main/assets/brand/qubicl-mark.svg" width="180">
+</picture>
 
-Qubicl `0.1.x` is the initial pre-1.0 release series. Interfaces and state
-formats may evolve; back up important homes before upgrades.
+<h1>Qubicl</h1>
 
-Install and start onboarding with:
+### Give any AI agent a real, private computer on your machine.
+
+Durable files. Terminal access. Web research. A persistent browser and desktop.
+Human takeover whenever you want it. No Qubicl account, cloud control plane, or
+model lock-in.
+
+[![npm](https://img.shields.io/npm/v/qubicl-cli?color=cb3837&label=npm)](https://www.npmjs.com/package/qubicl-cli)
+[![License](https://img.shields.io/badge/license-Apache--2.0-6f42c1)](https://github.com/EldanRing/qubicl/blob/main/LICENSE)
+[![Node](https://img.shields.io/badge/node-22%20%7C%2024-339933)](https://github.com/EldanRing/qubicl/blob/main/package.json)
+[![Docker](https://img.shields.io/badge/runtime-Docker-2496ED)](https://www.docker.com/)
+
+</div>
+
+---
 
 ```sh
 npm install -g qubicl-cli
 qubicl setup
 ```
 
-The setup wizard uses ordinary numbered/text prompts. Type `back` to revisit the previous step or `cancel` to leave before confirmation without obtaining images or changing Qubicl state.
+Qubicl turns local Docker into observable computers for external AI agents.
+The agent stays in Codex, Claude, Open WebUI, Cursor, VS Code, or another MCP or
+OpenAPI client. Qubicl supplies the machine it works on.
 
-Setup compares four progressive presets: lean headless `file-system` (1 CPU/512m), Openbox/Chromium `browser` with OCR and document inspection (2 CPU/2g), minimal-XFCE `computer` with document helpers and managed SSH (2 CPU/3g), and broad development/office `workstation` (2 CPU/4g). It validates a local Docker daemon, previews the exact image and resource effects, obtains only the selected image plus gateway, and optionally creates the first computer. Every image carries native keyless `web_search`, local `web_extract`, and the full compatible skill catalog. New computers activate `plan` on `file-system`; `plan`, `pdf`, and `ocr-and-documents` on `browser`; and all six core skills on `computer` and `workstation`.
+```text
+your model or agent
+        │
+        │  MCP / OpenAPI / Open Terminal
+        ▼
+ localhost-only Qubicl gateway
+        │
+        ├── terminal + managed processes
+        ├── durable, host-visible files
+        ├── keyless web search + local extraction
+        ├── persistent Chromium + desktop
+        ├── packaged, operator-controlled skills
+        └── live viewer + human takeover
+```
 
-Connect without placing a bearer token in client configuration:
+## Why Qubicl
+
+| | |
+| --- | --- |
+| **Bring your own model** | One computer works with any compatible client. Switch models without rebuilding the workspace. |
+| **See the work** | Watch the live desktop, take control, finish a task yourself, and hand the same session back. |
+| **Keep the files** | The computer's `/home` is visible on the host and survives restarts, upgrades, and runtime recreation. |
+| **Do more than code** | Terminal, Git, web research, browser automation, desktop apps, office workflows, previews, backups, and SSH. |
+| **Control every computer** | Choose its resources, network policy, exposed tools, active skills, credentials, and lifecycle. |
+| **Stay local** | No Qubicl account, telemetry backend, database, hosted daemon, or Docker socket inside the computer. |
+
+## Quick start
+
+Requirements: Node.js 22 or 24, Docker Engine 24.0 or Docker Desktop 4.29+, and
+Docker Compose 2.24+. Qubicl supports Linux, Apple Silicon macOS with Docker
+Desktop, and Windows 11 x64 through Ubuntu 24.04 on WSL 2 with Docker Desktop.
+
+```sh
+qubicl setup
+qubicl create computer-name --preset computer
+qubicl connect computer-name --client codex
+```
+
+The setup wizard checks Docker, compares four progressive computer presets,
+previews resource and image effects, obtains only the selected image plus the
+gateway, and can create the first computer. Run Qubicl as your normal user,
+never with `sudo`.
+
+## Computer presets
+
+| Preset | Includes | Viewer | Suggested limit |
+| --- | --- | :---: | ---: |
+| `file-system` | Shell, processes, Git, durable files, web research | — | 1 CPU / 512m |
+| `browser` | Everything above plus persistent Chromium, OCR, PDF inspection | ✓ | 2 CPU / 2g |
+| `computer` | Browser plus a lightweight XFCE desktop, editors, document tools, SSH | ✓ | 2 CPU / 3g |
+| `workstation` | Full development and office environment with LibreOffice | ✓ | 2 CPU / 4g |
+
+Every preset includes native keyless `web_search`, local `web_extract`, and
+verified Qubicl-native skill baselines with durable, agent-editable working
+copies. Operators choose the tools and skills each computer exposes:
+
+```sh
+qubicl tools computer-name
+qubicl skills computer-name
+```
+
+Disabled tools disappear from MCP, OpenAPI, and Open Terminal, and cached calls
+fail closed.
+
+## Connect any agent
 
 ```sh
 qubicl connect computer-name --client codex
+qubicl connect computer-name --client claude-code
+qubicl connect computer-name --client cursor
 qubicl connect computer-name --client opencode
 qubicl connect computer-name --client openclaw
 qubicl connect computer-name --client hermes-agent
+qubicl connect computer-name --client open-webui
 ```
 
-Adapters are available for Codex, Claude Code, Claude Desktop, Cursor, VS Code, OpenCode, OpenClaw, Hermes Agent, Open WebUI, generic stdio, HTTP MCP, and OpenAPI. `connect` only prints setup instructions and never edits client files. HTTP/OpenAPI snippets point to the explicit `qubicl token show computer-name` command; they cannot print a raw token themselves.
+Adapters cover Codex, Claude Code, Claude Desktop, Cursor, VS Code, OpenCode,
+OpenClaw, Hermes Agent, Open WebUI, generic stdio and HTTP MCP, and direct
+OpenAPI. `connect` prints configuration; it never edits client files or prints
+a bearer token.
 
-For a client on the same Linux/macOS host, Codex prints `codex mcp add qubicl-computer-name -- qubicl mcp computer-name`; Qubicl does not run it. When the client runs on Windows and Qubicl runs inside WSL 2, add `--client-host windows` to any stdio adapter. Qubicl then emits that client's normal configuration with a pinned `wsl.exe`, distribution, Node executable, and Qubicl entrypoint. For other clients, copy the printed configuration into the client yourself. The stdio bridge owns its fenced lease, so lease proofs are absent from model-visible tools. Optional `--profile files|browser-semantic|browser-visual|desktop` arguments select smaller static catalogs; `--result-mode structured|compatible` is available for clients that require a non-default MCP result representation.
+For Open WebUI, copy the generated configuration into **Admin Panel → Settings
+→ Integrations → Open Terminal**. Qubicl supplies native durable-file browsing,
+chat uploads, screenshots, browser tools, and explicitly published local
+previews without joining Open WebUI's Docker network.
 
-For a same-host Open WebUI, run `qubicl connect computer-name --client open-webui` and copy the printed fields into **Admin Panel → Settings → Integrations → Open Terminal**. The generated Docker Desktop URL uses `host.docker.internal`; replace it with `127.0.0.1` only when Open WebUI runs directly on the host. Retrieve the token separately and treat it as a password. The compatibility connection supplies native durable-file browsing and search, filesystem-backed chat uploads, lease-safe Qubicl/browser tools, native PNG screenshots, and explicitly published loopback port previews, but not an interactive PTY.
-
-Every computer has an immutable ID, independent credentials, lease fencing, one explicit resource-bounded container, and a host-mounted `/home`. **Only `/home` is durable.** Files and packages elsewhere may disappear on recreation; use a compatible custom image for permanent system packages.
-
-The gateway listens only on localhost. Computers receive no Docker socket, privileged mode, host namespaces, devices, added capabilities, or arbitrary host mounts. Browser-capable computers keep Chromium's Linux namespace and renderer seccomp-BPF sandboxes enabled through a constrained seccomp profile—without `--no-sandbox`, `SYS_ADMIN`, or an unconfined container. Controller and workload processes share the computer container, so takeover is a cooperative managed-process fence rather than a hostile-code boundary. Qubicl is not a VM-grade hostile-code sandbox.
-
-Requirements are Node.js `^22.14.0 || ^24.0.0`, Docker Engine 24.0 or
-Docker Desktop 4.29 or newer, and Docker Compose 2.24 or newer. Linux x64,
-Apple Silicon macOS with Docker Desktop, and Windows 11 x64 through Ubuntu
-24.04 on WSL 2 with Docker Desktop are directly exercised for the first
-release. Linux ARM64, Intel macOS, Windows on ARM, and other WSL distributions
-are best-effort. Native Windows execution and WSL 1 are not supported, and
-Qubicl computers remain Linux containers on every host.
-
-Useful commands:
+## Watch and take over
 
 ```sh
-qubicl help
-qubicl doctor --json
-qubicl list --json
-qubicl create computer-name --json
-qubicl upgrade computer-name --offline
-qubicl skills computer-name
-qubicl tools computer-name
-qubicl control release computer-name
-qubicl network show computer-name
-qubicl backup create computer-name --quiesce
-qubicl --version
+qubicl view computer-name
 ```
 
-The source, security model, documentation, and Apache-2.0 license are in the [Qubicl repository](https://github.com/EldanRing/qubicl).
+Observation is passive. **Take control** fences agent tools and terminates its
+ordinary managed commands before handing you the keyboard and mouse. Persistent
+browser and managed desktop applications remain visible so you can continue the
+same task. Qubicl's green pointer shows the agent's latest desktop or browser
+position in the viewer.
+
+## Security boundary
+
+Computers run without privileged mode, a Docker socket, host namespaces,
+arbitrary mounts, or passwordless elevation. The gateway listens only on
+`127.0.0.1`. Qubicl is a Docker-based computer for trusted or
+operator-supervised workloads, not a VM boundary against hostile code.
+
+Read the complete [security model](https://github.com/EldanRing/qubicl/blob/main/docs/security-model.md)
+before relying on the boundary.
+
+Qubicl `0.1.x` is the initial public series. Interfaces and state formats may
+evolve before 1.0; back up important computer homes before upgrades.
+
+Explore the [source and full documentation](https://github.com/EldanRing/qubicl).
+Source code and documentation are Apache-2.0. Designated Qubicl brand artwork
+is CC BY 4.0.

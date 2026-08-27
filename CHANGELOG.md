@@ -2,6 +2,15 @@
 
 All notable Qubicl changes are recorded here. Supported releases will follow Semantic Versioning and Keep a Changelog.
 
+## 0.1.1 - 2026-08-27
+
+### Fixed
+
+- Refreshed the npm package description and README so the npm page presents
+  the current product overview, installation flow, capabilities, supported
+  clients, platform support, and security boundary.
+- Updated the official light and dark Qubicl marks used by GitHub and npm.
+
 ## 0.1.0 - 2026-08-26
 
 ### Added

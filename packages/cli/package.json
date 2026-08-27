@@ -1,7 +1,7 @@
 {
   "name": "qubicl-cli",
-  "version": "0.1.0",
-  "description": "Private Docker computers for any compatible LLM",
+  "version": "0.1.1",
+  "description": "Local, observable computers for any compatible AI agent",
   "homepage": "https://github.com/EldanRing/qubicl#readme",
   "bugs": {
     "url": "https://github.com/EldanRing/qubicl/issues"
@@ -41,7 +41,7 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
-    "@qubicl/core": "0.1.0",
+    "@qubicl/core": "0.1.1",
     "yaml": "^2.9.0"
   }
 }
