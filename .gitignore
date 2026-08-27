@@ -1,0 +1,14 @@
+node_modules/
+dist-tests/
+packages/*/dist/
+packages/cli/dist/assets/
+*.tsbuildinfo
+.DS_Store
+coverage/
+release/
+*.tgz
+*.spdx.json
+.env
+.env.*
+!.env.example
+npm-debug.log*

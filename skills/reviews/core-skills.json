@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "reviewedAt": "2026-08-23T00:00:00Z",
+  "reviewedBy": "Qubicl maintainers",
+  "sourceAudit": "skills/PROVENANCE.md",
+  "checks": [
+    "Qubicl-native tool names and singular schemas",
+    "client-neutral resource paths",
+    "pinned curated-image dependencies",
+    "no automatic dependency installation",
+    "no hosted extraction dependency",
+    "bounded local OCR",
+    "content-security scan",
+    "package digest verification"
+  ],
+  "skills": ["plan", "pdf", "docx", "xlsx", "powerpoint", "ocr-and-documents"]
+}

@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "policy": "fresh-root",
+  "branch": "main",
+  "maximumReachableCommits": 1
+}

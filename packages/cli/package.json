@@ -1,0 +1,47 @@
+{
+  "name": "qubicl-cli",
+  "version": "0.1.0",
+  "description": "Private Docker computers for any compatible LLM",
+  "homepage": "https://github.com/EldanRing/qubicl#readme",
+  "bugs": {
+    "url": "https://github.com/EldanRing/qubicl/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EldanRing/qubicl.git",
+    "directory": "packages/cli"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "desktop",
+    "docker",
+    "llm",
+    "mcp",
+    "openapi",
+    "local-first"
+  ],
+  "license": "Apache-2.0",
+  "author": "Qubicl contributors",
+  "type": "module",
+  "bin": {
+    "qubicl": "dist/qubicl.mjs"
+  },
+  "files": ["dist/qubicl.mjs", "dist/assets", "dist/LICENSE", "dist/THIRD_PARTY_NOTICES.txt", "dist/SBOM.spdx.json"],
+  "engines": { "node": "^22.14.0 || ^24.0.0" },
+  "os": ["darwin", "linux"],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/",
+    "tag": "latest"
+  },
+  "scripts": {
+    "prepack": "npm --prefix ../.. run build",
+    "prepublishOnly": "node ../../scripts/guard-publish.mjs"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "@qubicl/core": "0.1.0",
+    "yaml": "^2.9.0"
+  }
+}

@@ -1,0 +1,28 @@
+name: Feature request
+description: Propose an outcome or public-interface change.
+title: "feature: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem should Qubicl solve?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe behavior and interfaces, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and tradeoffs
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Security, persistence, and compatibility impact
+      description: Note any effect on mounts, networking, privileges, durable data, clients, or supported platforms.

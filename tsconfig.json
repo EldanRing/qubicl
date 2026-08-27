@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/gateway" },
+    { "path": "packages/control" },
+    { "path": "packages/cli" },
+    { "path": "tests" }
+  ]
+}

@@ -1,0 +1,20 @@
+title = "Qubicl secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Generated and ignored build, dependency, and candidate output"
+paths = [
+  '''(^|/)(node_modules|dist-tests|release)(/|$)''',
+  '''(^|/)packages/[^/]+/dist(/|$)''',
+  '''(^|/)qubicl-[^/]+\.tgz$''',
+  '''(^|/)qubicl-npm\.spdx\.json$'''
+]
+
+[[allowlists]]
+description = "RFC 6455 sample WebSocket nonce used by the gateway integration test"
+condition = "AND"
+paths = ['''(^|/)tests/integration/gateway\.test\.ts$''']
+regexTarget = "line"
+regexes = ['''Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==''']

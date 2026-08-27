@@ -1,0 +1,85 @@
+{
+  "name": "qubicl-workspace",
+  "version": "0.1.0",
+  "description": "Private Docker computers for compatible AI agents",
+  "homepage": "https://github.com/EldanRing/qubicl#readme",
+  "bugs": {
+    "url": "https://github.com/EldanRing/qubicl/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EldanRing/qubicl.git"
+  },
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@10.9.3",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:types": "tsc -b",
+    "build:binary": "npm run build && node scripts/build-binary.mjs",
+    "clean": "node scripts/clean.mjs",
+    "clean:artifacts": "node scripts/clean-artifacts.mjs",
+    "lint": "npm run lint:types && npm run lint:source",
+    "lint:types": "tsc -b --pretty false",
+    "lint:source": "oxlint --deny-warnings packages scripts tests",
+    "check": "npm run lint && npm test && npm audit --audit-level=high",
+    "test": "npm run build && node --experimental-test-coverage --test --test-coverage-include='packages/**/dist/**/*.js' --test-coverage-include='packages/cli/dist/qubicl.mjs' --test-coverage-lines=75 --test-coverage-branches=70 --test-coverage-functions=30 dist-tests/**/*.test.js",
+    "test:unit": "npm run build:types && node --test dist-tests/unit/*.test.js",
+    "test:e2e": "npm run test:e2e:source",
+    "test:e2e:source": "node scripts/test-artifact-e2e.mjs source",
+    "test:e2e:npm": "node scripts/test-artifact-e2e.mjs npm",
+    "test:e2e:binary": "node scripts/test-artifact-e2e.mjs binary",
+    "test:e2e:artifacts": "npm run test:e2e:npm && npm run test:e2e:binary",
+    "test:e2e:all": "npm run test:e2e:source && npm run test:e2e:artifacts",
+    "test:reboot:prepare": "node scripts/reboot-acceptance.mjs prepare",
+    "test:reboot:verify": "node scripts/reboot-acceptance.mjs verify",
+    "test:reboot:cleanup": "node scripts/reboot-acceptance.mjs cleanup",
+    "test:install": "node scripts/release-preflight.mjs",
+    "scan:secrets": "node scripts/scan-secrets.mjs",
+    "performance": "node scripts/performance.mjs",
+    "tokens:audit": "npm run build:types && node scripts/token-audit.mjs",
+    "skills:catalog:update": "npm run build:types && node scripts/update-core-skill-catalog.mjs --write",
+    "check:release": "npm run check && npm audit signatures && npm run scan:secrets && npm run test:e2e:all && node scripts/release-preflight.mjs --require-binary",
+    "release:check": "npm run public:check && npm run check:release && npm run tokens:audit && npm run performance",
+    "candidate:local": "node scripts/build-local-candidates.mjs",
+    "candidate:release": "node scripts/build-local-candidates.mjs --initial",
+    "candidate:preview": "node scripts/build-local-candidates.mjs --preview",
+    "candidate:resume": "node scripts/resume-candidate.mjs",
+    "candidate:binary": "node scripts/build-local-candidates.mjs --binary-only",
+    "candidate:release-set": "node scripts/release-set.mjs create",
+    "candidate:sign": "node scripts/sign-candidate.mjs",
+    "candidate:acceptance": "node scripts/acceptance-evidence.mjs",
+    "public:check": "node scripts/public-source.mjs check",
+    "public:export": "node scripts/public-source.mjs export",
+    "release:publish": "node scripts/publish-candidate.mjs",
+    "images:build": "npm run build && node packages/cli/dist/qubicl.mjs image build-system"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.28.2",
+    "oxlint": "1.79.0",
+    "postject": "^1.0.0-alpha.6",
+    "typescript": "^7.0.0"
+  },
+  "engines": {
+    "node": "^22.14.0 || ^24.0.0",
+    "npm": "10.9.3"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "^22.14.0 || ^24.0.0",
+      "onFail": "error"
+    },
+    "packageManager": {
+      "name": "npm",
+      "version": "10.9.3",
+      "onFail": "error"
+    }
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "owner": "Qubicl",
+    "license": "MIT",
+    "upstream": {
+      "repository": "https://github.com/NousResearch/hermes-agent",
+      "commit": "7d6db4efb885856078e4d19f804035226df81e0d"
+    }
+  },
+  "skills": [
+    {
+      "id": "qubicl-core/plan",
+      "name": "plan",
+      "description": "Create a concrete, reviewable implementation or project plan without performing the planned changes. Use for architecture proposals, migration plans, release plans, debugging strategies, and any request to plan before acting.",
+      "category": "planning",
+      "compatiblePresets": ["file-system", "browser", "computer", "workstation"],
+      "requiredTools": ["skills_list", "skill_view", "write_file"],
+      "requiredCommands": []
+    },
+    {
+      "id": "qubicl-core/pdf",
+      "name": "pdf",
+      "description": "Create, inspect, modify, render, merge, split, fill, watermark, secure, and validate PDF files using Qubicl's pinned local document tools. Use whenever a task substantially involves PDF input or output.",
+      "category": "documents",
+      "compatiblePresets": ["browser", "computer", "workstation"],
+      "requiredTools": ["skills_list", "skill_view", "exec_command", "read_file", "write_file"],
+      "requiredCommands": ["python3", "pdftoppm"]
+    },
+    {
+      "id": "qubicl-core/docx",
+      "name": "docx",
+      "description": "Create, read, edit, template, validate, and review Word DOCX documents using Qubicl's pinned local document tools. Use for professional Word documents, tracked revisions, comments, structured edits, and DOCX templates.",
+      "category": "documents",
+      "compatiblePresets": ["computer", "workstation"],
+      "requiredTools": ["skills_list", "skill_view", "exec_command", "read_file", "write_file"],
+      "requiredCommands": ["python3"]
+    },
+    {
+      "id": "qubicl-core/xlsx",
+      "name": "xlsx",
+      "description": "Create, inspect, edit, restructure, convert, and validate XLSX workbooks and CSV files using Qubicl's pinned local spreadsheet tools. Use for formulas, tables, charts, formatting, workbook structure, and CSV interoperability.",
+      "category": "documents",
+      "compatiblePresets": ["computer", "workstation"],
+      "requiredTools": ["skills_list", "skill_view", "exec_command", "read_file", "write_file"],
+      "requiredCommands": ["python3"]
+    },
+    {
+      "id": "qubicl-core/powerpoint",
+      "name": "powerpoint",
+      "description": "Create, inspect, edit, template, render, and verify PowerPoint PPTX presentations using Qubicl's pinned local presentation tools. Use for slide decks, speaker notes, charts, images, templates, and visual presentation review.",
+      "category": "documents",
+      "compatiblePresets": ["computer", "workstation"],
+      "requiredTools": ["skills_list", "skill_view", "exec_command", "read_file", "write_file"],
+      "requiredCommands": ["python3"]
+    },
+    {
+      "id": "qubicl-core/ocr-and-documents",
+      "name": "ocr-and-documents",
+      "description": "Extract text from scanned PDFs and images with Qubicl's local Poppler and Tesseract pipeline, and choose the appropriate Qubicl document or web tool for mixed document sources. Use for OCR, image-only PDFs, scans, and document extraction diagnostics.",
+      "category": "documents",
+      "compatiblePresets": ["browser", "computer", "workstation"],
+      "requiredTools": ["skills_list", "skill_view", "exec_command", "read_file", "write_file", "web_extract"],
+      "requiredCommands": ["python3", "pdfinfo", "pdftoppm", "tesseract"]
+    }
+  ]
+}

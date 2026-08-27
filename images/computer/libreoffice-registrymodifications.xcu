@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry">
+  <item oor:path="/org.openoffice.Office.Common/Misc">
+    <prop oor:name="ShowTipOfTheDay" oor:op="fuse">
+      <value>false</value>
+    </prop>
+  </item>
+</oor:items>

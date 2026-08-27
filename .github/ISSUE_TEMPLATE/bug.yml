@@ -1,0 +1,48 @@
+name: Bug report
+description: Report reproducible incorrect behavior.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Never include tokens, `secrets.yaml`, private viewer URLs, or unredacted `~/.qubicl` contents.
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Include the command, actual result, and expected result.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Provide the smallest reliable sequence of steps.
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Qubicl revision
+      placeholder: Commit SHA or version
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Host OS/architecture, Node version, Docker version, and Docker Compose version.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Add relevant logs or `qubicl doctor` output after removing private data.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, tokens, private URLs, and private state contents.
+          required: true

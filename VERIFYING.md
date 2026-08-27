@@ -1,0 +1,103 @@
+# Verifying Qubicl artifacts
+
+Qubicl releases retain checksums, a candidate manifest, SBOMs, vulnerability
+summary, and exact image catalog. A detached project signature may also be
+published when the release notes identify its public-key fingerprint.
+
+## Local candidates
+
+`npm run candidate:release` writes the initial pre-1.0 candidate beneath:
+
+```text
+release/candidates/<version>-<revision>/<target>/
+```
+
+`npm run candidate:binary` writes only the current host's native archive and evidence. Neither command uploads or publishes anything.
+
+From the exact source revision recorded in `candidate.json`, run the single manifest-driven verifier from the repository root:
+
+```sh
+node scripts/verify-candidate.mjs release/candidates/VERSION-REVISION/TARGET
+```
+
+Do not rename, add, remove, regenerate, or extract files before verification. The verifier:
+
+- checks that `SHA256SUMS` and `candidate.json` cover the complete directory with no missing, extra, nested, or path-traversing entries;
+- binds the image catalog's exact release version, full revision, normalized source URL, platform matrix, requested references, and immutable digests to the candidate;
+- installs and inspects the staged npm tarball and extracts the staged native archive without packing or rebuilding;
+- proves the build used a clean exported source tree and fresh `npm ci`, with
+  exact lockfile, registry, dependency inventory, audit, and registry-signature evidence;
+- proves that npm and native executable code embeds the candidate's exact catalog/versioned image references, contains no development system-image defaults, and matches the retained SPDX documents;
+- validates npm package/bin identity, native executable target and legal/readme payloads, and SPDX root/namespace version-source-revision identity;
+- compares the metafile-derived SPDX component inventories with `THIRD_PARTY_NOTICES.txt`, including bundled gateway/control dependencies and excluding test-only dependencies;
+- derives all five OCI archive checks from the manifest and validates both platforms, labels, preset manifests, SLSA provenance, and OCI SPDX attestations;
+- validates all ten Trivy reports, binds each report to the exact OCI archive,
+  index, platform manifest, config, layers, DiffIDs, scanner options, scanner
+  version, and fresh vulnerability-database bytes, rejects builder-path
+  disclosure, and recomputes `trivy-summary.json`; and
+- rejects every secret or HIGH/CRITICAL finding that lacks one exact, reviewed,
+  unexpired exception or `not_affected` applicability statement under the
+  supported-release policy.
+
+A complete candidate contains gateway, file-system, browser, computer, and workstation OCI archives plus one Trivy report for each Linux amd64/arm64 image variant. Do not use the lower-level OCI inspector by hand as a substitute for the directory verifier; the directory verifier supplies its required version, revision, source, preset, and expected-manifest arguments.
+
+## Native archives
+
+Windows users run the Linux archive/package inside a supported WSL 2
+distribution with Docker Desktop; Qubicl does not publish a native Windows
+archive. See [Windows Subsystem for Linux](docs/wsl.md).
+
+Use the archive matching the host OS and CPU. Every native archive must contain:
+
+- the `qubicl` executable;
+- the Apache-2.0 `LICENSE`;
+- `THIRD_PARTY_NOTICES.txt`;
+- `NODE_LICENSE` for the embedded Node runtime;
+- `README.md`;
+- `SBOM.spdx.json`; and
+- the exact image catalog and runtime assets.
+
+Candidate assembly extracts and runs the staged archive's binary for its version/revision smoke check. Complete Linux candidates additionally run Docker E2E through that same staged archive.
+
+## npm tarball
+
+`npm run test:install` is the ordinary development preflight and creates a fresh temporary package. Candidate assembly packs once, retains that tarball, and passes its pathname to preflight and E2E. The verifier requires its complete normalized manifest to equal reviewed source, forbids consumer lifecycle scripts and unexpected dependency/configuration fields, and tests a normal installation without suppressing lifecycle behavior. Those candidate checks never invoke `npm pack` or rebuild the package.
+
+The staged npm artifact contains `dist/SBOM.spdx.json`; `qubicl-npm.spdx.json` is the byte-identical retained copy bound by the candidate checksums.
+
+## Vulnerability applicability and exceptions
+
+The maintained policy and distinction between source records and exact
+candidate evidence are summarized in
+[security/README.md](security/README.md).
+
+`security/vulnerability-applicability.json` records exact CVE, binary package,
+installed-version, image, and architecture scopes. `under_investigation` is
+non-approving and remains blocking for a supported candidate. A `not_affected`
+statement requires evidence, an identified reviewer different from the owner,
+review and expiry times, and HTTPS references. It expires after at most 90 days.
+Unused, stale, overlapping, future-dated, or expired statements fail
+verification. Every accepted not-affected match remains visible in
+`trivy-summary.json`.
+
+For an initial pre-1.0 candidate, unfixed distribution findings remain visible
+in `trackedFindings`; secrets and scanner-reported available fixes still fail.
+The stricter supported/1.0 candidate requires every remaining HIGH or CRITICAL
+finding to be covered by a narrow current review record.
+
+Exceptions expire after at most 90 days. Chromium exceptions affecting browser-bearing presets expire after at most 30 days and must explicitly analyze hostile input and verify that Qubicl's Chromium namespace and renderer seccomp-BPF sandboxes remain enabled under the constrained session profile. Any record that does not preserve this posture fails verification. Unused, overlapping, future-dated, expired, or blanket exception scopes fail verification. Secrets can never be excepted.
+
+“No vendor fix” means only that the current package feed offers no fix; it is not an automatic acceptance.
+
+## What the evidence proves
+
+- A checksum proves that a file matches the reviewed manifest after the manifest is trusted.
+- Embedded OCI provenance records how Buildx created the image; it is not a project signature.
+- A bundle-derived SBOM inventories discovered shipped components; it is not a vulnerability guarantee.
+- A scan and its reviewed exceptions are time-bound security decisions, not proof that an image is safe.
+- Platform acceptance proves behavior only on the recorded OS, CPU, runtime, version, revision, catalog, and artifact bytes.
+
+When a detached signature is published, verify it using the exact Ed25519 public
+key and commands in [RELEASING.md](RELEASING.md). Checksums without a trusted
+signature detect corruption after the manifest is obtained but do not prove who
+created it.

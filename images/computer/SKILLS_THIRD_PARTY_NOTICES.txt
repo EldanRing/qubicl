@@ -1,0 +1,29 @@
+Qubicl portable skill runtime dependencies
+
+The exact dependency closure is pinned in skills-requirements.txt. Distribution
+license texts are retained under /usr/share/doc/qubicl/skills-python-licenses in
+computer and workstation images. These dependencies are installed only in the isolated
+/opt/qubicl/skills-venv and do not change the licenses of vendored skill source.
+
+Package                     Version     License
+cffi                        2.1.1       MIT-0
+charset-normalizer          3.5.1       MIT
+cryptography                50.0.0      Apache-2.0 OR BSD-3-Clause
+et_xmlfile                  2.0.0       MIT
+lxml                        6.1.2       BSD-3-Clause
+openpyxl                    3.1.5       MIT
+pdfminer.six                20260107    MIT
+pdfplumber                  0.11.10     MIT
+pillow                      12.3.0      MIT-CMU
+pycparser                   3.0         BSD-3-Clause
+pypdf                       6.16.1      BSD-3-Clause
+pypdfium2                   5.13.0      BSD-3-Clause / Apache-2.0 / bundled notices
+python-docx                 1.2.0       MIT
+python-pptx                 1.0.2       MIT
+reportlab                   5.0.1       BSD
+typing_extensions           4.16.0      PSF-2.0
+xlsxwriter                  3.2.9       BSD-2-Clause
+
+No Hermes Agent runtime is installed or required. PyMuPDF, pymupdf4llm, and
+pymupdf-layout are not bundled because their AGPL-3.0-or-commercial licensing
+is outside Qubicl's curated permissive Python dependency policy.

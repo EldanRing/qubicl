@@ -1,0 +1,63 @@
+# Security model
+
+Qubicl separates convenient AI workspaces from unrelated host files and one another. It is not a VM, adversarial sandbox, or defense against a compromised Docker daemon/kernel.
+
+## Trust assumptions
+
+The operator trusts the host OS, local Docker runtime, Qubicl CLI/images, AI client, and selected image. A workload is trusted with its computer's `/home` and the outbound access selected by its network profile. Model commands run as the unprivileged computer user without passwordless elevation. A custom image remains trusted code: its image startup and packaged setuid/root components execute before Qubicl's unprivileged workload boundary and can read/modify the assigned home.
+
+Do not place secrets in a Qubicl home that you would not give to container-root code in that computer.
+
+## Enforced boundaries
+
+- Setup accepts only a local Docker endpoint and Linux daemon; remote `tcp://`/`ssh://` contexts fail closed.
+- The gateway publishes only on `127.0.0.1`.
+- Each computer is one resource-bounded container. Its controller, command runner, local web extractor, optional display/browser/desktop session, and optional SSH endpoint share that container's PID and network namespaces. Internal runner processes receive independently derived localhost-only credentials through explicit allowlists; model-controlled command environments exclude all `QUBICL_*` control variables and inherited credentials.
+- Computers are unprivileged and receive no Docker socket, host network/PID/IPC namespace, devices, or unrelated mounts. They receive no added capability, `SYS_ADMIN`, privileged mode, or unconfined security profile.
+- The only writable host mount in a computer is its `/home`, plus its bounded audit file. Operator policy is mounted read-only. The shared gateway receives the read-only generated runtime directory and one writable audit-file mount per computer so it can enforce egress and broker policy without mounting computer homes or protected state.
+- External bearer tokens remain in mode-`0600` host state. Routes contain hashes; a computer gets an independent internal credential.
+- Browser OpenAPI/Open Terminal calls require the same per-computer bearer token. CORS is reflected only for HTTP loopback origins on the isolated discovery/tool/file routes, and preflight permits only each route's required method and bounded headers.
+- Tool calls require authentication and a current fenced lease. The local stdio bridge and Open Terminal compatibility own that proof outside model-visible calls; direct HTTP MCP/OpenAPI callers provide it explicitly. Human takeover makes the old proof stale immediately, terminates tracked managed process groups, and leaves agent tools fenced until release and a fresh lease. In the single-container architecture this is a cooperative process fence, not a cgroup or hostile-code boundary: a deliberately daemonized/reparented process can evade tracked process-group termination and requires a computer restart to clear reliably.
+- Only applications opened through the capability-gated desktop-session tools can survive takeover. Their executable and arguments come from a fixed allowlist; input paths must already exist and resolve below `/home/qubicl`; URLs, shell input, arbitrary executable/argument/environment input, and internal control credentials are excluded. Tracked application count is bounded. Human control belongs to the live controlling viewer connection, permits a 10-second reconnect grace period, and is then released automatically; the authenticated local operator may also release it explicitly.
+- Browser-capable images use a dedicated persistent Chromium profile and a bounded Playwright controller. Chromium remains the unprivileged `qubicl` user and its Linux user/PID/network-namespace plus renderer seccomp-BPF sandboxes stay enabled. The browser-capable computer container receives a default-deny seccomp profile derived from Docker 24.0's default profile: it preserves the default restrictions (including the later `io_uring` denial) while admitting only Chromium's exact unprivileged namespace `clone`/`unshare` flag combinations. The computer also enables `no-new-privileges`, receives no `SYS_ADMIN`, added capability, privileged mode, host namespace, or unconfined profile, and has a dedicated 1 GiB `/dev/shm`; `--no-sandbox` and `--disable-dev-shm-usage` are not used. Operations are serialized, tabs and semantic refs are capped, URLs are limited to HTTP(S) without embedded credentials, screenshot payloads are capped, and webpage content is explicitly untrusted. The managed browser survives takeover, but browser tools remain lease-fenced.
+- Viewer tickets are short-lived and exchanged for an HttpOnly cookie.
+- Lifecycle operations are host-only, not AI tools.
+- Capability manifests and OCI labels are checked before state commit and again at runtime; unsupported tools/routes are absent.
+- Generic file tools are confined to `/home/qubicl` with canonical-path and symlink checks. They cannot use `/proc` or the container root to inspect control-plane state.
+- `developer` egress is unrestricted by design. `web-only`, `offline`, and `custom` profiles place the computer on a private per-computer network whose only Internet bridge is the gateway's authenticated proxy; restricted profiles deny private/loopback/link-local/metadata destinations and custom policies require allowlisted domains. Temporary approval is explicit and expires.
+- `web_extract` additionally accepts only HTTP(S), rejects embedded credentials, validates every DNS answer and redirect, blocks non-public/loopback/private/link-local/metadata targets, limits redirects, request time, downloaded bytes, and decompressed bytes, and never executes downloaded files. Browser fallback independently applies public-destination validation to page requests. Its local runner strips executable/non-content nodes and transfers at most 1.5 MB of rendered DOM over an authenticated loopback route; cookies, authentication headers, and arbitrary network responses are not transferred. `web_search` and extraction still traverse the same egress boundary; `offline` denies both.
+- Search and extracted page content are untrusted model input. Public search endpoints can rate-limit or change behavior; Qubicl returns explicit bounded failures and never silently selects a paid or credentialed provider.
+- Web, browser, screenshot, and clipboard results carry compact Qubicl-owned `contentTrust` provenance. MCP text also places those results in a collision-resistant untrusted-data frame; native screenshots remain binary images with equivalent metadata. A bounded advisory scanner records finding IDs—not captured content—in the local audit log. A clean scan is reported as `no-known-patterns`, never as a claim that content is safe. These signals reinforce the model boundary but do not replace container, credential, egress, lease, or takeover enforcement.
+- Qubicl's six core skill baselines are file-list locked, fully scanned, SHA-256 verified during every build, and reviewed against declared tool/preset requirements. Qubicl does not distribute the bulk Hermes catalog or jailbreak-oriented packages. Explicit local or immutable-commit Git imports reject symlinks, hard links, nested repositories, traversal, excessive packages, and blocking content patterns. Imported and core working copies are deliberately agent-editable inside the durable home; bounded host and control inspection rejects substituted store/discovery parents and reports drift or corruption without following agent-created links. Operator activation, import, reset, and removal remain outside `skill_manage` authority.
+- Broker credentials are resolved by the host from protected state, environment/file references, Linux Secret Service, or macOS Keychain and injected only into an allowed HTTPS origin/path/method by the shared gateway egress service. Values are absent from computer and workload environments and results.
+
+## Setup/privacy behavior
+
+Setup does not edit client files, send telemetry, call a Qubicl backend, or use GitHub APIs. Online acquisition delegates only the exact image pull to Docker; source-development mode may build a missing bundled target. `--offline` forbids pull/build acquisition.
+
+Setup, create, list, status, inspect, and connect do not print raw tokens. HTTP/OpenAPI snippets always contain a placeholder. The only retrieval command is deliberately separate:
+
+```sh
+qubicl token show research
+```
+
+Protect its output like a password. Rotating a token invalidates the previous external credential.
+
+The Open WebUI adapter prints only a token placeholder. Supplying the separately retrieved token places that credential in Open WebUI's admin connection settings. Use Open WebUI access grants to restrict who can use it, and do not configure an untrusted Open WebUI deployment. The compatibility service is separately namespaced, confined to the assigned `/home`, owns one fenced lease, and cannot bypass human takeover. It does not expose an interactive PTY. Desktop and browser screenshots are returned as native PNG responses through this compatibility surface; MCP image results omit duplicate base64 from structured/text metadata.
+
+State directories are real, private, user-owned paths. Setup rejects symlink components and root execution. Journals/config/secrets are never placed in process arguments. Compose/routes contain no raw external token. Each computer also has a bounded private JSONL audit stream; it records operation metadata and status, not command text, file content, broker values, or request bodies.
+
+## Limitations
+
+- Docker shares the host kernel; runtime/kernel escape is out of scope.
+- Docker itself is a privileged host boundary.
+- Standard Linux discovery commands inside a container can report Docker-host or Docker-VM metadata—including CPU model/logical CPUs, total memory, kernel, uptime, load, and backing-filesystem capacity. These observations are not the computer's usable budget; Qubicl's cgroup CPU, memory, and PID ceilings are the enforced limits reported by `get_computer_status`.
+- Depending on the Docker implementation, mount tables can reveal a backing-path label for the computer's assigned home. This metadata does not make that path or unrelated host directories accessible; `/home` remains the only assigned writable host mount.
+- The default `developer` profile allows outbound internet, so workloads can exfiltrate data they can read. Restricted egress is an application-layer HTTP(S) control, not a defense against a malicious custom image or Docker/kernel compromise.
+- Internal control services and agent workloads share one computer PID namespace. The controller credential is excluded from model-command environments, but the one-container design is not a secret boundary against deliberately hostile same-container code, process inspection, or a malicious custom image. Human takeover is dependable for Qubicl-managed cooperative processes, not an adversarial workload guarantee.
+- A process controlling the operator account can read Qubicl state, replace the CLI, or control Docker.
+- Localhost is not a boundary against other processes under that account.
+- Qubicl does not configure remote TLS, tunnels, mesh VPNs, or LAN access. Port previews and optional SSH bind to loopback only. Open Terminal `/ports` and `/proxy/{port}` compatibility is fail-closed: it projects only live ports with an unexpired explicit Qubicl publication and does not turn arbitrary computer listeners into previews.
+- Direct browser integration works only when the client page is itself opened over loopback HTTP. The recommended Dockerized Open WebUI admin connection instead uses Docker Desktop's host gateway to reach the still-loopback-bound Qubicl gateway; other container runtimes may require an explicit equivalent host mapping.
+
+Use Qubicl for capable operator-supervised work, not deliberately hostile samples or mutually untrusted users on one host. Report vulnerabilities through [SECURITY.md](../SECURITY.md).

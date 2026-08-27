@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/EldanRing/qubicl/security/policy
+    about: Report vulnerabilities privately; never post credentials or sensitive diagnostics in an issue.
+  - name: Support guidance
+    url: https://github.com/EldanRing/qubicl/blob/main/SUPPORT.md
+    about: Read supported-platform, troubleshooting, and safe-diagnostics guidance before filing a bug.

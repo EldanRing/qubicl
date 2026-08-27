@@ -1,0 +1,30 @@
+{
+  "name": "@qubicl/control",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "exports": {
+    ".": "./dist/main.js",
+    "./lease": "./dist/lease.js",
+    "./processes": "./dist/processes.js",
+    "./desktop-applications": "./dist/desktop-applications.js",
+    "./browser": "./dist/browser.js",
+    "./resource-limits": "./dist/resource-limits.js",
+    "./executor": "./dist/executor.js",
+    "./contract": "./dist/contract.js",
+    "./open-terminal": "./dist/open-terminal.js",
+    "./policy": "./dist/policy.js",
+    "./skills": "./dist/skills.js",
+    "./web": "./dist/web.js",
+    "./egress": "./dist/egress.js",
+    "./viewer-actions": "./dist/viewer-actions.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/node": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "@qubicl/core": "0.1.0",
+    "playwright-core": "1.62.1",
+    "zod": "^4.4.0"
+  }
+}

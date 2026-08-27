@@ -1,0 +1,123 @@
+# Client setup
+
+`qubicl connect` prints validated setup instructions. It never runs them, edits a client configuration, or restarts a client.
+
+## Token-free local adapters
+
+These adapters invoke `qubicl mcp <computer>` and contain no bearer token:
+
+| Client | Command | Suggested target |
+| --- | --- | --- |
+| Codex | `qubicl connect computer-name --client codex` | Codex MCP configuration (`~/.codex/config.toml` by default) |
+| Claude Code | `qubicl connect computer-name --client claude-code` | `.mcp.json` |
+| Claude Desktop | `qubicl connect computer-name --client claude-desktop` | `claude_desktop_config.json` |
+| Cursor | `qubicl connect computer-name --client cursor` | `.cursor/mcp.json` or `~/.cursor/mcp.json` |
+| VS Code | `qubicl connect computer-name --client vscode` | `.vscode/mcp.json` or user MCP settings |
+| OpenCode | `qubicl connect computer-name --client opencode` | `opencode.json` or `opencode.jsonc` |
+| OpenClaw | `qubicl connect computer-name --client openclaw` | `~/.openclaw/openclaw.json` |
+| Hermes Agent | `qubicl connect computer-name --client hermes-agent` | `~/.hermes/config.yaml` |
+| Generic stdio | `qubicl connect computer-name --client stdio` | The client's MCP server settings |
+
+For Codex, Qubicl prints this command but does not run it:
+
+```sh
+codex mcp add qubicl-computer-name -- qubicl mcp computer-name
+```
+
+The stdio process owns and refreshes one fenced lease for the connection. Its tool catalog omits lease lifecycle tools and every lease argument, while disconnect still releases control and terminates ordinary connection-owned managed processes. Direct HTTP MCP/OpenAPI remain explicit proof-bearing compatibility surfaces because their request lifecycle is not assumed to represent one model session.
+
+Select a smaller static stdio catalog when a task does not need the full computer:
+
+```sh
+qubicl connect computer-name --client codex --profile files
+qubicl mcp computer-name --profile browser-semantic
+```
+
+Profiles are `full` (default), `files`, `browser-semantic`, `browser-visual`, and `desktop`. Atomic visual wrappers remain available; the two browser profiles intentionally choose semantic/ref or screenshot/coordinate surfaces without deleting either implementation. Results default to one JSON text representation. `--result-mode structured` uses structured MCP content for a verified client, and `--result-mode compatible` deliberately mirrors both forms only when legacy interoperability requires it.
+
+Run it yourself, then start a new Codex task. Tasks that were already open may not discover MCP servers added after they started. The command contains no bearer token.
+
+For the other adapters, paste the printed configuration into the shown target yourself. The `qubicl` executable must be on the environment `PATH` used to launch the client. The bridge resolves the name and reads protected state each time, so rotating a token does not change the snippet.
+
+### Windows-hosted clients with Qubicl in WSL
+
+When the client application runs on Windows but Qubicl runs inside WSL 2, add
+`--client-host windows` to any stdio adapter:
+
+```sh
+qubicl connect computer-name --client codex --client-host windows
+qubicl connect computer-name --client claude-desktop --client-host windows
+qubicl connect computer-name --client cursor --client-host windows
+qubicl connect computer-name --client vscode --client-host windows
+```
+
+This is not a Codex-specific bridge. Qubicl emits the normal adapter shape with
+`wsl.exe` as its command, pins the current distribution, and invokes the
+absolute Node and Qubicl entrypoint paths from the installation that printed
+the snippet. The Windows application therefore does not depend on its own
+`PATH` or on a WSL shell profile. WSL interoperability must be enabled. Re-run
+`connect` after moving or reinstalling Node or Qubicl because the printed paths
+are intentionally absolute.
+
+The default `--client-host local` remains correct for a client process that
+runs inside the same WSL distribution. Direct HTTP MCP and OpenAPI use the
+printed `127.0.0.1` URLs from either WSL or the Windows host; they do not use the
+stdio launcher option.
+
+## HTTP MCP and OpenAPI
+
+The generic adapter can select a transport:
+
+```sh
+qubicl connect computer-name --client generic --transport stdio
+qubicl connect computer-name --client generic --transport http
+qubicl connect computer-name --client generic --transport openapi
+```
+
+The `http` and `openapi` shortcuts select those transports directly. Their headers contain this placeholder, never a literal credential:
+
+```text
+<token from: qubicl token show computer-name>
+```
+
+Run the token command separately only when a local HTTP/OpenAPI client needs it. Treat that output as a password: do not commit it, paste it into an issue, or expose it in shell history or screenshots.
+
+## Open WebUI on the same computer
+
+Qubicl presents each computer as an isolated Open Terminal-compatible service for Open WebUI:
+
+```sh
+qubicl connect computer-name --client open-webui
+```
+
+The output maps to **Admin Panel → Settings → Integrations → Open Terminal → Add**:
+
+- ID: the printed `id`
+- name: the printed `name`
+- URL: the printed `url`
+- OpenAPI path: the printed `path`
+- authentication: Bearer
+- key: replace the printed placeholder with the output of `qubicl token show computer-name`
+- enabled: on
+
+Open WebUI should verify the server as **Terminal**. Its native file browser can list, read, view, upload, create, move, and delete paths within that computer's durable `/home`. The compatibility OpenAPI also presents the computer's normal tools while owning a fenced Qubicl lease transparently, so a model is not asked to manufacture or renew lease proofs. Human viewer takeover still preempts that lease; calls fail closed until human control is released, then the connection obtains a fresh lease.
+
+Enabled `web_search`, `web_extract`, `skills_list`, `skill_view`, and `skill_manage` tools project through Open Terminal exactly like MCP and direct OpenAPI. Operator-disabled tools are absent from discovery and cached calls fail closed. DDGS search needs no API key; local extraction needs no scraping service. Browser rendering remains available only on browser-capable presets. Native file browsing supports Open WebUI's current `/files/serve/*` preview route as well as the earlier `/files/view` compatibility route; both remain confined to the computer's durable home and enforce the same download bound. It also provides bounded filename/content search, file-display metadata for chat-created artifacts, writable/size/modified directory metadata, and filesystem-backed chat uploads. Search skips hidden paths unless requested, limits pages to 100 results, scans at most 1 MiB per file, and applies aggregate file and byte budgets.
+
+On `browser`, `computer`, and `workstation` presets, that tool list includes navigation, semantic page snapshots and element refs, screenshots, history/wait, persistent tab management, and screenshot-grounded browser computer actions. Prefer snapshot refs first; use viewport screenshots and coordinate actions only for visual controls without refs. The browser stays visible in Qubicl's viewer and survives human takeover, while agent tool access remains fenced until release. Semantic and coordinate browser point actions drive the persistent viewer-only green agent cursor immediately before dispatch; it clears with the agent lease or human takeover. Typed data, URLs, selectors, refs, and page content are never placed in that feed.
+
+Open Terminal serves both desktop and browser screenshot operations as native `image/png` responses. MCP likewise uses native image content and keeps only dimensions and other small metadata in structured/text results, avoiding a second base64 copy in the model context.
+
+The generated URL uses Docker Desktop's `host.docker.internal` route so the Open WebUI backend can reach the host-loopback Qubicl gateway without joining a Qubicl-managed network. If Open WebUI runs directly on the host rather than in Docker, replace that hostname with `127.0.0.1`. Qubicl remains bound only to localhost. Open WebUI stores the separately retrieved per-computer bearer token in its admin connection settings; restrict the connection's Open WebUI access grants accordingly.
+
+Compatibility intentionally reports `terminal: false` and `notebooks: false`, while advertising its existing `/system` guidance endpoint. It provides native files and tools, not an interactive PTY, notebooks, or multi-file archive download. Open WebUI's `/ports` and `/proxy/{port}/...` routes expose only live ports that were explicitly published through Qubicl; an arbitrary listener never becomes reachable merely because it exists. Existing MCP, OpenAPI, viewer, and human-control routes remain unchanged.
+
+## Requirements
+
+- Qubicl and the selected computer must be running.
+- Stdio adapters require the local `qubicl` executable.
+- Direct URLs require the computer's bearer token.
+- The gateway binds to localhost. A hosted service cannot reach it unless the operator deliberately designs separate secure remote access; Qubicl does not provide or configure that path.
+- A `file-system` computer has MCP/OpenAPI tools but no viewer. Use `browser`, `computer`, or `workstation` when human viewing is required.
+
+Run `qubicl doctor` for connection failures. Run `qubicl token rotate computer-name` if a token may have been exposed.
