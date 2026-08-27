@@ -14,6 +14,7 @@ import { createStateTransaction, defaultTransactionRuntime, prepareStateTransact
 import { atomicWrite, durableRemove, durableRemoveDirectory, durableRename, loadState, statePaths, withStateLock, type LoadedState } from './state.js';
 import { synchronizeStartedSkillPolicies } from './policy-commands.js';
 import { copyVerifiedBackupArchive, extractInspectedBackupArchive, inspectBackupArchive } from './safe-backup-archive.js';
+import { printBrowserProfileDisclosure, type BrowserProfileDisclosureOperation } from './browser-profile-disclosures.js';
 
 interface BackupManifest {
   version: 1;
@@ -258,13 +259,17 @@ async function restoreBackup(state: LoadedState, id: string, name: string, args:
   return computer;
 }
 
-export async function backupCommand(args: ParsedArgs): Promise<void> {
+export async function backupCommand(
+  args: ParsedArgs,
+  createDisclosure: Extract<BrowserProfileDisclosureOperation, 'backup' | 'checkpoint'> = 'backup',
+): Promise<void> {
   const action = required(args.positionals[0], 'backup action');
   const paths = statePaths();
   await withStateLock(paths, async () => {
     const state = await loadState(paths);
     if (action === 'create') {
       const computer = findComputer(state, required(args.positionals[1], 'computer name'));
+      printBrowserProfileDisclosure(createDisclosure);
       const result = await createBackup(state, computer, args);
       console.log(`Created ${result.consistency} backup ${result.id}; sha256:${result.sha256}${result.encrypted ? '; encrypted' : ''}.`);
       return;
@@ -286,6 +291,7 @@ export async function backupCommand(args: ParsedArgs): Promise<void> {
     }
     if (action === 'restore') {
       await validateDocker();
+      printBrowserProfileDisclosure('backup-restore');
       const computer = await restoreBackup(state, required(args.positionals[1], 'backup ID'), required(args.positionals[2], 'new computer name'), args);
       console.log(`Restored ${computer.name} from verified backup ${args.positionals[1]}. It is stopped; run qubicl start ${computer.name}.`);
       return;
@@ -311,7 +317,7 @@ export async function backupCommand(args: ParsedArgs): Promise<void> {
 export async function checkpointCommand(args: ParsedArgs): Promise<void> {
   args.options.set('quiesce', true);
   args.positionals = ['create', args.positionals[0]!];
-  await backupCommand(args);
+  await backupCommand(args, 'checkpoint');
 }
 
 export async function cloneCommand(args: ParsedArgs): Promise<void> {
@@ -320,6 +326,7 @@ export async function cloneCommand(args: ParsedArgs): Promise<void> {
     const state = await loadState(paths);
     await validateDocker();
     const source = findComputer(state, required(args.positionals[0], 'source computer'));
+    printBrowserProfileDisclosure('clone');
     const backup = await createBackup(state, source, { positionals: [], options: new Map([['quiesce', true]]) });
     const target = await restoreBackup(state, backup.id, required(args.positionals[1], 'new computer name'), args, !flag(args, 'no-start'));
     if (!flag(args, 'no-start')) await synchronizeStartedSkillPolicies(state, [target]);

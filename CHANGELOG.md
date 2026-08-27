@@ -16,6 +16,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   through WSL 2 host facts without promoting best-effort platforms.
 - The live viewer now states that Chromium profile data is durable across
   computer restarts and upgrades.
+- A host-only `qubicl browser profile wipe COMPUTER` command previews domains
+  with stored cookies/site data, the exact durable-profile scope, and preserved
+  Downloads before requiring typed-name confirmation or an explicit `--yes`.
 
 ### Changed
 
@@ -25,6 +28,12 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 - Authenticated-viewer image contracts are bound to exact image content IDs.
   Legacy unlabeled viewer images remain compatible, while a hardened computer
   cannot be started or changed through an incompatible gateway.
+- The existing `browser_reset` API name remains compatible but is now presented
+  and described unambiguously as **Reset tabs**; it retains the durable browser
+  profile rather than clearing cookies or site data.
+- Upgrade, full-home backup, checkpoint, clone, delete, restore, and purge
+  previews now state whether durable Chromium profile data is preserved,
+  copied, restored, or permanently removed.
 
 ### Fixed
 
@@ -52,6 +61,11 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   cycles, sparse or special entries, decompression excess, and archive changes
   between inspection and extraction. A no-follow post-extraction walk must
   match the reviewed graph before a restored home can be promoted.
+- Browser-profile clearing validates the fixed durable path without following
+  links or crossing mounts, inventories only bounded domain/origin metadata,
+  stops a stable managed runtime before inspection and deletion, and restores
+  its prior running state on cancellation or success. Partial deletion and
+  restart failures remain explicit and fail closed.
 
 ## 0.1.1 - 2026-08-27
 

@@ -16,6 +16,26 @@ Qubicl has one durable computer boundary: the bind-mounted `/home`.
 
 Stop/start may make root changes appear durable because the same runtime containers remain. That is incidental. Recreation, image replacement, migration, or recovery may remove them without warning.
 
+### Chromium profile lifecycle
+
+The managed Chromium profile is fixed at
+`/home/qubicl/.local/share/qubicl/browser-profile`. `browser_reset` is **Reset
+tabs** only and deliberately retains it. Full-home upgrade, delete/restore,
+backup/restore, checkpoint, and clone flows preserve or copy the profile with
+the rest of `/home`; purge destroys it with the trashed home.
+
+To clear only the managed profile, run `qubicl browser profile wipe COMPUTER`.
+Qubicl stops a stable running computer before inventory, prints normalized
+domains with stored cookies/site data without reading cookie values, lists
+cookies, local storage, history, preferences, and sessions as removed, and
+states that `/home/qubicl/Downloads` plus all other paths outside the profile
+remain. It requires the exact computer name or `--yes`, refuses partial or
+unstable runtime groups and substituted path components, and restores a
+previously running computer after cancellation or success. Existing backups,
+checkpoints, clones, recoverable trash, and external copies are unchanged and
+may retain or restore prior profile data. There is no silent profile-exclusion
+mode for full-home copies.
+
 ## Setup and exact defaults
 
 `qubicl setup` stores the selected gateway and default computer identity: requested reference, resolved exact reference, local content ID, and capability-manifest digest. A later plain `qubicl create` uses that stored identity. Updating the CLI does not silently move existing computers or future defaults.

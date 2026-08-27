@@ -137,6 +137,11 @@ across restarts and upgrades. Current viewer images also require a
 gateway-injected internal credential for noVNC files and WebSocket traffic and
 expose no raw TCP VNC listener.
 
+Agent-facing `browser_reset` is presented as **Reset tabs** and retains the
+durable profile. A host operator can separately run `qubicl browser profile
+wipe COMPUTER` to preview domains with stored cookies/site data and the exact
+removal/preservation scope before explicit confirmation; Downloads remain.
+
 ## Security boundary
 
 Computers run without privileged mode, a Docker socket, host namespaces,

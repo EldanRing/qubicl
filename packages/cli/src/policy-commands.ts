@@ -4,6 +4,8 @@ import {
   ToolPolicySchema,
   defaultCatalogSkillsForCompatibility,
   isToolName,
+  toolDefinitions,
+  toolTitle,
   toolsForCapabilities,
   type ComputerConfig,
   type ComputerToolName,
@@ -112,7 +114,7 @@ export async function toolsCommand(args: ParsedArgs): Promise<void> {
     const current = new Set(computer.toolPolicy ?? maximum);
     const selected = await checkboxSelector(
       `Tools for ${computer.name}`,
-      TOOL_CATEGORIES.flatMap(({ label, tools }) => tools.filter((tool) => maximum.includes(tool)).map((tool) => ({ id: tool, label: tool, category: label, detail: toolDetail(tool), locked: LOCKED_TOOLS.has(tool) }))),
+      TOOL_CATEGORIES.flatMap(({ label, tools }) => tools.filter((tool) => maximum.includes(tool)).map((tool) => ({ id: tool, label: toolDisplayLabel(tool), category: label, detail: toolDetail(tool), locked: LOCKED_TOOLS.has(tool) }))),
       current,
     );
     const disabled = maximum.filter((tool) => !selected.has(tool));
@@ -147,7 +149,7 @@ export async function creationPolicySelection(
   ], 'full');
   const maximum = toolsForCapabilities(computer.capabilities);
   const selectedTools = toolProfile === 'custom'
-    ? [...await checkboxSelector('Choose tools', TOOL_CATEGORIES.flatMap(({ label, tools }) => tools.filter((tool) => maximum.includes(tool)).map((tool) => ({ id: tool, label: tool, category: label, detail: toolDetail(tool), locked: LOCKED_TOOLS.has(tool) }))), new Set(maximum))] as ComputerToolName[]
+    ? [...await checkboxSelector('Choose tools', TOOL_CATEGORIES.flatMap(({ label, tools }) => tools.filter((tool) => maximum.includes(tool)).map((tool) => ({ id: tool, label: toolDisplayLabel(tool), category: label, detail: toolDetail(tool), locked: LOCKED_TOOLS.has(tool) }))), new Set(maximum))] as ComputerToolName[]
     : maximum;
   return { toolPolicy: maximum.filter((tool) => selectedTools.includes(tool)), skillPolicy: { enabledCatalogSkills: selectedSkills } };
 }
@@ -388,6 +390,12 @@ function assertCoreSkillCompatible(skill: SkillStatus, catalog: CoreCatalog, com
   const core = catalog.skills.find(({ id }) => id === skill.id);
   if (!core?.compatiblePresets.includes(compatibility)) throw new Error(`Core skill ${skill.name} is incompatible with the ${compatibility} preset because its tested image dependencies are absent.`);
 }
-function toolDetail(tool: ComputerToolName): string { return LOCKED_TOOLS.has(tool) ? 'Required for status and exclusive-control safety; cannot be disabled.' : `Qubicl tool: ${tool}`; }
+export function toolDisplayLabel(tool: ComputerToolName): string { return toolTitle(tool) ?? tool; }
+
+function toolDetail(tool: ComputerToolName): string {
+  if (LOCKED_TOOLS.has(tool)) return 'Required for status and exclusive-control safety; cannot be disabled.';
+  const title = toolTitle(tool);
+  return title ? `${tool}: ${toolDefinitions[tool].description}` : `Qubicl tool: ${tool}`;
+}
 function skillProfileDetail(compatibility: Preset): string { return `Enable the tested Qubicl-native skills compatible with ${compatibility}.`; }
 function printResult(result: Record<string, unknown>, args: ParsedArgs, heading?: string): void { if (heading && !flag(args, 'json') && process.stdout.isTTY) console.log(heading); console.log(JSON.stringify(result, null, 2)); }

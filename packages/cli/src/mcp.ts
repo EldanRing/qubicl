@@ -9,6 +9,7 @@ import {
   mcpToolResult,
   compactToolDefinitionBytes,
   toolDefinitions,
+  toolTitle,
   toolNamesForProfile,
   type McpResultMode,
   type ToolName,
@@ -63,9 +64,15 @@ export function serveMcpBridge(state: LoadedState, computerName: string, options
     };
     for (const name of tools) {
       const definition = toolDefinitions[name];
+      const title = toolTitle(name);
+      const config: { title?: string; description: string; inputSchema: StandardSchemaWithJSON } = {
+        ...(title ? { title } : {}),
+        description: definition.description,
+        inputSchema: modelInputSchemaForTool(name, true) as StandardSchemaWithJSON,
+      };
       server.registerTool(
         name,
-        { description: definition.description, inputSchema: modelInputSchemaForTool(name, true) as StandardSchemaWithJSON },
+        config,
         async (input: unknown) => {
           try {
             const result = await bridge.call(name, input);

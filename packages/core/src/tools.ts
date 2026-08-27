@@ -366,6 +366,7 @@ export const toolDefinitions = {
     lease: true,
   },
   browser_reset: {
+    title: 'Reset tabs',
     description: 'Reset tabs while retaining the persistent browser profile.',
     input: leaseOnly,
     lease: true,
@@ -451,6 +452,10 @@ export const toolDefinitions = {
 
 export type ToolName = keyof typeof toolDefinitions;
 export const toolNames = Object.keys(toolDefinitions) as ToolName[];
+
+export function toolTitle(name: ToolName): string | undefined {
+  return (toolDefinitions[name] as { readonly title?: string }).title;
+}
 export const ToolProfileSchema = z.enum(['full', 'files', 'browser-semantic', 'browser-visual', 'desktop']);
 export type ToolProfile = z.infer<typeof ToolProfileSchema>;
 export const McpResultModeSchema = z.enum(['text', 'structured', 'compatible']);
@@ -607,10 +612,12 @@ function openApiDocument(
   const paths: Record<string, unknown> = {};
   for (const { name, schema } of tools) {
     const definition = toolDefinitions[name];
+    const title = toolTitle(name);
     paths[`/v1/tools/${name}`] = {
       post: {
         operationId: name,
-        summary: definition.description,
+        summary: title ?? definition.description,
+        ...(title ? { description: definition.description } : {}),
         security: [{ bearerAuth: [] }],
         requestBody: {
           required: true,
@@ -706,6 +713,7 @@ export function compactToolDefinitionBytes(
   const names = toolNamesForProfile(enabled, options.profile ?? 'full', options.leaseTransparent ?? false);
   return Buffer.byteLength(JSON.stringify(names.map((name) => ({
     name,
+    ...(toolTitle(name) ? { title: toolTitle(name) } : {}),
     description: toolDefinitions[name].description,
     inputSchema: jsonSchemaForTool(name, options.leaseTransparent ?? false),
   }))));

@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { timingSafeEqual } from 'node:crypto';
 import { createMcpHandler, McpServer, type StandardSchemaWithJSON } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
-import { buildOpenApi, isToolName, modelInputSchemaForTool, QUBICL_BUILD, QUBICL_MODEL_INSTRUCTIONS, toolDefinitions } from '@qubicl/core';
+import { buildOpenApi, isToolName, modelInputSchemaForTool, QUBICL_BUILD, QUBICL_MODEL_INSTRUCTIONS, toolDefinitions, toolTitle } from '@qubicl/core';
 import { ToolExecutor } from './executor.js';
 import { errorPayload, QubiclError } from './errors.js';
 import { invokeTool, mcpResult } from './contract.js';
@@ -30,9 +30,15 @@ const mcp = createMcpHandler(() => {
   );
   for (const name of executor.enabledToolNames()) {
     const definition = toolDefinitions[name];
+    const title = toolTitle(name);
+    const config: { title?: string; description: string; inputSchema: StandardSchemaWithJSON } = {
+      ...(title ? { title } : {}),
+      description: definition.description,
+      inputSchema: modelInputSchemaForTool(name) as StandardSchemaWithJSON,
+    };
     server.registerTool(
       name,
-      { description: definition.description, inputSchema: modelInputSchemaForTool(name) as StandardSchemaWithJSON },
+      config,
       async (input: unknown) => {
         const outcome = await invokeTool(executor, name, input);
         if (!outcome.ok && outcome.status === 500) console.error(outcome.cause);

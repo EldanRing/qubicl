@@ -14,7 +14,7 @@ import {
 } from '@qubicl/core';
 import { SkillManager } from '@qubicl/control/skills';
 import { parseArgs } from '../../packages/cli/dist/args.js';
-import { materializeCatalogSkills, materializeCatalogSkillsIfInitialized, skillSelection, toolSelection, validateSkillsInvocation } from '../../packages/cli/dist/policy-commands.js';
+import { materializeCatalogSkills, materializeCatalogSkillsIfInitialized, skillSelection, toolDisplayLabel, toolSelection, validateSkillsInvocation } from '../../packages/cli/dist/policy-commands.js';
 import {
   importSkill,
   listInstalledSkills,
@@ -67,6 +67,8 @@ test('preset defaults expose only core skills whose dependencies are present', a
   assert.equal(research.includes('skills_list'), true);
   assert.equal(research.includes('exec_command'), false);
   assert.equal(research.includes('acquire_lease'), true);
+  assert.equal(toolDisplayLabel('browser_reset'), 'Reset tabs');
+  assert.equal(toolDisplayLabel('read_file'), 'read_file');
 });
 
 test('skill command actions reject ambiguous positions and unrelated options', () => {

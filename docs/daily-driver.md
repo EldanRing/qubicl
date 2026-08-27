@@ -33,6 +33,21 @@ links, duplicate/aliased paths, and over-budget archives fail closed. Archives
 are not whole-container snapshots. Quiescing pauses the computer container for
 archive creation and always attempts to resume it.
 
+The Chromium profile is part of the durable home, so full-home backups,
+checkpoints, restores, and clones include its cookies, site data, history,
+preferences, and sessions. Resetting browser tabs does not erase that data. To
+clear only the managed profile while preserving `/home/qubicl/Downloads` and
+every other path outside it, review the domain-only inventory and exact scope,
+then type the computer name at the prompt:
+
+```sh
+qubicl browser profile wipe research
+```
+
+Use `--yes` only after reviewing the same printed preview. Existing backups,
+checkpoints, clones, trash, and external copies are not rewritten and can still
+contain or later restore the old browser state.
+
 ## Network and credentials
 
 ```sh

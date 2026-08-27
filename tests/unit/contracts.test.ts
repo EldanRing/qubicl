@@ -13,6 +13,7 @@ import {
   toolDefinitions,
   toolNames,
   toolNamesForProfile,
+  toolTitle,
   type ToolName,
 } from '@qubicl/core';
 import { invokeTool, mcpResult } from '@qubicl/control/contract';
@@ -27,6 +28,21 @@ test('OpenAPI exposes exactly the shared MCP tool catalog', () => {
     assert.deepEqual(paths[`/v1/tools/${name}`]!.post.requestBody.content['application/json'].schema, jsonSchemaForTool(name));
     assert.ok(toolDefinitions[name].description.length > 0);
   }
+});
+
+test('browser_reset keeps its API name while clients present it as Reset tabs', () => {
+  assert.equal(toolNames.includes('browser_reset'), true);
+  assert.equal(toolTitle('browser_reset'), 'Reset tabs');
+  assert.match(toolDefinitions.browser_reset.description, /^Reset tabs/);
+  assert.match(toolDefinitions.browser_reset.description, /persistent browser profile/);
+
+  const document = buildOpenApi('00000000-0000-4000-8000-000000000001') as {
+    paths: Record<string, { post: { operationId: string; summary: string; description?: string } }>;
+  };
+  const operation = document.paths['/v1/tools/browser_reset']!.post;
+  assert.equal(operation.operationId, 'browser_reset');
+  assert.equal(operation.summary, 'Reset tabs');
+  assert.equal(operation.description, toolDefinitions.browser_reset.description);
 });
 
 test('process and desktop tool contracts expose the additive safety controls and dispatch semantics', () => {

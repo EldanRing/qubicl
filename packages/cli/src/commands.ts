@@ -98,6 +98,8 @@ import { auditCommand } from './audit-log.js';
 import { creationPolicySelection, skillsCommand, synchronizeStartedSkillPolicies, toolsCommand } from './policy-commands.js';
 import { browserOpenInvocation, inspectHostPlatform, windowsWslStdioLauncher } from './host-platform.js';
 import { validateStatePath } from './preflight.js';
+import { browserProfileCommand } from './browser-profile.js';
+import { printBrowserProfileDisclosure } from './browser-profile-disclosures.js';
 
 export async function execute(command: string | undefined, args: ParsedArgs): Promise<void> {
   validateInvocation(command, args);
@@ -130,6 +132,7 @@ export async function execute(command: string | undefined, args: ParsedArgs): Pr
     case 'stop': return stop(required(args.positionals[0], 'computer name'));
     case 'restart': return restart(required(args.positionals[0], 'computer name'));
     case 'control': return control(args);
+    case 'browser': return browserProfileCommand(args);
     case 'network': return networkCommand(args);
     case 'secret': return secretCommand(args);
     case 'ssh': return sshCommand(args);
@@ -353,6 +356,7 @@ async function upgradeComputer(args: ParsedArgs): Promise<void> {
     const state = await loadState(paths);
     const host = await validateDocker();
     const current = findComputer(state, name);
+    printBrowserProfileDisclosure('upgrade');
     const presetValue = stringOption(args, 'preset');
     const image = stringOption(args, 'image');
     if (presetValue && image) throw new Error('--preset and --image are mutually exclusive.');
@@ -822,6 +826,7 @@ async function deleteComputer(name: string): Promise<void> {
     const state = await loadState(paths);
     await validateDocker();
     const computer = findComputer(state, name);
+    printBrowserProfileDisclosure('delete');
     state.config.computers = state.config.computers.filter(({ id }) => id !== computer.id);
     delete state.secrets.computers[computer.id];
     const metadata = { ...computer, deletedAt: new Date().toISOString() };
@@ -840,6 +845,7 @@ async function restoreComputer(name: string): Promise<void> {
     await validateDocker();
     const found = await findTrash(state.paths, name);
     if (state.config.computers.some(({ name: activeName }) => activeName === found.metadata.name)) throw new Error(`Active computer name ${found.metadata.name} is already in use.`);
+    printBrowserProfileDisclosure('restore');
     const { deletedAt: _deletedAt, ...computer } = found.metadata;
     state.config.computers.push(computer);
     state.secrets.computers[computer.id] = newSecret();
@@ -859,6 +865,7 @@ async function purge(name: string, yes: boolean): Promise<void> {
   await withStateLock(paths, async () => {
     const state = await loadState(paths);
     const found = await findTrash(state.paths, name);
+    printBrowserProfileDisclosure('purge');
     if (!yes) {
       if (!stdin.isTTY) throw new Error('Permanent purge requires --yes when stdin is not interactive.');
       const prompt = createInterface({ input: stdin, output: stdout });
@@ -1021,7 +1028,7 @@ async function prepareStateBeforeCommand(command: string | undefined, args: Pars
   if (command === 'setup' && (await inspectStateFormat(paths)).status === 'uninitialized') return;
   const requiresRuntime = new Set([
     'setup', 'up', 'down', 'create', 'upgrade', 'start', 'stop', 'restart', 'control', 'rename', 'delete', 'restore', 'purge', 'repair', 'apply',
-    'network', 'secret', 'ssh', 'backup', 'checkpoint', 'clone', 'devcontainer', 'cleanup', 'skills', 'tools',
+    'browser', 'network', 'secret', 'ssh', 'backup', 'checkpoint', 'clone', 'devcontainer', 'cleanup', 'skills', 'tools',
   ]);
   const includeRuntime = requiresRuntime.has(command)
     || (command === 'config' && args.positionals[0] === 'set')
@@ -1454,6 +1461,7 @@ const invocationRules: Record<string, InvocationRule> = {
   stop: { minPositionals: 1, maxPositionals: 1 },
   restart: { minPositionals: 1, maxPositionals: 1 },
   control: { minPositionals: 2, maxPositionals: 2 },
+  browser: { minPositionals: 3, maxPositionals: 3, options: ['yes'] },
   network: { minPositionals: 2, maxPositionals: 3, options: ['allow-domains', 'deny-domains', 'duration'] },
   secret: { minPositionals: 2, maxPositionals: 3, options: ['base-url', 'path-prefix', 'methods', 'header', 'provider', 'provider-ref', 'duration'] },
   ssh: { minPositionals: 2, maxPositionals: 2, options: ['port'] },
@@ -1518,6 +1526,7 @@ Usage: qubicl <command> [arguments]
   repair ownership <name> [--yes]        Explicitly repair an imported or moved durable home
   start|stop|restart <name>              Manage one computer
   control release <name>                 Release an abandoned human-control session
+  browser profile wipe <name> [--yes]    Permanently clear only the durable Chromium profile
   network show <name>                    Show its enforced egress profile
   network set <name> developer|web-only|offline|custom
               [--allow-domains a,b] [--deny-domains x,y]

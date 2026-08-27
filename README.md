@@ -169,6 +169,15 @@ can toggle it off from the viewer header. The viewer also identifies Chromium's
 profile as durable: cookies, site data, preferences, and browser state remain in
 the computer's `/home` across ordinary restarts and upgrades.
 
+Agent-facing `browser_reset` is labeled **Reset tabs** and keeps that profile.
+To deliberately remove cookies, local storage, history, preferences, and
+sessions while preserving Downloads and every file outside the managed profile,
+the host operator uses an explicit preview and confirmation:
+
+```sh
+qubicl browser profile wipe computer-name
+```
+
 Viewer tickets and cookies terminate at the shared gateway. Current viewer
 images additionally require a gateway-injected internal credential for both
 noVNC files and WebSocket traffic; the computer exposes no raw TCP VNC listener,
@@ -185,6 +194,7 @@ qubicl control release computer-name
 
 - Publish an agent-started local web app through an authenticated loopback preview.
 - Back up, verify, encrypt, restore, clone, and checkpoint durable homes.
+- Preview and deliberately wipe one durable Chromium profile without deleting Downloads.
 - Apply `offline`, `web-only`, `developer`, or custom egress policies.
 - Broker narrowly scoped credentials without placing the secret in the workload.
 - Import bounded devcontainer definitions and use host-mediated Git workflows.
