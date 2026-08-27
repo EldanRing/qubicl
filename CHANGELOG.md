@@ -46,6 +46,12 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   Unix sockets owned by a dedicated viewer user; spoofed headers are replaced,
   credentials do not enter workload-child environments or durable homes, and
   missing or drifted image-contract evidence fails before runtime mutation.
+- Backup verification and restore now inspect a checksum-bound private archive
+  stream before extraction, accept only bounded regular files, directories,
+  and confined symbolic or hard links, and reject traversal, alias collisions,
+  cycles, sparse or special entries, decompression excess, and archive changes
+  between inspection and extraction. A no-follow post-extraction walk must
+  match the reviewed graph before a restored home can be promoted.
 
 ## 0.1.1 - 2026-08-27
 

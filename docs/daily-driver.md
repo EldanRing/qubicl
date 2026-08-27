@@ -25,9 +25,13 @@ qubicl backup prune research --keep 5 --yes
 ```
 
 Archives contain only the durable home, have SHA-256 manifests, mode-0600
-storage, safe extraction checks, and optional scrypt/AES-256-GCM encryption.
-They are not whole-container snapshots. Quiescing pauses the computer
-container for archive creation and always attempts to resume it.
+storage, and optional scrypt/AES-256-GCM encryption. Verification and restore
+use a checksum-bound private stream, validate the complete bounded file/link
+graph, repeat that validation during extraction, and require the extracted tree
+to match before promotion. Special files, sparse metadata, escaping or cyclic
+links, duplicate/aliased paths, and over-budget archives fail closed. Archives
+are not whole-container snapshots. Quiescing pauses the computer container for
+archive creation and always attempts to resume it.
 
 ## Network and credentials
 

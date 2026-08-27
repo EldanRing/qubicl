@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scryptSync } from 'node:crypto';
-import { appendFile, chmod, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, lstat, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { spawn } from 'node:child_process';
 import { ComputerConfigSchema, assertValidName, type ComputerConfig } from '@qubicl/core';
@@ -11,8 +11,9 @@ import { addConfiguredComputer } from './computers.js';
 import { containerStatus, docker, ensureRuntimeImages, validateDocker } from './docker.js';
 import { computerRuntimeContainerNames } from './runtime.js';
 import { createStateTransaction, defaultTransactionRuntime, prepareStateTransaction, recoverPendingTransaction, restoreReadyMarker, restoreStage } from './transactions.js';
-import { atomicWrite, durableRemove, durableRemoveDirectory, loadState, statePaths, withStateLock, type LoadedState } from './state.js';
+import { atomicWrite, durableRemove, durableRemoveDirectory, durableRename, loadState, statePaths, withStateLock, type LoadedState } from './state.js';
 import { synchronizeStartedSkillPolicies } from './policy-commands.js';
+import { copyVerifiedBackupArchive, extractInspectedBackupArchive, inspectBackupArchive } from './safe-backup-archive.js';
 
 interface BackupManifest {
   version: 1;
@@ -104,16 +105,43 @@ async function readManifest(state: LoadedState, id: string): Promise<{ directory
   if (!/^[a-zA-Z0-9._-]+$/u.test(id)) throw new Error('Invalid backup ID.');
   const directory = backupDirectory(state, id);
   const parsed = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8')) as BackupManifest;
-  if (parsed.version !== 1 || parsed.id !== id || !parsed.archive || !/^[a-f0-9]{64}$/u.test(parsed.sha256)) throw new Error(`Backup ${id} has an invalid manifest.`);
+  if (
+    parsed.version !== 1
+    || parsed.id !== id
+    || !/^[a-zA-Z0-9._-]+$/u.test(parsed.archive)
+    || basename(parsed.archive) !== parsed.archive
+    || !/^[a-f0-9]{64}$/u.test(parsed.sha256)
+  ) throw new Error(`Backup ${id} has an invalid manifest.`);
   parsed.source = ComputerConfigSchema.parse(parsed.source);
   return { directory, manifest: parsed };
 }
 
-async function verifyBackup(state: LoadedState, id: string): Promise<{ directory: string; manifest: BackupManifest; archive: string }> {
+async function verifyBackup(
+  state: LoadedState,
+  id: string,
+  args: ParsedArgs,
+): Promise<{ directory: string; manifest: BackupManifest; archive: string }> {
+  const located = await locateBackup(state, id);
+  const work = join(state.paths.runtime, `.backup-verify-${randomUUID()}`);
+  await mkdir(work, { recursive: false, mode: 0o700 });
+  try {
+    const copied = join(work, located.manifest.encrypted ? 'archive.tar.gz.enc' : 'archive.tar.gz');
+    await copyVerifiedBackupArchive(located.archive, copied, located.manifest.sha256);
+    let archive = copied;
+    if (located.manifest.encrypted) {
+      archive = join(work, 'decrypted.tar.gz');
+      await decryptBackupFile(copied, archive, (await passphrase(args, true))!);
+    }
+    await inspectBackupArchive(archive);
+    return located;
+  } finally {
+    await durableRemoveDirectory(work);
+  }
+}
+
+async function locateBackup(state: LoadedState, id: string): Promise<{ directory: string; manifest: BackupManifest; archive: string }> {
   const { directory, manifest } = await readManifest(state, id);
   const archive = join(directory, basename(manifest.archive));
-  const actual = await sha256(archive);
-  if (actual !== manifest.sha256) throw new Error(`Backup ${id} checksum mismatch: expected ${manifest.sha256}, got ${actual}.`);
   return { directory, manifest, archive };
 }
 
@@ -160,7 +188,7 @@ async function createBackup(state: LoadedState, computer: ComputerConfig, args: 
 
 async function restoreBackup(state: LoadedState, id: string, name: string, args: ParsedArgs, start = false): Promise<ComputerConfig> {
   assertValidName(name);
-  const verified = await verifyBackup(state, id);
+  const verified = await locateBackup(state, id);
   const defaults = {
     preset: verified.manifest.source.preset,
     compatibility: verified.manifest.source.compatibility,
@@ -185,22 +213,33 @@ async function restoreBackup(state: LoadedState, id: string, name: string, args:
     runtime: { ensureImages: true, startIds: start ? [computer.id] : [] },
   });
   await prepareStateTransaction(state.paths, transaction);
-  await mkdir(home, { recursive: true, mode: 0o700 });
-  let archive = verified.archive;
-  const temporary = join(staged, `restore-${randomUUID()}.tar.gz`);
+  const work = join(staged, `.restore-${randomUUID()}`);
+  const extracted = join(work, 'home');
+  const copied = join(work, verified.manifest.encrypted ? 'archive.tar.gz.enc' : 'archive.tar.gz');
+  const decrypted = join(work, 'decrypted.tar.gz');
+  let stagedCreated = false;
   let stagingComplete = false;
   try {
+    const restoreRoot = dirname(staged);
+    await mkdir(restoreRoot, { recursive: true, mode: 0o700 });
+    const restoreRootInfo = await lstat(restoreRoot);
+    if (!restoreRootInfo.isDirectory() || restoreRootInfo.isSymbolicLink()) {
+      throw new Error(`Backup restore staging root ${restoreRoot} must be a real directory.`);
+    }
+    await mkdir(staged, { recursive: false, mode: 0o700 });
+    stagedCreated = true;
+    await mkdir(work, { recursive: false, mode: 0o700 });
+    await mkdir(extracted, { recursive: false, mode: 0o700 });
+    await copyVerifiedBackupArchive(verified.archive, copied, verified.manifest.sha256);
+    let archive = copied;
     if (verified.manifest.encrypted) {
-      await decryptBackupFile(archive, temporary, (await passphrase(args, true))!);
-      archive = temporary;
+      await decryptBackupFile(copied, decrypted, (await passphrase(args, true))!);
+      archive = decrypted;
     }
-    const entries = await run('tar', ['-tzf', archive]);
-    for (const entry of entries.split('\n').filter(Boolean)) {
-      const normalized = entry.replace(/^\.\//u, '');
-      if (normalized.startsWith('/') || normalized.split('/').includes('..')) throw new Error(`Backup contains unsafe path ${JSON.stringify(entry)}.`);
-    }
-    await run('tar', ['-xzf', archive, '--no-same-owner', '--no-same-permissions', '-C', home]);
-    if (archive === temporary) await rm(temporary, { force: false });
+    const plan = await inspectBackupArchive(archive);
+    await extractInspectedBackupArchive(archive, extracted, plan);
+    await durableRename(extracted, home);
+    await durableRemoveDirectory(work);
     await atomicWrite(restoreReadyMarker(state.paths, computer.id), 'ready\n', 0o600);
     stagingComplete = true;
     await recoverPendingTransaction(state.paths, {
@@ -211,12 +250,10 @@ async function restoreBackup(state: LoadedState, id: string, name: string, args:
     });
   } catch (error) {
     if (!stagingComplete) {
-      await durableRemoveDirectory(staged);
+      if (stagedCreated) await durableRemoveDirectory(staged);
       await durableRemove(state.paths.journal);
     }
     throw error;
-  } finally {
-    if (archive === temporary) await rm(temporary, { force: true });
   }
   return computer;
 }
@@ -243,12 +280,7 @@ export async function backupCommand(args: ParsedArgs): Promise<void> {
       return;
     }
     if (action === 'verify') {
-      const result = await verifyBackup(state, required(args.positionals[1], 'backup ID'));
-      if (result.manifest.encrypted) {
-        const temporary = join(state.paths.runtime, `verify-${randomUUID()}.tar.gz`);
-        try { await decryptBackupFile(result.archive, temporary, (await passphrase(args, true))!); await run('tar', ['-tzf', temporary]); }
-        finally { await rm(temporary, { force: true }); }
-      } else await run('tar', ['-tzf', result.archive]);
+      const result = await verifyBackup(state, required(args.positionals[1], 'backup ID'), args);
       console.log(`Verified backup ${result.manifest.id}; sha256:${result.manifest.sha256}.`);
       return;
     }
