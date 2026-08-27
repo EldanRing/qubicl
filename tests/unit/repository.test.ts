@@ -92,7 +92,8 @@ test('initial package publishing is explicit and guarded', async () => {
   assert.match(candidateBuilder, /--preview requires a prerelease package version/);
 
   const acceptance = await readFile(join(root, 'scripts/acceptance-evidence.mjs'), 'utf8');
-  assert.match(acceptance, /Acceptance schemaVersion must be 3/);
+  assert.match(acceptance, /Acceptance schemaVersion must be 3 or 4/);
+  assert.match(acceptance, /schemaVersion 4 is required for v0\.2/);
   assert.match(acceptance, /releaseSetSha256/);
   assert.match(await readFile(join(root, 'scripts/publish-candidate.mjs'), 'utf8'), /Supported publication requires a signed release set/);
 

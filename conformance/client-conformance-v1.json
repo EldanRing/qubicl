@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "id": "qubicl-client-conformance",
+  "acceptanceSchemaVersion": 4,
+  "requiredPreset": "workstation",
+  "surfaces": [
+    "discovery",
+    "mcp-stdio",
+    "mcp-http",
+    "openapi",
+    "open-terminal",
+    "result-modes",
+    "screenshots",
+    "files",
+    "browser-control",
+    "human-takeover"
+  ],
+  "clients": [
+    {
+      "id": "codex",
+      "transport": "mcp-stdio",
+      "requiredSurfaces": ["discovery", "mcp-stdio", "result-modes", "screenshots", "files", "browser-control", "human-takeover"]
+    },
+    {
+      "id": "claude-code",
+      "transport": "mcp-stdio",
+      "requiredSurfaces": ["discovery", "mcp-stdio", "result-modes", "screenshots", "files", "browser-control", "human-takeover"]
+    },
+    {
+      "id": "opencode",
+      "transport": "mcp-stdio",
+      "requiredSurfaces": ["discovery", "mcp-stdio", "result-modes", "screenshots", "files", "browser-control", "human-takeover"]
+    },
+    {
+      "id": "openclaw",
+      "transport": "mcp-stdio",
+      "requiredSurfaces": ["discovery", "mcp-stdio", "result-modes", "screenshots", "files", "browser-control", "human-takeover"]
+    },
+    {
+      "id": "hermes-agent",
+      "transport": "mcp-stdio",
+      "requiredSurfaces": ["discovery", "mcp-stdio", "result-modes", "screenshots", "files", "browser-control", "human-takeover"]
+    },
+    {
+      "id": "open-webui",
+      "transport": "open-terminal",
+      "requiredSurfaces": ["discovery", "openapi", "open-terminal", "result-modes", "screenshots", "files", "browser-control", "human-takeover"]
+    },
+    {
+      "id": "claude-desktop",
+      "transport": "mcp-stdio",
+      "requiredSurfaces": ["discovery", "mcp-stdio", "result-modes", "screenshots", "files", "browser-control", "human-takeover"]
+    },
+    {
+      "id": "cursor",
+      "transport": "mcp-stdio",
+      "requiredSurfaces": ["discovery", "mcp-stdio", "result-modes", "screenshots", "files", "browser-control", "human-takeover"]
+    },
+    {
+      "id": "vscode",
+      "transport": "mcp-stdio",
+      "requiredSurfaces": ["discovery", "mcp-stdio", "result-modes", "screenshots", "files", "browser-control", "human-takeover"]
+    }
+  ],
+  "protocols": [
+    {
+      "id": "mcp-stdio",
+      "transport": "mcp-stdio",
+      "requiredSurfaces": ["discovery", "mcp-stdio", "result-modes", "screenshots", "files", "browser-control", "human-takeover"]
+    },
+    {
+      "id": "mcp-http",
+      "transport": "mcp-http",
+      "requiredSurfaces": ["discovery", "mcp-http", "result-modes", "screenshots", "files", "browser-control", "human-takeover"]
+    },
+    {
+      "id": "openapi",
+      "transport": "openapi",
+      "requiredSurfaces": ["discovery", "openapi", "result-modes", "screenshots", "files", "browser-control", "human-takeover"]
+    },
+    {
+      "id": "open-terminal",
+      "transport": "open-terminal",
+      "requiredSurfaces": ["discovery", "openapi", "open-terminal", "result-modes", "screenshots", "files", "browser-control", "human-takeover"]
+    }
+  ]
+}

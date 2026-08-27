@@ -3,17 +3,28 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  CLIENT_CONFORMANCE_REQUIREMENTS_NAME,
+  CLIENT_CONFORMANCE_REQUIREMENTS_PATH,
+  clientConformanceEvidenceReferences,
+  loadClientConformanceRequirements,
+  requiresClientConformance,
+  validateClientConformance,
+} from './client-conformance.mjs';
 import { publicKeyFingerprint, signEvidence, verifyEvidenceSignature } from './evidence-signature.mjs';
 import { verifyReleaseSet } from './release-set.mjs';
 
 const root = resolve(fileURLToPath(new URL('../', import.meta.url)));
-const CLIENTS = ['codex', 'claude-code', 'claude-desktop', 'cursor', 'vscode', 'open-webui', 'mcp-stdio', 'mcp-http', 'openapi'];
+const LEGACY_CLIENTS = ['codex', 'claude-code', 'claude-desktop', 'cursor', 'vscode', 'open-webui', 'mcp-stdio', 'mcp-http', 'openapi'];
 const PLATFORMS = ['linux-x64', 'linux-arm64', 'macos-intel', 'macos-apple-silicon', 'windows-wsl2-x64'];
 const WORKFLOWS = ['upgrade', 'backupRestoreInterruption', 'restart', 'physicalReboot', 'fullTopologyPerformance', 'multipleComputers', 'sustainedDogfooding'];
 
 export async function validateAcceptanceEvidence(evidence, context) {
   const { releaseSet, releaseSetSha256, evidenceDirectory, signatureFingerprint, now = new Date().toISOString() } = context;
-  assert(evidence?.schemaVersion === 3, 'Acceptance schemaVersion must be 3.');
+  assert([3, 4].includes(evidence?.schemaVersion), 'Acceptance schemaVersion must be 3 or 4.');
+  if (requiresClientConformance(releaseSet.version)) {
+    assert(evidence.schemaVersion === 4, 'Acceptance schemaVersion 4 is required for v0.2 and later releases.');
+  }
   assert(evidence.releaseSet?.sha256 === releaseSetSha256, 'Acceptance evidence targets another release set.');
   assert(evidence.releaseSet?.signatureFingerprint === signatureFingerprint, 'Acceptance evidence names another release-set signature key.');
   assert(evidence.releaseSet?.version === releaseSet.version && evidence.releaseSet?.revision === releaseSet.revision, 'Acceptance evidence targets another version or revision.');
@@ -21,9 +32,18 @@ export async function validateAcceptanceEvidence(evidence, context) {
   assert(identity(evidence.approvedBy) && different(evidence.owner, evidence.approvedBy), 'Final approver must be identified and distinct from the owner.');
   validateTimestamp(evidence.approvedAt, releaseSet.createdAt, now, 'approval');
 
-  await requiredRows(evidence.clients, CLIENTS, 'client', evidenceDirectory, releaseSet.createdAt, now, (row) => {
-    assert(version(row.version), `${row.id} requires a real client/protocol version.`);
-  });
+  let conformance;
+  if (evidence.schemaVersion === 3) {
+    await requiredRows(evidence.clients, LEGACY_CLIENTS, 'client', evidenceDirectory, releaseSet.createdAt, now, (row) => {
+      assert(version(row.version), `${row.id} requires a real client/protocol version.`);
+    });
+    conformance = { clients: evidence.clients.length, protocols: 0, surfaces: 0 };
+  } else {
+    const requirements = await verifyConformanceRequirements(evidence, evidenceDirectory);
+    conformance = await validateClientConformance(evidence, requirements, (result, label) => (
+      validateResult(result, label, evidenceDirectory, releaseSet.createdAt, now)
+    ));
+  }
   await requiredRows(evidence.platforms, PLATFORMS, 'platform', evidenceDirectory, releaseSet.createdAt, now, (row) => {
     assert(row.minimumVersionsPassed === true && row.restartPassed === true && row.physicalRebootPassed === true, `${row.id} lacks minimum/restart/reboot evidence.`);
     for (const field of ['osVersion', 'architecture', 'node', 'dockerEngine', 'dockerCompose']) assert(version(row[field]), `${row.id} requires ${field}.`);
@@ -45,12 +65,13 @@ export async function validateAcceptanceEvidence(evidence, context) {
   for (const topic of ['processBoundary', 'internalAuthentication', 'browserSurface', 'filesystemRaces', 'networkReconciliation', 'releaseIntegrity']) {
     assert(evidence.securityReview.topics?.[topic] === true, `Security review lacks ${topic}.`);
   }
-  return { clients: evidence.clients.length, platforms: evidence.platforms.length, workflows: WORKFLOWS.length };
+  return { schemaVersion: evidence.schemaVersion, ...conformance, platforms: evidence.platforms.length, workflows: WORKFLOWS.length };
 }
 
 export function acceptanceEvidenceFiles(evidence, directory) {
   const references = [
-    ...(evidence.clients ?? []).map(({ evidence: value }) => value),
+    evidence.conformance?.requirements,
+    ...clientConformanceEvidenceReferences(evidence),
     ...(evidence.platforms ?? []).map(({ evidence: value }) => value),
     ...Object.values(evidence.workflows ?? {}).map((value) => value?.evidence),
     evidence.securityReview?.evidence,
@@ -58,6 +79,16 @@ export function acceptanceEvidenceFiles(evidence, directory) {
     evidence.privacyReview?.evidence,
   ];
   return [...new Set(references.map((reference) => reference?.path).filter(Boolean))].sort().map((path) => join(directory, path));
+}
+
+async function verifyConformanceRequirements(evidence, directory) {
+  const reference = evidence.conformance?.requirements;
+  assert(reference?.path === CLIENT_CONFORMANCE_REQUIREMENTS_NAME,
+    `Client conformance requirements must use ${CLIENT_CONFORMANCE_REQUIREMENTS_NAME}.`);
+  await validateEvidenceFile(reference, directory, 'client conformance requirements');
+  assert(reference.sha256 === await sha256(CLIENT_CONFORMANCE_REQUIREMENTS_PATH),
+    'Client conformance evidence does not bind the exact reviewed requirements.');
+  return loadClientConformanceRequirements(join(directory, reference.path));
 }
 
 async function requiredRows(rows, ids, label, directory, notBefore, now, extra) {

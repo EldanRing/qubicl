@@ -230,3 +230,13 @@ results, and separates owner, reviewer, and approver identities. The Windows
 row additionally requires exact Windows/WSL/kernel/distribution/Docker Desktop
 versions plus Linux-filesystem, DrvFS rejection, Windows localhost, Windows
 stdio, viewer handoff, WSL shutdown, and Windows host reboot evidence.
+
+For v0.2 and later release sets, acceptance schema 4 is mandatory; schema-3
+evidence remains readable only for v0.1. Schema 4 hash-binds the reviewed
+`client-conformance-v1.json` requirements and requires exact installed versions
+plus post-freeze evidence for every applicable client/protocol surface. It keeps
+Codex, Claude Code, OpenCode, OpenClaw, Hermes Agent, and Open WebUI application
+runs distinct from MCP stdio/HTTP, OpenAPI, and Open Terminal protocol probes,
+while retaining Claude Desktop, Cursor, and VS Code coverage. Adding this gate
+does not produce the evidence: complete real-client runs must still be performed
+against the frozen candidate before acceptance is signed.

@@ -4,6 +4,14 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
+### Added
+
+- Versioned client-conformance requirements and acceptance schema 4 now require
+  exact versions and post-freeze hashed evidence for Codex, Claude Code,
+  OpenCode, OpenClaw, Hermes Agent, Open WebUI, retained desktop/editor clients,
+  and the applicable MCP, OpenAPI, and Open Terminal surfaces. Schema-3 v0.1
+  evidence remains verifiable but cannot satisfy a v0.2 release.
+
 ### Fixed
 
 - Multi-platform release candidates now scan independently filtered amd64 and

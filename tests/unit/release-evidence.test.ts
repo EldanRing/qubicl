@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -31,7 +31,7 @@ test('release sets require one exact candidate for every supported native target
   assert.throws(() => assertReleaseSetShape({ ...document, completeTarget: 'linux-arm64' }), /exactly one complete target/);
 });
 
-test('supported acceptance rejects fake, self-reviewed, incomplete, and changed evidence', async () => {
+test('v0.1 schema-3 acceptance remains verifiable and rejects fake or incomplete evidence', async () => {
   const { validateAcceptanceEvidence } = await import(pathToFileURL(join(root, 'scripts', 'acceptance-evidence.mjs')).href);
   const directory = await mkdtemp(join(tmpdir(), 'qubicl-acceptance-'));
   try {
@@ -56,7 +56,7 @@ test('supported acceptance rejects fake, self-reviewed, incomplete, and changed 
     });
     const evidence = {
       schemaVersion: 3,
-      releaseSet: { sha256: '1'.repeat(64), signatureFingerprint: 'SHA256:test', version: '1.0.0', revision: 'a'.repeat(40) },
+      releaseSet: { sha256: '1'.repeat(64), signatureFingerprint: 'SHA256:test', version: '0.1.0', revision: 'a'.repeat(40) },
       owner: 'release-owner',
       approvedBy: 'final-approver',
       approvedAt: '2026-08-23T12:45:00.000Z',
@@ -68,10 +68,16 @@ test('supported acceptance rejects fake, self-reviewed, incomplete, and changed 
       privacyReview: review('privacy-reviewer'),
     };
     const context = {
-      releaseSet: { createdAt: '2026-08-23T12:00:00.000Z', version: '1.0.0', revision: 'a'.repeat(40) },
+      releaseSet: { createdAt: '2026-08-23T12:00:00.000Z', version: '0.1.0', revision: 'a'.repeat(40) },
       releaseSetSha256: '1'.repeat(64), evidenceDirectory: directory, signatureFingerprint: 'SHA256:test', now: '2026-08-23T13:00:00.000Z',
     };
     await assert.doesNotReject(validateAcceptanceEvidence(evidence, context));
+    const v02 = structuredClone(evidence);
+    v02.releaseSet.version = '0.2.0';
+    await assert.rejects(validateAcceptanceEvidence(v02, {
+      ...context,
+      releaseSet: { ...context.releaseSet, version: '0.2.0' },
+    }), /schemaVersion 4 is required/);
     const fake = structuredClone(evidence); fake.clients[0]!.version = 'x';
     await assert.rejects(validateAcceptanceEvidence(fake, context), /real client/);
     const selfReviewed = structuredClone(evidence); selfReviewed.securityReview.reviewedBy = evidence.owner;
@@ -82,6 +88,154 @@ test('supported acceptance rejects fake, self-reviewed, incomplete, and changed 
     await assert.rejects(validateAcceptanceEvidence(incompleteWsl, context), /windowsStdioPassed/);
     await writeFile(reportPath, '{"passed":false}\n');
     await assert.rejects(validateAcceptanceEvidence(evidence, context), /hash does not match/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('v0.2 schema-4 acceptance requires exact app versions and post-freeze evidence for every applicable surface', async () => {
+  const acceptance = await import(pathToFileURL(join(root, 'scripts', 'acceptance-evidence.mjs')).href);
+  const conformance = await import(pathToFileURL(join(root, 'scripts', 'client-conformance.mjs')).href);
+  const directory = await mkdtemp(join(tmpdir(), 'qubicl-conformance-acceptance-'));
+  try {
+    const reportPath = join(directory, 'conformance-results.json');
+    await writeFile(reportPath, '{"passed":true,"source":"synthetic unit-test fixture"}\n');
+    const reference = { path: 'conformance-results.json', sha256: await sha256(reportPath) };
+    const requirements = await conformance.loadClientConformanceRequirements();
+    const requirementsPath = join(directory, conformance.CLIENT_CONFORMANCE_REQUIREMENTS_NAME);
+    await copyFile(conformance.CLIENT_CONFORMANCE_REQUIREMENTS_PATH, requirementsPath);
+    const checked = {
+      passed: true,
+      testedAt: '2026-08-23T12:30:00.000Z',
+      testedBy: 'fixture-operator',
+      evidence: reference,
+    };
+    const rows = (profiles: Array<{ id: string; transport: string; requiredSurfaces: string[] }>) => profiles.map((profile) => ({
+      id: profile.id,
+      version: `${profile.id} 1.2.3`,
+      transport: profile.transport,
+      preset: requirements.requiredPreset,
+      ...checked,
+      surfaces: Object.fromEntries(profile.requiredSurfaces.map((surface) => [surface, { ...checked }])),
+    }));
+    const platformResult = { ...checked, version: '1.2.3' };
+    const platforms: Array<Record<string, any>> = ['linux-x64', 'linux-arm64', 'macos-intel', 'macos-apple-silicon'].map((id) => ({
+      id,
+      ...platformResult,
+      minimumVersionsPassed: true,
+      restartPassed: true,
+      physicalRebootPassed: true,
+      osVersion: '13.1',
+      architecture: 'x64-1',
+      node: '22.23.2',
+      dockerEngine: '28.4.0',
+      dockerCompose: '2.39.2',
+      dockerDesktop: null,
+    }));
+    platforms.push({
+      id: 'windows-wsl2-x64',
+      ...platformResult,
+      minimumVersionsPassed: true,
+      restartPassed: true,
+      physicalRebootPassed: true,
+      osVersion: 'Windows 11 10.0.26200.8875',
+      windowsBuild: '10.0.26200.8875',
+      architecture: 'x64-1',
+      wslVersion: '2.7.12.0',
+      wslKernel: '6.18.33.2',
+      distribution: 'Ubuntu 24.04',
+      node: '22.22.2',
+      dockerEngine: '29.7.2',
+      dockerCompose: '5.4.0',
+      dockerDesktop: '4.50.0',
+      wslShutdownPassed: true,
+      windowsHostRebootPassed: true,
+      linuxFilesystemPassed: true,
+      windowsBackedStateRejected: true,
+      windowsLocalhostPassed: true,
+      windowsStdioPassed: true,
+      viewerHandoffPassed: true,
+    });
+    const review = (reviewedBy: string) => ({
+      passed: true,
+      reviewedAt: '2026-08-23T12:35:00.000Z',
+      reviewedBy,
+      evidence: reference,
+    });
+    const evidence = {
+      schemaVersion: 4,
+      releaseSet: {
+        sha256: '1'.repeat(64),
+        signatureFingerprint: 'SHA256:test',
+        version: '0.2.0',
+        revision: 'a'.repeat(40),
+      },
+      conformance: {
+        schemaVersion: 1,
+        requirements: {
+          path: conformance.CLIENT_CONFORMANCE_REQUIREMENTS_NAME,
+          sha256: await sha256(requirementsPath),
+        },
+      },
+      owner: 'release-owner',
+      approvedBy: 'final-approver',
+      approvedAt: '2026-08-23T12:45:00.000Z',
+      clients: rows(requirements.clients),
+      protocols: rows(requirements.protocols),
+      platforms,
+      workflows: Object.fromEntries(['upgrade', 'backupRestoreInterruption', 'restart', 'physicalReboot', 'fullTopologyPerformance', 'multipleComputers', 'sustainedDogfooding'].map((id) => [id, platformResult])),
+      securityReview: {
+        ...review('security-reviewer'),
+        topics: Object.fromEntries(['processBoundary', 'internalAuthentication', 'browserSurface', 'filesystemRaces', 'networkReconciliation', 'releaseIntegrity'].map((topic) => [topic, true])),
+      },
+      vulnerabilityReview: review('vulnerability-reviewer'),
+      privacyReview: review('privacy-reviewer'),
+    };
+    const context = {
+      releaseSet: { createdAt: '2026-08-23T12:00:00.000Z', version: '0.2.0', revision: 'a'.repeat(40) },
+      releaseSetSha256: '1'.repeat(64),
+      evidenceDirectory: directory,
+      signatureFingerprint: 'SHA256:test',
+      now: '2026-08-23T13:00:00.000Z',
+    };
+    const summary = await acceptance.validateAcceptanceEvidence(evidence, context);
+    assert.deepEqual(summary, {
+      schemaVersion: 4,
+      clients: requirements.clients.length,
+      protocols: requirements.protocols.length,
+      surfaces: [...requirements.clients, ...requirements.protocols]
+        .reduce((count, profile) => count + profile.requiredSurfaces.length, 0),
+      platforms: 5,
+      workflows: 7,
+    });
+    assert.deepEqual(acceptance.acceptanceEvidenceFiles(evidence, directory).sort(), [requirementsPath, reportPath].sort());
+
+    const missingClient = structuredClone(evidence);
+    missingClient.clients = missingClient.clients.filter(({ id }) => id !== 'opencode');
+    await assert.rejects(acceptance.validateAcceptanceEvidence(missingClient, context), /exactly 9 client rows/);
+    const floatingVersion = structuredClone(evidence);
+    floatingVersion.clients[0]!.version = 'latest';
+    await assert.rejects(acceptance.validateAcceptanceEvidence(floatingVersion, context), /exact installed version/);
+    const missingSurface = structuredClone(evidence);
+    delete missingSurface.clients[0]!.surfaces.files;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(missingSurface, context), /applicable conformance surfaces/);
+    const nonApplicableSurface = structuredClone(evidence);
+    nonApplicableSurface.clients[0]!.surfaces['mcp-http'] = { ...checked };
+    await assert.rejects(acceptance.validateAcceptanceEvidence(nonApplicableSurface, context), /applicable conformance surfaces/);
+    const failedSurface = structuredClone(evidence);
+    failedSurface.clients[0]!.surfaces.discovery!.passed = false;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(failedSurface, context), /surface discovery did not pass/);
+    const preFreeze = structuredClone(evidence);
+    preFreeze.clients[0]!.surfaces.discovery!.testedAt = '2026-08-23T11:59:59.000Z';
+    await assert.rejects(acceptance.validateAcceptanceEvidence(preFreeze, context), /surface discovery predates the release set/);
+    const detachedSurface = structuredClone(evidence);
+    detachedSurface.clients[0]!.surfaces.discovery!.evidence.sha256 = '9'.repeat(64);
+    await assert.rejects(acceptance.validateAcceptanceEvidence(detachedSurface, context), /evidence file hash does not match/);
+
+    await writeFile(requirementsPath, `${JSON.stringify({ ...requirements, id: 'weakened-requirements' }, null, 2)}\n`);
+    const weakenedRequirements = structuredClone(evidence);
+    weakenedRequirements.conformance.requirements.sha256 = await sha256(requirementsPath);
+    await assert.rejects(acceptance.validateAcceptanceEvidence(weakenedRequirements, context), /exact reviewed requirements/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -224,3 +378,7 @@ test('Trivy scanner evidence requires an identified scanner and a fresh exact da
   unidentified.scanner.vulnerabilityDatabase.sha256 = 'unknown';
   assert.throws(() => assertTrivyScannerIdentity(unidentified, '2026-08-23T13:00:00.000Z'), /database identity/);
 });
+
+async function sha256(path: string): Promise<string> {
+  return createHash('sha256').update(await readFile(path)).digest('hex');
+}

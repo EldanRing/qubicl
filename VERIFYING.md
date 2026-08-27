@@ -41,6 +41,33 @@ Do not rename, add, remove, regenerate, or extract files before verification. Th
 
 A complete candidate contains gateway, file-system, browser, computer, and workstation OCI archives plus one Trivy report for each Linux amd64/arm64 image variant. Do not use the lower-level OCI inspector by hand as a substitute for the directory verifier; the directory verifier supplies its required version, revision, source, preset, and expected-manifest arguments.
 
+## Client conformance acceptance
+
+Acceptance schema 3 remains verifiable for v0.1 release sets. A v0.2 or later
+release set requires schema 4 and the exact
+[`client-conformance-v1.json`](conformance/client-conformance-v1.json) contract.
+The acceptance directory contains a byte-identical sibling copy of that file;
+the validator checks its SHA-256 against the reviewed source revision before it
+examines any client result.
+
+Schema 4 separates real application runs from standards-level protocol probes.
+It requires exact installed versions for Codex, Claude Code, OpenCode, OpenClaw,
+Hermes Agent, Open WebUI, Claude Desktop, Cursor, and VS Code, plus independent
+MCP stdio, MCP HTTP, OpenAPI, and Open Terminal rows. Every row is exercised on
+the `workstation` preset and has its own tester, post-freeze UTC timestamp, and
+hashed evidence reference.
+
+Each applicable discovery, transport, result-mode, screenshot, file, browser,
+and human-takeover surface also has a passing post-freeze result and hashed
+evidence reference. One comprehensive report may support multiple surface rows,
+but each surface remains a distinct result in the acceptance record; a matching
+hash proves only which bytes were reviewed. Missing, extra, failed, pre-freeze,
+unhashed, or detached surface records fail acceptance.
+
+The validator performs no network lookup and does not run or install clients.
+Passing evidence must come from maintainer-supplied real clients and accounts;
+the schema and its unit tests are not a claim that those runs occurred.
+
 ## Native archives
 
 Windows users run the Linux archive/package inside a supported WSL 2

@@ -121,3 +121,33 @@ Compatibility intentionally reports `terminal: false` and `notebooks: false`, wh
 - A `file-system` computer has MCP/OpenAPI tools but no viewer. Use `browser`, `computer`, or `workstation` when human viewing is required.
 
 Run `qubicl doctor` for connection failures. Run `qubicl token rotate computer-name` if a token may have been exposed.
+
+## Release conformance evidence
+
+An adapter or reference-protocol test is not by itself evidence that a real
+client version works. For v0.2 and later release acceptance, the versioned
+[client conformance requirements](../conformance/client-conformance-v1.json)
+require separately identified application and protocol results.
+
+Application evidence covers Codex, Claude Code, OpenCode, OpenClaw, Hermes
+Agent, and Open WebUI. Claude Desktop, Cursor, and VS Code remain in the matrix
+so their existing adapter claims do not disappear when the six primary clients
+are added. Standards-level evidence separately covers MCP stdio, MCP HTTP,
+OpenAPI, and Open Terminal rather than treating a protocol probe as a named
+application run.
+
+Every application or protocol row records an exact installed version, its
+transport, the required `workstation` preset, a tester identity, a UTC test
+time, and a SHA-256-bound local evidence file. It also records a passing result
+and hashed evidence for every applicable surface from this set: discovery, MCP
+stdio, MCP HTTP, OpenAPI, Open Terminal, result modes, screenshots, files,
+browser control, and human takeover. Non-applicable transport surfaces are
+omitted according to the versioned matrix; adding or removing a surface ad hoc
+fails validation.
+
+All timestamps must be at or after the signed release set was created. The
+acceptance bundle carries an exact copy and SHA-256 of the reviewed requirements
+file, and its detached signature binds the final acceptance JSON. Qubicl does
+not download clients, inspect online version feeds, or manufacture these
+results. Maintainers must supply the real-client binaries/accounts and retain
+the actual post-freeze evidence before a v0.2 acceptance bundle can pass.
