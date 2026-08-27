@@ -8,6 +8,7 @@ import {
   IMAGE_CATALOG,
   ImageCatalogSchema,
   PRESET_DEFINITIONS,
+  VIEWER_AUTHENTICATION_HEADER_V1,
   buildComputerManifest,
   browserForCompatibility,
   createDevelopmentCatalog,
@@ -34,6 +35,8 @@ test('all curated presets have exact cumulative capability and tool contracts', 
     assert.deepEqual(manifest.tools, enabledToolNames(definition.capabilities));
     assert.equal(manifest.controlProtocolVersion, CONTROL_PROTOCOL_VERSION);
     assert.equal(manifest.viewer, definition.viewer);
+    assert.equal('viewerAuthentication' in manifest, false);
+    assert.equal(IMAGE_CATALOG.presets[preset].viewerAuthentication, definition.viewerAuthentication);
     assert.match(manifestSha256(manifest), /^[a-f0-9]{64}$/);
     const openApi = buildOpenApi('computer', enabledToolNames(definition.capabilities)) as { paths: Record<string, unknown> };
     assert.deepEqual(Object.keys(openApi.paths).sort(), manifest.tools.map((name) => `/v1/tools/${name}`).sort());
@@ -58,6 +61,17 @@ test('all curated presets have exact cumulative capability and tool contracts', 
   assert.equal(managedSshForCompatibility('workstation'), true);
   assert.equal(browserForCompatibility('file-system'), false);
   for (const preset of ['browser', 'computer', 'workstation'] as const) assert.equal(browserForCompatibility(preset), true);
+});
+
+test('protocol-10 computer manifests stay strict and unchanged by viewer image authentication', () => {
+  const manifest = buildComputerManifest('browser', 'test', 'revision');
+  assert.equal(manifest.controlProtocolVersion, CONTROL_PROTOCOL_VERSION);
+  assert.equal('viewerAuthentication' in manifest, false);
+  assert.throws(
+    () => ComputerManifestSchema.parse({ ...manifest, viewerAuthentication: VIEWER_AUTHENTICATION_HEADER_V1 }),
+    /unrecognized key/i,
+  );
+  assert.equal(IMAGE_CATALOG.presets.browser.viewerAuthentication, VIEWER_AUTHENTICATION_HEADER_V1);
 });
 
 test('computer manifests reject a startup profile outside their compatibility contract', () => {
@@ -102,6 +116,14 @@ test('release catalogs require exact immutable platform identities and measured 
   const policyDrift = structuredClone(release);
   policyDrift.presets.workstation.recommendedMemory = '3g';
   assert.throws(() => ImageCatalogSchema.parse(policyDrift), /catalog policy/);
+
+  const missingViewerAuthentication = structuredClone(release);
+  delete missingViewerAuthentication.presets.browser.viewerAuthentication;
+  assert.throws(() => ImageCatalogSchema.parse(missingViewerAuthentication), /catalog policy/);
+
+  const forgedViewerAuthentication = structuredClone(release);
+  forgedViewerAuthentication.presets['file-system'].viewerAuthentication = VIEWER_AUTHENTICATION_HEADER_V1;
+  assert.throws(() => ImageCatalogSchema.parse(forgedViewerAuthentication), /catalog policy/);
 });
 
 test('control invocation fails closed for a tool outside the image contract', async () => {

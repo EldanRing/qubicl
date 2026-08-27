@@ -27,6 +27,10 @@ export const STARTUP_PROFILES = ['file-system', 'browser', 'desktop', 'workstati
 export const StartupProfileSchema = z.enum(STARTUP_PROFILES);
 export type StartupProfile = z.infer<typeof StartupProfileSchema>;
 
+export const VIEWER_AUTHENTICATION_HEADER_V1 = 'header-v1' as const;
+export const ViewerAuthenticationSchema = z.literal(VIEWER_AUTHENTICATION_HEADER_V1);
+export type ViewerAuthentication = z.infer<typeof ViewerAuthenticationSchema>;
+
 export const CAPABILITY_CONTRACT_VERSION = 1;
 export const CONTROL_PROTOCOL_VERSION = 10;
 
@@ -35,6 +39,7 @@ export interface PresetDefinition {
   purpose: string;
   description: string;
   viewer: boolean;
+  viewerAuthentication?: ViewerAuthentication;
   capabilities: Capability[];
   cpus: number;
   memory: string;
@@ -65,6 +70,7 @@ export const PRESET_DEFINITIONS: Readonly<Record<Preset, PresetDefinition>> = {
     purpose: 'Browser automation and human viewing',
     description: 'Chromium in a minimal Openbox session with OCR, document inspection, viewer, and desktop control.',
     viewer: true,
+    viewerAuthentication: VIEWER_AUTHENTICATION_HEADER_V1,
     capabilities: displayCapabilities,
     cpus: 2,
     memory: '2g',
@@ -78,6 +84,7 @@ export const PRESET_DEFINITIONS: Readonly<Record<Preset, PresetDefinition>> = {
     purpose: 'Lightweight general-purpose graphical computer',
     description: 'Chromium, a selected XFCE desktop, document helpers, text editing, file management, and managed SSH.',
     viewer: true,
+    viewerAuthentication: VIEWER_AUTHENTICATION_HEADER_V1,
     capabilities: [...displayCapabilities, 'desktop-apps'],
     cpus: 2,
     memory: '3g',
@@ -91,6 +98,7 @@ export const PRESET_DEFINITIONS: Readonly<Record<Preset, PresetDefinition>> = {
     purpose: 'Full development and office environment',
     description: 'The broad desktop with developer tools, document helpers, Python, LibreOffice, and managed SSH.',
     viewer: true,
+    viewerAuthentication: VIEWER_AUTHENTICATION_HEADER_V1,
     capabilities: [...displayCapabilities, 'desktop-apps', 'development', 'office'],
     cpus: 2,
     memory: '4g',
@@ -341,6 +349,7 @@ export const PresetCatalogEntrySchema = z.strictObject({
   description: z.string().min(1),
   capabilities: CapabilityListSchema,
   viewer: z.boolean(),
+  viewerAuthentication: ViewerAuthenticationSchema.optional(),
   manifestSha256: z.string().regex(/^[a-f0-9]{64}$/),
   image: CatalogImageSchema,
   recommendedCpus: z.number().positive(),
@@ -373,6 +382,7 @@ export const ImageCatalogSchema = z.strictObject({
       if (entry.id !== preset
         || JSON.stringify(entry.capabilities) !== JSON.stringify(definition.capabilities)
         || entry.viewer !== definition.viewer
+        || entry.viewerAuthentication !== definition.viewerAuthentication
         || entry.recommendedCpus !== definition.cpus
         || entry.recommendedMemory !== definition.memory
         || entry.pidsLimit !== definition.pidsLimit
@@ -434,6 +444,7 @@ export function createDevelopmentCatalog(version = 'development', revision = 'un
       description: definition.description,
       capabilities: definition.capabilities,
       viewer: definition.viewer,
+      ...(definition.viewerAuthentication ? { viewerAuthentication: definition.viewerAuthentication } : {}),
       manifestSha256: manifestSha256(manifest),
       image: image(developmentNames[preset]),
       recommendedCpus: definition.cpus,

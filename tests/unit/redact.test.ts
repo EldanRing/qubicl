@@ -14,6 +14,7 @@ test('operator output recursively redacts external and internal credentials', ()
         `QUBICL_SESSION_KEY=${'s'.repeat(43)}`,
         `QUBICL_BROKER_KEY=${'b'.repeat(43)}`,
         `QUBICL_WEB_KEY=${'w'.repeat(43)}`,
+        `QUBICL_VIEWER_KEY=${'v'.repeat(43)}`,
         `safe=${token}`,
       ],
     },
@@ -21,6 +22,6 @@ test('operator output recursively redacts external and internal credentials', ()
   const serialized = JSON.stringify(redacted);
   assert.equal(serialized.includes(token), false);
   assert.equal(serialized.includes('x'.repeat(43)), false);
-  for (const character of ['e', 's', 'b', 'w']) assert.equal(serialized.includes(character.repeat(43)), false);
+  for (const character of ['e', 's', 'b', 'w', 'v']) assert.equal(serialized.includes(character.repeat(43)), false);
   assert.match(serialized, /REDACTED/);
 });

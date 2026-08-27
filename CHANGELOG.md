@@ -14,12 +14,17 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 - A versioned platform support matrix now separates support policy from direct
   test evidence and binds schema-4 acceptance to exact Linux, macOS, and Windows
   through WSL 2 host facts without promoting best-effort platforms.
+- The live viewer now states that Chromium profile data is durable across
+  computer restarts and upgrades.
 
 ### Changed
 
 - Platform documentation now gives macOS Docker Desktop preflight and recovery
   steps plus a shorter WSL 2 install, doctor-report, pinned-launcher, and Windows
   browser-handoff path while retaining the WSL 1 and native-Windows boundaries.
+- Authenticated-viewer image contracts are bound to exact image content IDs.
+  Legacy unlabeled viewer images remain compatible, while a hardened computer
+  cannot be started or changed through an incompatible gateway.
 
 ### Fixed
 
@@ -36,6 +41,11 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   traverse descriptor-anchored Linux paths with no-follow checks and atomic
   no-replace renames. Copy, move, overwrite, and delete operations reject
   symlink and destination replacement races without escaping `/home/qubicl`.
+- Hardened viewer images now require a gateway-injected internal credential for
+  static noVNC content and WebSocket upgrades. Raw VNC is confined to protected
+  Unix sockets owned by a dedicated viewer user; spoofed headers are replaced,
+  credentials do not enter workload-child environments or durable homes, and
+  missing or drifted image-contract evidence fails before runtime mutation.
 
 ## 0.1.1 - 2026-08-27
 

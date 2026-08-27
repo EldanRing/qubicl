@@ -25,6 +25,7 @@ import {
   assertGatewayPort,
   containerStatus,
   dockerDiskUsage,
+  ensureRuntimeImages,
   gatewayStatus,
   portAvailable,
   probeBindMount,
@@ -186,12 +187,17 @@ export async function setupCommand(args: ParsedArgs, injectedPrompt?: SetupPromp
       state.config = ConfigSchema.parse(state.config);
 
       const gatewayChanged = !priorGateway || JSON.stringify(priorGateway) !== JSON.stringify(state.config.gateway);
-      const reconnectIds = gatewayWasRunning && gatewayChanged ? runningIds : [];
       const startCreatedComputer = Boolean(computer && plan.start);
+      const replacingGateway = gatewayChanged && (gatewayWasRunning || startCreatedComputer);
+      const reconnectIds = replacingGateway ? runningIds : [];
+      // Cached content-ID contracts cover existing retained runtimes. Do not
+      // make a gateway-only replacement depend on their pruned image objects.
+      const contractComputers = computer ? [computer] : [];
+      await ensureRuntimeImages(state, contractComputers, true);
       // Preserve the pre-setup runtime state. A running empty gateway still
       // needs recreation when its image or port changes; a stopped empty
       // installation must remain stopped.
-      const startGateway = gatewayWasRunning && gatewayChanged;
+      const startGateway = replacingGateway;
       if (startGateway || reconnectIds.length || startCreatedComputer) phase(write, 'starting gateway/computer');
       if (computer && plan.start) phase(write, 'verifying health and capabilities');
       progress.stage = 'transaction';

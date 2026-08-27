@@ -7,6 +7,7 @@ Qubicl has one durable computer boundary: the bind-mounted `/home`.
 | Data | Durable? | Notes |
 | --- | --- | --- |
 | Files under `/home` | Yes | Host path: `~/.qubicl/computers/<uuid>/home`. |
+| Chromium profile | Yes | Cookies, site data, preferences, history, and sessions live under the computer's `/home`; the viewer identifies the profile as durable. |
 | UUID, name, preset, capabilities, exact image identity, CPU, memory | Yes | State format 3 in protected host configuration. |
 | External token/internal credentials | Until rotation/delete | Raw values exist only in mode-`0600` host state. |
 | Runtime roots and system packages | No guarantee | Recreation discards them. Use a custom image. |

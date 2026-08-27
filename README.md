@@ -165,7 +165,14 @@ the live noVNC canvas, so the indicator stays aligned through viewer resizing
 and letterboxing. It appears before input dispatch, survives viewer reloads,
 and clears when the agent loses its lease or a human takes control. It remains
 viewer-only—human input, webpages, and agent screenshots are untouched—and you
-can toggle it off from the viewer header.
+can toggle it off from the viewer header. The viewer also identifies Chromium's
+profile as durable: cookies, site data, preferences, and browser state remain in
+the computer's `/home` across ordinary restarts and upgrades.
+
+Viewer tickets and cookies terminate at the shared gateway. Current viewer
+images additionally require a gateway-injected internal credential for both
+noVNC files and WebSocket traffic; the computer exposes no raw TCP VNC listener,
+and that internal credential is not passed to workload child processes.
 
 If a controlling viewer disappears, Qubicl releases abandoned control after a
 short reconnect grace period. The operator can always recover explicitly:

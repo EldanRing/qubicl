@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { SshAccessSchema, assertValidName, managedSshForCompatibility, type ComputerConfig } from '@qubicl/core';
 import type { ParsedArgs } from './args.js';
 import { numberOption } from './args.js';
-import { compose, docker, ensureRuntimeImages, portAvailable, startComputerAfterGateway, startGateway, validateDocker } from './docker.js';
+import { compose, docker, ensureRuntimeImages, portAvailable, startComputerAfterGateway, startGateway, validateDocker, verifyGatewayCompatibility } from './docker.js';
 import { computerSshContainerName, computerSshServiceName, renderRuntime, usesUnifiedComputerRuntime } from './runtime.js';
 import { loadState, statePaths, withStateLock, type LoadedState } from './state.js';
 import { createStateTransaction, executeStateTransaction } from './transactions.js';
@@ -67,6 +67,7 @@ async function refreshSsh(state: LoadedState, computer: ComputerConfig): Promise
   await renderRuntime(state);
   if (usesUnifiedComputerRuntime(computer)) {
     await startGateway(state);
+    await verifyGatewayCompatibility(state);
     await startComputerAfterGateway(state, computer);
     if (computer.ssh?.enabled) await waitForSshReady(state, computer);
     return;

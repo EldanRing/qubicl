@@ -1,7 +1,9 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { NetworkPolicySchema } from './config.js';
-import { CapabilityListSchema, ConfigPresetSchema, PresetSchema } from './presets.js';
+import { CapabilityListSchema, ConfigPresetSchema, PresetSchema, ViewerAuthenticationSchema } from './presets.js';
+
+export const GATEWAY_PROTOCOL_VERSION = 2;
 
 export const RuntimeRouteSchema = z.object({
   id: z.uuid(),
@@ -11,6 +13,7 @@ export const RuntimeRouteSchema = z.object({
   controlPort: z.number().int().positive(),
   viewPort: z.number().int().positive().optional(),
   controlViewPort: z.number().int().positive().optional(),
+  viewerAuthentication: ViewerAuthenticationSchema.optional(),
   preset: ConfigPresetSchema,
   compatibility: PresetSchema,
   capabilities: CapabilityListSchema,
@@ -18,6 +21,11 @@ export const RuntimeRouteSchema = z.object({
   tokenHash: z.string().regex(/^[a-f0-9]{64}$/),
   internalKey: z.string().min(32),
   networkPolicy: NetworkPolicySchema.optional(),
+}).superRefine((route, context) => {
+  if (route.viewerAuthentication
+    && (!route.capabilities.includes('viewer') || route.viewPort === undefined || route.controlViewPort === undefined)) {
+    context.addIssue({ code: 'custom', path: ['viewerAuthentication'], message: 'viewer authentication requires complete viewer routing' });
+  }
 });
 
 export const RuntimeRoutesSchema = z.object({
@@ -33,7 +41,7 @@ export function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
-export function deriveInternalServiceKey(internalKey: string, service: 'executor' | 'session' | 'web' | 'egress-proxy' | 'egress-broker'): string {
+export function deriveInternalServiceKey(internalKey: string, service: 'executor' | 'session' | 'web' | 'egress-proxy' | 'egress-broker' | 'viewer'): string {
   return createHmac('sha256', internalKey).update(`qubicl-internal-${service}-v1`).digest('base64url');
 }
 

@@ -93,6 +93,8 @@ await Promise.all([
   cp(new URL('../images/computer/Dockerfile', import.meta.url), new URL('computer/Dockerfile', assets)),
   cp(new URL('../images/computer/entrypoint.sh', import.meta.url), new URL('computer/entrypoint.sh', assets)),
   cp(new URL('../images/computer/chromium-wrapper.sh', import.meta.url), new URL('computer/chromium-wrapper.sh', assets)),
+  cp(new URL('../images/computer/qubicl_viewer_auth.py', import.meta.url), new URL('computer/qubicl_viewer_auth.py', assets)),
+  cp(new URL('../images/computer/x11vnc-relay.sh', import.meta.url), new URL('computer/x11vnc-relay.sh', assets)),
   cp(new URL('../images/computer/libreoffice-registrymodifications.xcu', import.meta.url), new URL('computer/libreoffice-registrymodifications.xcu', assets)),
   cp(new URL('../packages/control/src/web-provider.py', import.meta.url), new URL('computer/web-provider.py', assets)),
   cp(new URL('../images/computer/web-requirements.txt', import.meta.url), new URL('computer/web-requirements.txt', assets)),

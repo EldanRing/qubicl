@@ -2,7 +2,14 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, request as httpRequest, type ClientRequest, type IncomingMessage, type ServerResponse } from 'node:http';
 import { connect } from 'node:net';
 import type { Duplex } from 'node:stream';
-import { previewHostname, tokenMatches, type RuntimeRoute } from '@qubicl/core';
+import {
+  GATEWAY_PROTOCOL_VERSION,
+  VIEWER_AUTHENTICATION_HEADER_V1,
+  deriveInternalServiceKey,
+  previewHostname,
+  tokenMatches,
+  type RuntimeRoute,
+} from '@qubicl/core';
 import { RouteStore } from './routes.js';
 
 interface TimedValue { id: string; expiresAt: number; tokenHash: string; controlling: boolean }
@@ -15,6 +22,8 @@ interface EpochSynchronization {
   nextAttemptAt: number;
   retryDelayMs: number;
 }
+
+const VIEWER_KEY_HEADER = 'x-qubicl-viewer-key';
 
 export class Gateway {
   readonly server = createServer((request, response) => void this.handle(request, response));
@@ -69,7 +78,12 @@ export class Gateway {
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://gateway.local');
     if (url.pathname === '/health') {
-      sendJson(response, 200, { status: 'ok', routes: this.routes.list().length });
+      sendJson(response, 200, {
+        status: 'ok',
+        routes: this.routes.list().length,
+        protocolVersion: GATEWAY_PROTOCOL_VERSION,
+        viewerAuthentication: VIEWER_AUTHENTICATION_HEADER_V1,
+      });
       return;
     }
     const match = url.pathname.match(/^\/computers\/([a-f0-9-]+)(\/.*)?$/);
@@ -278,9 +292,12 @@ export class Gateway {
     delete headers['x-qubicl-internal-key'];
     delete headers['x-qubicl-gateway-epoch'];
     delete headers['x-qubicl-operator-key'];
+    delete headers[VIEWER_KEY_HEADER];
     if (!view) {
       headers['x-qubicl-internal-key'] = route.internalKey;
       headers['x-qubicl-gateway-epoch'] = this.gatewayEpoch;
+    } else if (route.viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1) {
+      headers[VIEWER_KEY_HEADER] = deriveInternalServiceKey(route.internalKey, 'viewer');
     }
     const proxied = httpRequest({
       hostname: view ? (route.viewHost ?? route.host) : route.host,
@@ -324,7 +341,7 @@ export class Gateway {
         const lines = [`${request.method ?? 'GET'} /_qubicl${preview[2]}${url.search} HTTP/${request.httpVersion}`];
         for (let index = 0; index < request.rawHeaders.length; index += 2) {
           const name = request.rawHeaders[index]!;
-          if (['host', 'authorization', 'x-qubicl-internal-key', 'x-qubicl-gateway-epoch'].includes(name.toLowerCase())) continue;
+          if (['host', 'authorization', 'x-qubicl-internal-key', 'x-qubicl-gateway-epoch', VIEWER_KEY_HEADER].includes(name.toLowerCase())) continue;
           lines.push(`${name}: ${request.rawHeaders[index + 1] ?? ''}`);
         }
         lines.push(`Host: ${route.host}:${route.controlPort}`, `X-Qubicl-Internal-Key: ${route.internalKey}`, `X-Qubicl-Gateway-Epoch: ${this.gatewayEpoch}`, '', '');
@@ -357,10 +374,14 @@ export class Gateway {
       const lines = [`${request.method ?? 'GET'} /websockify${url.search} HTTP/${request.httpVersion}`];
       for (let index = 0; index < request.rawHeaders.length; index += 2) {
         const name = request.rawHeaders[index]!;
-        if (['host', 'cookie', 'authorization', 'x-qubicl-internal-key'].includes(name.toLowerCase())) continue;
+        if (['host', 'cookie', 'authorization', 'x-qubicl-internal-key', VIEWER_KEY_HEADER].includes(name.toLowerCase())) continue;
         lines.push(`${name}: ${request.rawHeaders[index + 1] ?? ''}`);
       }
-      lines.push(`Host: ${viewHost}:${viewPort}`, '', '');
+      lines.push(`Host: ${viewHost}:${viewPort}`);
+      if (route.viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1) {
+        lines.push(`X-Qubicl-Viewer-Key: ${deriveInternalServiceKey(route.internalKey, 'viewer')}`);
+      }
+      lines.push('', '');
       backend.write(lines.join('\r\n'));
       if (head.length) backend.write(head);
       socket.pipe(backend).pipe(socket);
@@ -672,9 +693,9 @@ function viewerHtml(id: string, name: string, nonce: string): string {
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escapeHtml(name)} — Qubicl</title>
 <style nonce="${nonce}">
-html,body{height:100%;margin:0;background:#111;color:#eee;font:14px system-ui}body{display:grid;grid-template-rows:auto 1fr}header{display:flex;align-items:center;gap:.75rem;padding:.55rem .8rem;background:#1d1d1d;flex-wrap:wrap}button{padding:.4rem .7rem}#state{opacity:.85}#policy{flex-basis:100%;font-size:.85rem;opacity:.7}#stage{position:relative;min-height:0;overflow:hidden}iframe,#agent-layer{position:absolute;inset:0;width:100%;height:100%;border:0}#agent-layer{z-index:2;pointer-events:none}.agent-pointer{opacity:0}.agent-pointer.visible{opacity:1}.agent-ring{fill:none;stroke:#b8e34a;stroke-width:4;opacity:0;vector-effect:non-scaling-stroke;transform-box:fill-box;transform-origin:center}.agent-pointer.pulse .agent-ring{animation:agent-ring 620ms ease-out}.agent-ring-second{opacity:0}.agent-pointer.double_click.pulse .agent-ring-second{animation:agent-ring-second 620ms ease-out}.agent-pointer.right_click .agent-ring{stroke-dasharray:4 3}.agent-cursor{fill:#b8e34a;stroke:#17200a;stroke-width:2;paint-order:stroke;vector-effect:non-scaling-stroke;filter:drop-shadow(0 1px 2px #000)}@keyframes agent-ring{0%{transform:scale(.35);opacity:1}100%{transform:scale(1.45);opacity:0}}@keyframes agent-ring-second{10%{transform:scale(.35);opacity:1}100%{transform:scale(1.9);opacity:0}}@media(prefers-reduced-motion:reduce){.agent-pointer.pulse .agent-ring,.agent-pointer.double_click.pulse .agent-ring-second{animation:none}}
+html,body{height:100%;margin:0;background:#111;color:#eee;font:14px system-ui}body{display:grid;grid-template-rows:auto 1fr}header{display:flex;align-items:center;gap:.75rem;padding:.55rem .8rem;background:#1d1d1d;flex-wrap:wrap}button{padding:.4rem .7rem}#state{opacity:.85}#policy,#profile-durability{flex-basis:100%;font-size:.85rem;opacity:.7}#stage{position:relative;min-height:0;overflow:hidden}iframe,#agent-layer{position:absolute;inset:0;width:100%;height:100%;border:0}#agent-layer{z-index:2;pointer-events:none}.agent-pointer{opacity:0}.agent-pointer.visible{opacity:1}.agent-ring{fill:none;stroke:#b8e34a;stroke-width:4;opacity:0;vector-effect:non-scaling-stroke;transform-box:fill-box;transform-origin:center}.agent-pointer.pulse .agent-ring{animation:agent-ring 620ms ease-out}.agent-ring-second{opacity:0}.agent-pointer.double_click.pulse .agent-ring-second{animation:agent-ring-second 620ms ease-out}.agent-pointer.right_click .agent-ring{stroke-dasharray:4 3}.agent-cursor{fill:#b8e34a;stroke:#17200a;stroke-width:2;paint-order:stroke;vector-effect:non-scaling-stroke;filter:drop-shadow(0 1px 2px #000)}@keyframes agent-ring{0%{transform:scale(.35);opacity:1}100%{transform:scale(1.45);opacity:0}}@keyframes agent-ring-second{10%{transform:scale(.35);opacity:1}100%{transform:scale(1.9);opacity:0}}@media(prefers-reduced-motion:reduce){.agent-pointer.pulse .agent-ring,.agent-pointer.double_click.pulse .agent-ring-second{animation:none}}
 </style></head>
-<body><header><strong>${escapeHtml(name)}</strong><button id="take">Take control</button><button id="release">Release control</button><button id="agent-toggle" type="button" aria-pressed="true">Agent pointer: on</button><span id="state">Observer mode</span><span id="policy">Take control stops agent commands. Desktop-session applications and the managed browser stay open. Closing this viewer releases control after 10 seconds.</span></header>
+<body><header><strong>${escapeHtml(name)}</strong><button id="take">Take control</button><button id="release">Release control</button><button id="agent-toggle" type="button" aria-pressed="true">Agent pointer: on</button><span id="state">Observer mode</span><span id="policy">Take control stops agent commands. Desktop-session applications and the managed browser stay open. Closing this viewer releases control after 10 seconds.</span><span id="profile-durability">Chromium profile data is durable and survives restarts and upgrades.</span></header>
 <main id="stage"><iframe id="desktop" src="/computers/${id}/view/vnc.html?autoconnect=true&resize=scale&view_only=true&path=${vncPath}" allow="clipboard-read; clipboard-write"></iframe><svg id="agent-layer" aria-hidden="true"><g id="agent-pointer" class="agent-pointer"><circle class="agent-ring" cx="0" cy="0" r="15"></circle><circle class="agent-ring agent-ring-second" cx="0" cy="0" r="15"></circle><path class="agent-cursor" d="M0 0 28 17 17 21 12 34Z"></path></g></svg></main>
 <script nonce="${nonce}">
 const mapViewerPointerToCanvas=(${mapViewerPointerToCanvas.toString()});

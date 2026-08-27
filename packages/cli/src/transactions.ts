@@ -16,8 +16,10 @@ import {
   ensureSystemImages,
   reconnectComputerAfterGateway,
   removeComputerRuntime,
+  reconcileRuntimeImageContracts,
   startComputerAfterGateway,
   startGateway,
+  verifyGatewayCompatibility,
   validateDocker,
   waitForGatewayComputerIfRunning,
   waitForGatewayRemoval,
@@ -44,9 +46,11 @@ export interface TransactionPlan {
 }
 
 export interface TransactionRuntime {
+  reconcileContracts(state: LoadedState): Promise<void>;
   validate(): Promise<void>;
   ensureImages(state: LoadedState): Promise<void>;
   startGateway(state: LoadedState): Promise<void>;
+  verifyGateway(state: LoadedState): Promise<void>;
   reconnect(state: LoadedState, computer: ComputerConfig): Promise<void>;
   waitForRemoval(state: LoadedState, id: string): Promise<void>;
   remove(state: LoadedState, id: string): Promise<void>;
@@ -61,9 +65,11 @@ export interface TransactionOptions {
 }
 
 export const defaultTransactionRuntime: TransactionRuntime = {
+  reconcileContracts: reconcileRuntimeImageContracts,
   validate: async () => { await validateDocker(); },
   ensureImages: (state) => ensureSystemImages(state, true),
   startGateway,
+  verifyGateway: verifyGatewayCompatibility,
   reconnect: reconnectComputerAfterGateway,
   waitForRemoval: waitForGatewayRemoval,
   remove: removeComputerRuntime,
@@ -135,6 +141,12 @@ export async function recoverPendingTransaction(paths: StatePaths, options: Tran
     config: structuredClone(transaction.config),
     secrets: structuredClone(transaction.secrets),
   };
+  const runtime = options.runtime ?? defaultTransactionRuntime;
+
+  // Rendering is the first point at which a missing cache used to become an
+  // implicit legacy viewer. Reconcile from immutable image/container evidence
+  // before any durable state or runtime document is changed during recovery.
+  await runtime.reconcileContracts(state);
 
   if (transaction.phase === 'prepared') {
     if (!(await realDirectoryExists(paths.computers)) || !(await realDirectoryExists(paths.trash))) {
@@ -154,7 +166,7 @@ export async function recoverPendingTransaction(paths: StatePaths, options: Tran
   }
 
   if (!(options.includeRuntime ?? true) && transactionHasRuntimeWork(transaction)) return true;
-  await completeRuntime(state, transaction, options.runtime ?? defaultTransactionRuntime, options);
+  await completeRuntime(state, transaction, runtime, options);
   await checkpoint('runtime-committed', transaction, options);
   await durableRemove(paths.journal);
   return true;
@@ -313,10 +325,15 @@ async function completeRuntime(
   }
   if (transaction.runtime.ensureImages) {
     await runtime.ensureImages(state);
+    // Image inspection records the content-ID-bound viewer contract. Render
+    // again before any runtime mutation so recovery cannot start a hardened
+    // computer from the legacy route produced before image acquisition.
+    await renderRuntime(state);
     await checkpoint('images-ready', transaction, options);
   }
   if (transaction.runtime.startGateway || effectiveReconnectIds(transaction).length > 0 || transaction.runtime.replaceIds.length > 0 || transaction.runtime.startIds.length > 0) {
     await runtime.startGateway(state);
+    await runtime.verifyGateway(state);
     await checkpoint('gateway-ready', transaction, options);
   }
   for (const id of transaction.runtime.removeIds) {

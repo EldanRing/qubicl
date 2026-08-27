@@ -83,6 +83,8 @@ FROM filesystem-base AS display-browser-base
 COPY --chown=qubicl:qubicl node_modules/playwright-core /opt/qubicl/node_modules/playwright-core
 COPY PLAYWRIGHT_THIRD_PARTY_NOTICES.txt /usr/share/doc/qubicl/
 COPY chromium-wrapper.sh /usr/local/bin/qubicl-chromium
+COPY --chown=root:root qubicl_viewer_auth.py /usr/lib/python3/dist-packages/qubicl_viewer_auth.py
+COPY x11vnc-relay.sh /usr/local/bin/qubicl-x11vnc-relay
 
 # noVNC is static browser content at runtime. Extract Debian's signed package
 # without installing its unnecessary dependency on Debian's second Node stack.
@@ -92,6 +94,7 @@ RUN apt-get update \
       dbus-x11 \
       fonts-dejavu-core \
       scrot \
+      socat \
       websockify \
       x11-utils \
       x11-xserver-utils \
@@ -110,7 +113,14 @@ RUN apt-get update \
  && test -s /usr/share/doc/novnc/copyright \
  && rm -rf /tmp/qubicl-novnc-package /var/lib/apt/lists/* \
  && rm -f /etc/chromium.d/dev-shm \
- && chmod 0755 /usr/local/bin/qubicl-chromium \
+ && groupadd --system qubicl-viewer \
+ && useradd --system --gid qubicl-viewer --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin qubicl-viewer \
+ && chmod 0444 /usr/lib/python3/dist-packages/qubicl_viewer_auth.py \
+ && chmod 0755 /usr/local/bin/qubicl-chromium /usr/local/bin/qubicl-x11vnc-relay \
+ && ln -s qubicl-x11vnc-relay /usr/local/bin/qubicl-x11vnc-view \
+ && ln -s qubicl-x11vnc-relay /usr/local/bin/qubicl-x11vnc-control \
+ && python3 -I -c 'import qubicl_viewer_auth; assert qubicl_viewer_auth.__file__ == "/usr/lib/python3/dist-packages/qubicl_viewer_auth.py"' \
+ && runuser -u qubicl -- test ! -w /usr/lib/python3/dist-packages/qubicl_viewer_auth.py \
  && printf 'CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-first-run --no-default-browser-check"\n' >/etc/chromium.d/qubicl-container
 
 FROM display-browser-base AS document-inspection-base
@@ -195,11 +205,13 @@ ARG QUBICL_CONTRACT_PRESET
 ARG QUBICL_CONTRACT_COMPATIBILITY
 ARG QUBICL_CONTRACT_CAPABILITIES
 COPY --chown=qubicl:qubicl manifests/browser.json /opt/qubicl/computer-manifest.json
-ENV QUBICL_IMAGE_STARTUP_PROFILE=browser
+ENV QUBICL_IMAGE_STARTUP_PROFILE=browser \
+    QUBICL_IMAGE_VIEWER_AUTHENTICATION=header-v1
 LABEL dev.qubicl.contract-version="1" \
       dev.qubicl.preset="$QUBICL_CONTRACT_PRESET" \
       dev.qubicl.compatibility="$QUBICL_CONTRACT_COMPATIBILITY" \
       dev.qubicl.capabilities="$QUBICL_CONTRACT_CAPABILITIES" \
+      dev.qubicl.viewer-authentication="header-v1" \
       dev.qubicl.manifest-sha256="$QUBICL_MANIFEST_SHA256"
 EXPOSE 3212 6080 6081
 
@@ -209,11 +221,13 @@ ARG QUBICL_CONTRACT_PRESET
 ARG QUBICL_CONTRACT_COMPATIBILITY
 ARG QUBICL_CONTRACT_CAPABILITIES
 COPY --chown=qubicl:qubicl manifests/computer.json /opt/qubicl/computer-manifest.json
-ENV QUBICL_IMAGE_STARTUP_PROFILE=desktop
+ENV QUBICL_IMAGE_STARTUP_PROFILE=desktop \
+    QUBICL_IMAGE_VIEWER_AUTHENTICATION=header-v1
 LABEL dev.qubicl.contract-version="1" \
       dev.qubicl.preset="$QUBICL_CONTRACT_PRESET" \
       dev.qubicl.compatibility="$QUBICL_CONTRACT_COMPATIBILITY" \
       dev.qubicl.capabilities="$QUBICL_CONTRACT_CAPABILITIES" \
+      dev.qubicl.viewer-authentication="header-v1" \
       dev.qubicl.manifest-sha256="$QUBICL_MANIFEST_SHA256"
 EXPOSE 3212 6080 6081
 
@@ -223,10 +237,12 @@ ARG QUBICL_CONTRACT_PRESET
 ARG QUBICL_CONTRACT_COMPATIBILITY
 ARG QUBICL_CONTRACT_CAPABILITIES
 COPY --chown=qubicl:qubicl manifests/workstation.json /opt/qubicl/computer-manifest.json
-ENV QUBICL_IMAGE_STARTUP_PROFILE=workstation
+ENV QUBICL_IMAGE_STARTUP_PROFILE=workstation \
+    QUBICL_IMAGE_VIEWER_AUTHENTICATION=header-v1
 LABEL dev.qubicl.contract-version="1" \
       dev.qubicl.preset="$QUBICL_CONTRACT_PRESET" \
       dev.qubicl.compatibility="$QUBICL_CONTRACT_COMPATIBILITY" \
       dev.qubicl.capabilities="$QUBICL_CONTRACT_CAPABILITIES" \
+      dev.qubicl.viewer-authentication="header-v1" \
       dev.qubicl.manifest-sha256="$QUBICL_MANIFEST_SHA256"
 EXPOSE 3212 6080 6081

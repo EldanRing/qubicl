@@ -706,7 +706,16 @@ export function reconcileManifest(config: QubiclConfig, manifest: QubiclManifest
   const updates = manifest.computers.filter((declared) => {
     const current = config.computers.find(({ name }) => name === declared.name);
     if (!current) return false;
-    const comparable = ({ name, preset, compatibility, image, capabilityContractVersion, capabilities, cpus, memory }: typeof declared) => ({ name, preset, compatibility, image, capabilityContractVersion, capabilities, cpus, memory });
+    const comparable = ({ name, preset, compatibility, image, capabilityContractVersion, capabilities, cpus, memory }: typeof declared) => ({
+      name,
+      preset,
+      compatibility,
+      image,
+      capabilityContractVersion,
+      capabilities,
+      cpus,
+      memory,
+    });
     return JSON.stringify(comparable(current)) !== JSON.stringify(comparable(declared));
   });
   const trashes = prune ? config.computers.filter(({ name }) => !names.has(name)) : [];

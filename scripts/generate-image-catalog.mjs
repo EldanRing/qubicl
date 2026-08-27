@@ -64,6 +64,7 @@ const catalog = ImageCatalogSchema.parse({
       description: definition.description,
       capabilities: definition.capabilities,
       viewer: definition.viewer,
+      ...(definition.viewerAuthentication ? { viewerAuthentication: definition.viewerAuthentication } : {}),
       manifestSha256: manifestSha256(buildComputerManifest(preset, options.version, options.revision)),
       image: imageEntry(preset),
       recommendedCpus: definition.cpus,

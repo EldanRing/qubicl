@@ -32,6 +32,14 @@ test('configuration validation rejects unsafe names and limits', () => {
   assert.throws(() => ConfigSchema.parse({ ...config, gateway: { ...config.gateway, port: 70000 } }));
   const duplicate = computer(config, '00000000-0000-4000-8000-000000000001', 'same');
   assert.throws(() => ConfigSchema.parse({ ...config, computers: [duplicate, duplicate] }), /unique/);
+  assert.throws(() => ConfigSchema.parse({
+    ...config,
+    defaults: { ...config.defaults, viewerAuthentication: 'header-v1' },
+  }), /unrecognized key/i);
+  assert.throws(() => ConfigSchema.parse({
+    ...config,
+    computers: [{ ...duplicate, viewerAuthentication: 'header-v1' }],
+  }), /unrecognized key/i);
 });
 
 test('daily-driver policy schemas reject credential, environment, and network boundary escapes', () => {

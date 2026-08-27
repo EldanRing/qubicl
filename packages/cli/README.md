@@ -132,7 +132,10 @@ Observation is passive. **Take control** fences agent tools and terminates its
 ordinary managed commands before handing you the keyboard and mouse. Persistent
 browser and managed desktop applications remain visible so you can continue the
 same task. Qubicl's green pointer shows the agent's latest desktop or browser
-position in the viewer.
+position in the viewer. The viewer states that Chromium's profile is durable
+across restarts and upgrades. Current viewer images also require a
+gateway-injected internal credential for noVNC files and WebSocket traffic and
+expose no raw TCP VNC listener.
 
 ## Security boundary
 

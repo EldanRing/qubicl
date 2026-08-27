@@ -53,12 +53,14 @@ import {
   legacyRuntimeMigrationNeeded,
   migrateLegacyRuntime,
   prepareRuntimeMigration,
+  reconcileRuntimeImageContracts,
   portAvailable,
   run,
   startComputer,
   startComputerPreservingRuntimeAfterGateway,
   startGateway,
   validateDocker,
+  verifyGatewayCompatibility,
   waitForGatewayComputer,
   waitForHealthy,
 } from './docker.js';
@@ -258,7 +260,6 @@ async function up(): Promise<void> {
   await withStateLock(paths, async () => {
     const state = await loadState(paths);
     await validateDocker();
-    await renderRuntime(state);
     const runtimes = await Promise.all(state.config.computers.map(async (computer) => ({
       computer,
       runtime: await containerStatus(state, computer.id),
@@ -266,7 +267,9 @@ async function up(): Promise<void> {
     // `up` still starts every configured computer, but retained containers do
     // not need their original image object merely to start again.
     await ensureRuntimeImages(state, runtimes.filter(({ runtime }) => runtime.status === 'absent').map(({ computer }) => computer));
+    await renderRuntime(state);
     await startGateway(state);
+    await verifyGatewayCompatibility(state);
     for (const computer of state.config.computers) {
       await startComputerPreservingRuntimeAfterGateway(state, computer);
     }
@@ -702,8 +705,8 @@ async function start(name: string): Promise<void> {
     await validateDocker();
     const computer = findComputer(state, name);
     const runtime = await containerStatus(state, computer.id);
-    await renderRuntime(state);
     await ensureRuntimeImages(state, runtime.status === 'absent' ? [computer] : []);
+    await renderRuntime(state);
     await startComputer(state, computer);
     await synchronizeStartedSkillPolicies(state, [computer]);
     console.log(`Started ${computer.name}.`);
@@ -732,11 +735,12 @@ async function restart(name: string): Promise<void> {
     if (runtime.status === 'absent') {
       throw new Error(`Computer ${computer.name} has no retained runtime to restart. Use qubicl start ${computer.name}; recreating it requires its exact pinned image ${computer.image.resolved}.`);
     }
-    await renderRuntime(state);
     // Docker can restart an existing container from its retained snapshot even
     // when its original image object can no longer be used to recreate it.
     await ensureRuntimeImages(state, []);
+    await renderRuntime(state);
     await startGateway(state);
+    await verifyGatewayCompatibility(state);
     const expected = computerRuntimeContainerNames(state, computer);
     const existing = await existingComputerRuntimeContainers(state, computer);
     if (existing.length === expected.length) await docker(['restart', ...existing]);
@@ -797,6 +801,9 @@ async function renameComputer(oldName: string, newName: string): Promise<void> {
     if (state.config.computers.some(({ name, id }) => name === newName && id !== computer.id)) throw new Error(`Computer name ${newName} is already in use.`);
     const friendlyRuntime = isPrimaryRuntimeRoot(state.paths.root);
     if (friendlyRuntime && newName === 'gateway') throw new Error('Computer name gateway is reserved by the primary Qubicl runtime.');
+    // Recover against the retained old-name container before the primary
+    // namespace migration changes its lookup name.
+    if (friendlyRuntime) await reconcileRuntimeImageContracts(state);
     computer.name = newName;
     if (friendlyRuntime) computer.runtimeName = newName;
     if (friendlyRuntime) await prepareRuntimeMigration(state);
@@ -1038,6 +1045,7 @@ async function prepareStateBeforeCommand(command: string | undefined, args: Pars
         await validateDocker();
         await prepareStateDirectories(paths);
         const captureState = await loadState(paths).catch(() => pendingState);
+        await reconcileRuntimeImageContracts(captureState);
         await prepareRuntimeMigration(captureState);
       }
       await recoverPendingTransaction(paths, { includeRuntime: false });
@@ -1050,7 +1058,10 @@ async function prepareStateBeforeCommand(command: string | undefined, args: Pars
     const legacyRuntimePending = await legacyRuntimeMigrationNeeded(state);
     if (migrateRuntime && (initialized || recoveredMigration || legacyRuntimePending)) {
       await validateDocker();
-      if (legacyRuntimePending) await prepareRuntimeMigration(state);
+      if (legacyRuntimePending) {
+        await reconcileRuntimeImageContracts(state);
+        await prepareRuntimeMigration(state);
+      }
       await renderRuntime(state);
       await migrateLegacyRuntime(state);
     }

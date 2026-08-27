@@ -6,13 +6,17 @@ import { createServer } from 'node:net';
 import YAML from 'yaml';
 import {
   ComputerManifestSchema,
+  GATEWAY_PROTOCOL_VERSION,
   IMAGE_CATALOG,
   MIN_DOCKER_COMPOSE_VERSION,
   MIN_DOCKER_ENGINE_VERSION,
   QUBICL_BUILD,
+  RuntimeRoutesSchema,
+  VIEWER_AUTHENTICATION_HEADER_V1,
   capabilitiesForCompatibility,
   manifestSha256,
   normalizeDockerPlatform,
+  viewerForCapabilities,
   versionAtLeast,
   type ComputerConfig,
   type ComputerManifest,
@@ -20,10 +24,11 @@ import {
   type ImageCatalog,
   type ImageIdentity,
   type Preset,
+  type ViewerAuthentication,
 } from '@qubicl/core';
 import { atomicWrite, durableRemove, type LoadedState } from './state.js';
 import { packagedAssetsPath } from './assets.js';
-import { COMPUTER_RUNTIME_TOPOLOGY_VERSION, LEGACY_SPLIT_CONTROL_PROTOCOL_VERSION, computerContainerName, computerEgressServiceName, computerExecutorServiceName, computerRuntimeContainerNames, computerServiceName, computerSessionServiceName, computerWebServiceName, containerName, controlNetwork, displaySocketVolume, gatewayContainerName, gatewayNetworkName, hostIdentity, projectName, runtimeImageReference, serviceName, usesUnifiedComputerRuntime, workspaceNetwork } from './runtime.js';
+import { COMPUTER_RUNTIME_TOPOLOGY_VERSION, LEGACY_SPLIT_CONTROL_PROTOCOL_VERSION, LEGACY_VIEWER_AUTHENTICATION, computerContainerName, computerEgressServiceName, computerExecutorServiceName, computerRuntimeContainerNames, computerServiceName, computerSessionServiceName, computerWebServiceName, containerName, controlNetwork, displaySocketVolume, gatewayContainerName, gatewayNetworkName, hostIdentity, projectName, readRuntimeImageContracts, recordRuntimeImageContracts, runtimeImageReference, serviceName, usesUnifiedComputerRuntime, workspaceNetwork, type RuntimeImageContract, type RuntimeImageContractsDocument } from './runtime.js';
 
 export interface RunOptions {
   cwd?: string;
@@ -73,8 +78,9 @@ interface NamedRuntimeMigration {
 type RuntimeMigration = LegacyRuntimeMigration | NamedRuntimeMigration;
 
 export interface RuntimeInspection {
+  Image?: string;
   State?: { Status?: string };
-  Config?: { Labels?: Record<string, string> | null };
+  Config?: { Labels?: Record<string, string> | null; Env?: string[] | null };
   Mounts?: Array<{ Source?: string; Destination?: string }>;
 }
 
@@ -104,6 +110,29 @@ export interface InspectedComputerImage {
   identity: ImageIdentity;
   manifest: ComputerManifest;
   labels: Record<string, string>;
+  compatibility: RuntimeImageCompatibility;
+}
+
+export interface RuntimeImageCompatibility {
+  contentId?: `sha256:${string}`;
+  gatewayProtocolVersion?: number;
+  viewerAuthentication?: ViewerAuthentication;
+}
+
+export interface RuntimeImageContractImageInspection {
+  id: `sha256:${string}`;
+  labels: Readonly<Record<string, string>>;
+  env: readonly string[];
+}
+
+export interface RuntimeImageContractEvidenceAdapter {
+  inspectContainer(name: string): Promise<RuntimeInspection | undefined>;
+  inspectImage(contentId: `sha256:${string}`): Promise<RuntimeImageContractImageInspection | undefined>;
+}
+
+export interface InspectedGatewayImage {
+  identity: ImageIdentity;
+  compatibility: RuntimeImageCompatibility;
 }
 
 export interface AcquireOptions {
@@ -816,11 +845,11 @@ export async function buildSystemImages(presets: readonly Preset[] = ['file-syst
     throw new Error('Image build-system is available only in a Qubicl source-development build. Release images are obtained from the exact signed catalog.');
   }
   await buildBundledGateway(IMAGE_CATALOG.gateway.requested, stderr);
-  await inspectGatewayImage(IMAGE_CATALOG.gateway.requested);
+  await inspectGatewayImage(IMAGE_CATALOG.gateway.requested, IMAGE_CATALOG.gateway.requested, VIEWER_AUTHENTICATION_HEADER_V1);
   for (const preset of presets) {
     const contract = IMAGE_CATALOG.presets[preset];
     await buildBundledPreset(preset, contract.image.requested, stderr);
-    await inspectComputerImage(contract.image.requested, contract.image.requested, contract.manifestSha256, preset);
+    await inspectComputerImage(contract.image.requested, contract.image.requested, contract.manifestSha256, preset, contract.viewerAuthentication);
   }
 }
 
@@ -870,7 +899,7 @@ export async function acquireCatalogGateway(options: AcquireOptions = {}): Promi
   const variant = catalog.gateway.platforms[platform];
   if (!variant) throw new Error(`Gateway image is unavailable for ${platform}.`);
   await obtainImage(catalog.gateway.requested, variant.resolved, { ...options, kind: 'gateway' });
-  return inspectGatewayImage(catalog.gateway.requested, variant.resolved);
+  return inspectGatewayImage(catalog.gateway.requested, variant.resolved, VIEWER_AUTHENTICATION_HEADER_V1);
 }
 
 export async function acquireCatalogPreset(preset: Preset, options: AcquireOptions = {}): Promise<InspectedComputerImage> {
@@ -881,7 +910,7 @@ export async function acquireCatalogPreset(preset: Preset, options: AcquireOptio
   if (!variant) throw new Error(`Preset ${preset} is unavailable for ${platform}.`);
   await obtainImage(entry.image.requested, variant.resolved, { ...options, kind: 'preset', preset });
   try {
-    return await inspectComputerImage(entry.image.requested, variant.resolved, entry.manifestSha256, preset);
+    return await inspectComputerImage(entry.image.requested, variant.resolved, entry.manifestSha256, preset, entry.viewerAuthentication);
   } catch (error) {
     throw developmentImageMismatchError(error, entry.image.requested, catalog);
   }
@@ -932,13 +961,49 @@ async function obtainImage(requested: string, resolved: string, options: ObtainO
   await docker(['pull', resolved], options.stderr ? { stderr: true } : { inherit: true });
 }
 
-export async function inspectGatewayImage(requested: string, reference = requested): Promise<ImageIdentity> {
+export async function inspectGatewayImage(
+  requested: string,
+  reference = requested,
+  expectedViewerAuthentication?: ViewerAuthentication,
+): Promise<ImageIdentity> {
+  return (await inspectGatewayImageContract(requested, reference, expectedViewerAuthentication)).identity;
+}
+
+export async function inspectGatewayImageContract(
+  requested: string,
+  reference = requested,
+  expectedViewerAuthentication?: ViewerAuthentication,
+): Promise<InspectedGatewayImage> {
   const inspection = await rawImageInspection(reference);
+  const compatibility = gatewayCompatibilityFromLabels(requested, inspection.labels, expectedViewerAuthentication);
   return {
-    requested,
-    resolved: resolveRepositoryDigest(requested, reference, inspection.repoDigests),
-    contentId: inspection.id,
+    identity: {
+      requested,
+      resolved: resolveRepositoryDigest(requested, reference, inspection.repoDigests),
+      contentId: inspection.id,
+    },
+    compatibility: { contentId: inspection.id, ...compatibility },
   };
+}
+
+export function gatewayCompatibilityFromLabels(
+  reference: string,
+  labels: Readonly<Record<string, string>>,
+  expectedViewerAuthentication?: ViewerAuthentication,
+): RuntimeImageCompatibility {
+  const rawProtocol = labels['dev.qubicl.gateway-protocol-version'];
+  const rawAuthentication = labels['dev.qubicl.viewer-authentication'];
+  if (rawProtocol === undefined && rawAuthentication === undefined) {
+    if (expectedViewerAuthentication) throw new Error(`Gateway image ${reference} is missing its authenticated-viewer contract labels.`);
+    return {};
+  }
+  if (rawProtocol !== `${GATEWAY_PROTOCOL_VERSION}` || rawAuthentication !== VIEWER_AUTHENTICATION_HEADER_V1) {
+    throw new Error(`Gateway image ${reference} has an invalid authenticated-viewer contract (${JSON.stringify(rawProtocol)}, ${JSON.stringify(rawAuthentication)}).`);
+  }
+  if (expectedViewerAuthentication && rawAuthentication !== expectedViewerAuthentication) {
+    throw new Error(`Gateway image ${reference} viewer authentication is ${JSON.stringify(rawAuthentication)}; expected ${JSON.stringify(expectedViewerAuthentication)}.`);
+  }
+  return { gatewayProtocolVersion: GATEWAY_PROTOCOL_VERSION, viewerAuthentication: VIEWER_AUTHENTICATION_HEADER_V1 };
 }
 
 export async function inspectComputerImage(
@@ -946,6 +1011,7 @@ export async function inspectComputerImage(
   reference = requested,
   expectedManifestSha256?: string,
   expectedCompatibility?: Preset,
+  expectedViewerAuthentication?: ViewerAuthentication,
 ): Promise<InspectedComputerImage> {
   const inspection = await rawImageInspection(reference);
   const probeName = `qubicl-image-probe-${uniqueProbeSuffix()}`;
@@ -975,6 +1041,13 @@ export async function inspectComputerImage(
   if (bakedStartupProfile !== manifest.startupProfile) {
     throw new Error(`Image ${requested} bakes startup profile ${JSON.stringify(bakedStartupProfile)}; expected ${JSON.stringify(manifest.startupProfile)}.`);
   }
+  const viewerAuthentication = computerViewerAuthentication(
+    requested,
+    inspection.labels,
+    inspection.env,
+    manifest.viewer,
+    expectedViewerAuthentication,
+  );
   return {
     identity: {
       requested,
@@ -984,7 +1057,30 @@ export async function inspectComputerImage(
     },
     manifest,
     labels: inspection.labels,
+    compatibility: { contentId: inspection.id, ...(viewerAuthentication ? { viewerAuthentication } : {}) },
   };
+}
+
+export function computerViewerAuthentication(
+  reference: string,
+  labels: Readonly<Record<string, string>>,
+  environment: readonly string[],
+  viewer: boolean,
+  expected?: ViewerAuthentication,
+): ViewerAuthentication | undefined {
+  const label = labels['dev.qubicl.viewer-authentication'];
+  const baked = imageEnvironmentValue(environment, 'QUBICL_IMAGE_VIEWER_AUTHENTICATION');
+  if (label === undefined && baked === undefined) {
+    if (expected) throw new Error(`Image ${reference} is missing its authenticated-viewer image contract.`);
+    return undefined;
+  }
+  if (!viewer || label !== VIEWER_AUTHENTICATION_HEADER_V1 || baked !== VIEWER_AUTHENTICATION_HEADER_V1) {
+    throw new Error(`Image ${reference} has a mismatched authenticated-viewer image contract (${JSON.stringify(label)}, ${JSON.stringify(baked)}).`);
+  }
+  if (expected && label !== expected) {
+    throw new Error(`Image ${reference} viewer authentication is ${JSON.stringify(label)}; expected ${JSON.stringify(expected)}.`);
+  }
+  return VIEWER_AUTHENTICATION_HEADER_V1;
 }
 
 function validateComputerLabels(reference: string, labels: Record<string, string>, manifest: ComputerManifest, digest: string): void {
@@ -1042,7 +1138,200 @@ export type StoredImageEnsurer = (
   kind: 'gateway' | 'computer',
   compatibility: Preset | undefined,
   offline: boolean,
-) => Promise<void>;
+) => Promise<RuntimeImageCompatibility>;
+
+interface ConfiguredViewerContracts {
+  byComputerId: Map<string, RuntimeImageContract>;
+  recovered: RuntimeImageContract[];
+}
+
+function computerContractFromCompatibility(compatibility: RuntimeImageCompatibility): RuntimeImageContract | undefined {
+  if (!compatibility.contentId) return undefined;
+  return {
+    kind: 'computer',
+    contentId: compatibility.contentId,
+    viewerAuthentication: compatibility.viewerAuthentication ?? LEGACY_VIEWER_AUTHENTICATION,
+  };
+}
+
+function gatewayContractFromCompatibility(compatibility: RuntimeImageCompatibility): RuntimeImageContract | undefined {
+  if (!compatibility.contentId) return undefined;
+  if (compatibility.viewerAuthentication === undefined && compatibility.gatewayProtocolVersion === undefined) {
+    return {
+      kind: 'gateway',
+      contentId: compatibility.contentId,
+      viewerAuthentication: LEGACY_VIEWER_AUTHENTICATION,
+    };
+  }
+  if (compatibility.viewerAuthentication !== VIEWER_AUTHENTICATION_HEADER_V1
+    || compatibility.gatewayProtocolVersion !== GATEWAY_PROTOCOL_VERSION) {
+    throw new Error(`Gateway image ${compatibility.contentId} has an inconsistent runtime viewer contract.`);
+  }
+  return {
+    kind: 'gateway',
+    contentId: compatibility.contentId,
+    viewerAuthentication: VIEWER_AUTHENTICATION_HEADER_V1,
+    gatewayProtocolVersion: GATEWAY_PROTOCOL_VERSION,
+  };
+}
+
+function computerContractFromEvidence(
+  computer: ComputerConfig,
+  contentId: `sha256:${string}`,
+  labels: Readonly<Record<string, string>>,
+  environment: readonly string[],
+): RuntimeImageContract {
+  const viewerAuthentication = computerViewerAuthentication(
+    `${computer.image.resolved} (${contentId})`,
+    labels,
+    environment,
+    viewerForCapabilities(computer.capabilities),
+  );
+  return {
+    kind: 'computer',
+    contentId,
+    viewerAuthentication: viewerAuthentication ?? LEGACY_VIEWER_AUTHENTICATION,
+  };
+}
+
+async function recoverComputerImageContract(
+  state: LoadedState,
+  computer: ComputerConfig,
+  adapter: RuntimeImageContractEvidenceAdapter,
+): Promise<RuntimeImageContract> {
+  const contentId = computer.image.contentId as `sha256:${string}`;
+  const name = computerContainerName(state, computer);
+  const retained = await adapter.inspectContainer(name);
+  if (retained) {
+    verifyManagedComputer(state, computer.id, retained, name);
+    if (retained.Image !== contentId) {
+      throw new Error(`Retained computer ${computer.name} was created from ${retained.Image ?? 'an unknown image'}, not its configured content ID ${contentId}. Refusing to reconstruct its viewer contract.`);
+    }
+    return computerContractFromEvidence(
+      computer,
+      contentId,
+      retained.Config?.Labels ?? {},
+      retained.Config?.Env ?? [],
+    );
+  }
+
+  const image = await adapter.inspectImage(contentId);
+  if (!image) {
+    throw new Error(`Viewer image ${computer.image.resolved} for ${computer.name} has no verified runtime image contract, retained container, or locally inspectable exact image ${contentId}. Restore or reacquire the exact image before changing or starting this runtime.`);
+  }
+  if (image.id !== contentId) {
+    throw new Error(`Exact image evidence for ${computer.name} drifted from configured content ID ${contentId} to ${image.id}. Refusing to reconstruct its viewer contract.`);
+  }
+  return computerContractFromEvidence(computer, contentId, image.labels, image.env);
+}
+
+function gatewayContractFromEvidence(
+  contentId: `sha256:${string}`,
+  reference: string,
+  labels: Readonly<Record<string, string>>,
+): RuntimeImageContract {
+  return gatewayContractFromCompatibility({
+    contentId,
+    ...gatewayCompatibilityFromLabels(`${reference} (${contentId})`, labels),
+  })!;
+}
+
+async function recoverGatewayImageContract(
+  state: LoadedState,
+  adapter: RuntimeImageContractEvidenceAdapter,
+): Promise<RuntimeImageContract> {
+  const configuredContentId = state.config.gateway.image.contentId;
+  if (!configuredContentId) {
+    throw new Error(`Gateway image ${state.config.gateway.image.resolved} is not bound to a stored content ID. Upgrade the gateway before changing any authenticated viewer runtime.`);
+  }
+  const contentId = configuredContentId as `sha256:${string}`;
+  const name = gatewayContainerName(state.config.installationId, state.paths.root);
+  const retained = await adapter.inspectContainer(name);
+  if (retained) {
+    verifyManagedGateway(state, retained, name);
+    if (retained.Image !== contentId) {
+      throw new Error(`Retained gateway was created from ${retained.Image ?? 'an unknown image'}, not its configured content ID ${contentId}. Refusing to reconstruct its viewer contract.`);
+    }
+    return gatewayContractFromEvidence(contentId, state.config.gateway.image.resolved, retained.Config?.Labels ?? {});
+  }
+
+  const image = await adapter.inspectImage(contentId);
+  if (!image) {
+    throw new Error(`Gateway image ${state.config.gateway.image.resolved} has no verified runtime image contract, retained container, or locally inspectable exact image ${contentId}. Restore or reacquire the exact gateway before changing any authenticated viewer runtime.`);
+  }
+  if (image.id !== contentId) {
+    throw new Error(`Exact gateway image evidence drifted from configured content ID ${contentId} to ${image.id}. Refusing to reconstruct its viewer contract.`);
+  }
+  return gatewayContractFromEvidence(contentId, state.config.gateway.image.resolved, image.labels);
+}
+
+async function resolveConfiguredViewerContracts(
+  state: LoadedState,
+  cache: RuntimeImageContractsDocument,
+  overrides: ReadonlyMap<string, RuntimeImageContract>,
+  gatewayOverride: RuntimeImageContract | undefined,
+  adapter: RuntimeImageContractEvidenceAdapter,
+): Promise<ConfiguredViewerContracts> {
+  const byComputerId = new Map<string, RuntimeImageContract>();
+  const recovered: RuntimeImageContract[] = [];
+  for (const computer of state.config.computers) {
+    const contentId = computer.image.contentId;
+    if (!contentId || !viewerForCapabilities(computer.capabilities)) continue;
+    const override = overrides.get(contentId);
+    if (override) {
+      byComputerId.set(computer.id, override);
+      continue;
+    }
+    const cached = cache.images[contentId];
+    if (cached?.kind === 'computer') {
+      byComputerId.set(computer.id, cached);
+      continue;
+    }
+    const contract = await recoverComputerImageContract(state, computer, adapter);
+    byComputerId.set(computer.id, contract);
+    recovered.push(contract);
+  }
+  const authenticatedNames = state.config.computers
+    .filter((computer) => byComputerId.get(computer.id)?.viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1)
+    .map(({ name }) => name);
+  if (authenticatedNames.length) {
+    const configuredGatewayId = state.config.gateway.image.contentId;
+    const cachedGateway = configuredGatewayId ? cache.images[configuredGatewayId] : undefined;
+    const gatewayContract = gatewayOverride
+      ?? (cachedGateway?.kind === 'gateway' ? cachedGateway : await recoverGatewayImageContract(state, adapter));
+    if (gatewayContract.viewerAuthentication !== VIEWER_AUTHENTICATION_HEADER_V1
+      || gatewayContract.gatewayProtocolVersion !== GATEWAY_PROTOCOL_VERSION) {
+      throw new Error(`Gateway image ${state.config.gateway.image.resolved} cannot route authenticated viewers required by ${authenticatedNames.join(', ')}. Upgrade the gateway before changing any computer runtime.`);
+    }
+    if (!gatewayOverride && cachedGateway?.kind !== 'gateway') recovered.push(gatewayContract);
+  }
+  return { byComputerId, recovered };
+}
+
+function defaultRuntimeImageContractEvidenceAdapter(): RuntimeImageContractEvidenceAdapter {
+  return {
+    inspectContainer,
+    inspectImage: async (contentId) => {
+      if (!(await imageExists(contentId))) return undefined;
+      const inspection = await rawImageInspection(contentId);
+      return { id: inspection.id, labels: inspection.labels, env: inspection.env };
+    },
+  };
+}
+
+/**
+ * Repair only absent or wrong-kind viewer contracts from immutable Docker
+ * evidence. A valid content-ID-bound cache entry remains the normal fast path;
+ * malformed documents fail closed in readRuntimeImageContracts.
+ */
+export async function reconcileRuntimeImageContracts(
+  state: LoadedState,
+  adapter: RuntimeImageContractEvidenceAdapter = defaultRuntimeImageContractEvidenceAdapter(),
+): Promise<void> {
+  const cache = await readRuntimeImageContracts(state);
+  const resolved = await resolveConfiguredViewerContracts(state, cache, new Map(), undefined, adapter);
+  if (resolved.recovered.length) await recordRuntimeImageContracts(state, resolved.recovered);
+}
 
 /** Ensure the gateway and only the computers the caller intends to operate. */
 export async function ensureRuntimeImages(
@@ -1050,16 +1339,50 @@ export async function ensureRuntimeImages(
   computers: readonly ComputerConfig[],
   offline = false,
   ensure: StoredImageEnsurer = ensureStoredImage,
+  evidenceAdapter: RuntimeImageContractEvidenceAdapter = defaultRuntimeImageContractEvidenceAdapter(),
 ): Promise<void> {
-  await ensure(state.config.gateway.image, 'gateway', undefined, offline);
-  for (const computer of computers) await ensure(computer.image, 'computer', computer.compatibility, offline);
+  const gateway = await ensure(state.config.gateway.image, 'gateway', undefined, offline);
+  const inspectedComputers = await Promise.all(computers.map(async (computer) => ({
+    computer,
+    compatibility: await ensure(computer.image, 'computer', computer.compatibility, offline),
+  })));
+  if (gateway.viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1
+    && (!state.config.gateway.image.contentId || gateway.contentId !== state.config.gateway.image.contentId)) {
+    throw new Error(`Authenticated-viewer gateway ${state.config.gateway.image.resolved} is not bound to its stored content ID.`);
+  }
+  for (const { computer, compatibility } of inspectedComputers) {
+    if (compatibility.viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1
+      && (!computer.image.contentId || compatibility.contentId !== computer.image.contentId)) {
+      throw new Error(`Authenticated viewer image ${computer.image.resolved} is not bound to its stored content ID.`);
+    }
+  }
+  if (state.config.gateway.image.contentId && gateway.contentId !== state.config.gateway.image.contentId) {
+    throw new Error(`Gateway image ${state.config.gateway.image.resolved} drifted from stored content ID ${state.config.gateway.image.contentId} to ${gateway.contentId ?? 'an unknown image'}.`);
+  }
+  for (const { computer, compatibility } of inspectedComputers) {
+    if (computer.image.contentId && compatibility.contentId !== computer.image.contentId) {
+      throw new Error(`Computer image ${computer.image.resolved} drifted from stored content ID ${computer.image.contentId} to ${compatibility.contentId ?? 'an unknown image'}.`);
+    }
+  }
+
+  const cache = await readRuntimeImageContracts(state);
+  const selectedContracts = inspectedComputers
+    .map(({ compatibility }) => computerContractFromCompatibility(compatibility))
+    .filter((contract): contract is RuntimeImageContract => contract !== undefined);
+  const overrides = new Map(selectedContracts.map((contract) => [contract.contentId, contract]));
+  const gatewayContract = gatewayContractFromCompatibility(gateway);
+  const configuredContracts = await resolveConfiguredViewerContracts(state, cache, overrides, gatewayContract, evidenceAdapter);
+  const contracts: RuntimeImageContract[] = [];
+  if (gatewayContract) contracts.push(gatewayContract);
+  contracts.push(...selectedContracts, ...configuredContracts.recovered);
+  if (contracts.length) await recordRuntimeImageContracts(state, contracts);
 }
 
 export async function ensureSystemImages(state: LoadedState, includeComputers = true, offline = false): Promise<void> {
   await ensureRuntimeImages(state, includeComputers ? state.config.computers : [], offline);
 }
 
-async function ensureStoredImage(identity: ImageIdentity, kind: 'gateway' | 'computer', compatibility: Preset | undefined, offline: boolean): Promise<void> {
+async function ensureStoredImage(identity: ImageIdentity, kind: 'gateway' | 'computer', compatibility: Preset | undefined, offline: boolean): Promise<RuntimeImageCompatibility> {
   let reference = runtimeImageReference(identity, kind, compatibility);
   let available = await imageExists(reference);
   if (!available && reference !== identity.resolved && await imageExists(identity.resolved)) {
@@ -1077,9 +1400,9 @@ async function ensureStoredImage(identity: ImageIdentity, kind: 'gateway' | 'com
     }
   }
   if (kind === 'gateway') {
-    const current = await inspectGatewayImage(identity.requested, reference);
-    if (identity.contentId && identity.contentId !== current.contentId) throw new Error(`Gateway image ${identity.resolved} drifted from stored content ID ${identity.contentId} to ${current.contentId}.`);
-    return;
+    const current = await inspectGatewayImageContract(identity.requested, reference);
+    if (identity.contentId && identity.contentId !== current.identity.contentId) throw new Error(`Gateway image ${identity.resolved} drifted from stored content ID ${identity.contentId} to ${current.identity.contentId}.`);
+    return current.compatibility;
   }
   let current: InspectedComputerImage;
   try {
@@ -1091,6 +1414,10 @@ async function ensureStoredImage(identity: ImageIdentity, kind: 'gateway' | 'com
   if (identity.contentId && identity.contentId !== current.identity.contentId) {
     throw new Error(`Computer image ${identity.resolved} drifted from stored content ID ${identity.contentId} to ${current.identity.contentId}.`);
   }
+  if (current.compatibility.viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1 && !identity.contentId) {
+    throw new Error(`Authenticated viewer image ${identity.resolved} is not bound to a stored content ID. Explicitly upgrade or reacquire this computer image before starting it.`);
+  }
+  return current.compatibility;
 }
 
 async function rebuildStoredDevelopmentImage(
@@ -1224,6 +1551,31 @@ export async function startGateway(state: LoadedState): Promise<void> {
   await waitForContainerHealthy(gatewayContainerName(state.config.installationId, state.paths.root), 'Gateway');
 }
 
+export async function verifyGatewayCompatibility(state: LoadedState): Promise<void> {
+  const routes = RuntimeRoutesSchema.parse(JSON.parse(await readFile(state.paths.routes, 'utf8')));
+  if (routes.routes.some(({ viewerAuthentication }) => viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1)) {
+    const response = await fetch(`http://127.0.0.1:${state.config.gateway.port}/health`, { signal: AbortSignal.timeout(5_000) });
+    if (!response.ok) throw new Error(`Gateway capability check failed with HTTP ${response.status}.`);
+    assertGatewayHealthCompatibility(await response.json());
+  }
+  // Compose may recreate the shared gateway for an image, port, label, or
+  // binary-version change from any lifecycle command. Reattach every running
+  // computer after the capability gate; stopped computers remain untouched.
+  for (const computer of state.config.computers) {
+    if ((await containerStatus(state, computer.id)).status === 'running') {
+      await connectComputerToGateway(state, computer);
+    }
+  }
+}
+
+export function assertGatewayHealthCompatibility(value: unknown): void {
+  const health = value as { protocolVersion?: unknown; viewerAuthentication?: unknown } | null;
+  if (!health || health.protocolVersion !== GATEWAY_PROTOCOL_VERSION
+    || health.viewerAuthentication !== VIEWER_AUTHENTICATION_HEADER_V1) {
+    throw new Error(`Running gateway does not support authenticated viewer routing (expected protocol ${GATEWAY_PROTOCOL_VERSION} and ${VIEWER_AUTHENTICATION_HEADER_V1}).`);
+  }
+}
+
 export async function portAvailable(port: number, host = '127.0.0.1'): Promise<boolean> {
   return new Promise((resolvePromise) => {
     const server = createServer();
@@ -1243,6 +1595,7 @@ export async function assertGatewayPort(state: LoadedState): Promise<void> {
 
 export async function startComputer(state: LoadedState, computer: ComputerConfig): Promise<void> {
   await startGateway(state);
+  await verifyGatewayCompatibility(state);
   await startComputerPreservingRuntimeAfterGateway(state, computer);
 }
 

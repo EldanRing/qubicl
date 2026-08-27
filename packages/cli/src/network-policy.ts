@@ -1,7 +1,7 @@
 import { ConfigSchema, NetworkPolicySchema, NetworkProfileSchema, type ComputerConfig } from '@qubicl/core';
 import type { ParsedArgs } from './args.js';
 import { stringOption } from './args.js';
-import { containerStatus, ensureRuntimeImages, removeComputerRuntime, startComputerAfterGateway, startGateway, validateDocker } from './docker.js';
+import { containerStatus, ensureRuntimeImages, removeComputerRuntime, startComputerAfterGateway, startGateway, validateDocker, verifyGatewayCompatibility } from './docker.js';
 import { loadState, statePaths, withStateLock, type LoadedState } from './state.js';
 import { createStateTransaction, executeStateTransaction } from './transactions.js';
 import { usesUnifiedComputerRuntime } from './runtime.js';
@@ -70,6 +70,7 @@ async function commitPolicyChange(state: LoadedState, computer: ComputerConfig):
   });
   if (priorRuntime.status === 'running' || priorRuntime.status === 'restarting') {
     await startGateway(state);
+    await verifyGatewayCompatibility(state);
     await startComputerAfterGateway(state, computer);
   }
 }

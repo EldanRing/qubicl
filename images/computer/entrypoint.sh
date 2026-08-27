@@ -2,6 +2,10 @@
 set -euo pipefail
 
 runtime_role="${QUBICL_RUNTIME_ROLE:-control}"
+baked_viewer_authentication="${QUBICL_IMAGE_VIEWER_AUTHENTICATION:-legacy}"
+runtime_viewer_authentication="${QUBICL_VIEWER_AUTHENTICATION:-}"
+viewer_key_handoff="${QUBICL_VIEWER_KEY:-}"
+unset QUBICL_VIEWER_AUTHENTICATION QUBICL_VIEWER_KEY
 if [[ "$runtime_role" == egress || "$runtime_role" == web ]]; then
   exec node /opt/qubicl/control.mjs
 fi
@@ -61,6 +65,29 @@ if [[ "$requested_profile" != "$baked_profile" ]]; then
   exit 78
 fi
 
+unused_viewer_id() {
+  local database="$1" reserved="$2" candidate
+  for candidate in $(seq 60000 -1 59000); do
+    if [[ "$candidate" != "$reserved" ]] && ! getent "$database" "$candidate" >/dev/null; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  echo "Qubicl could not allocate an isolated viewer identity." >&2
+  exit 78
+}
+
+if [[ "$baked_profile" != file-system ]]; then
+  viewer_gid="$(id -g qubicl-viewer)"
+  if [[ "$viewer_gid" == "$target_gid" ]]; then
+    groupmod --gid "$(unused_viewer_id group "$target_gid")" qubicl-viewer
+  fi
+  viewer_uid="$(id -u qubicl-viewer)"
+  if [[ "$viewer_uid" == "$target_uid" ]]; then
+    usermod --uid "$(unused_viewer_id passwd "$target_uid")" qubicl-viewer
+  fi
+fi
+
 pids=()
 start_as_user() {
   user_network_env=()
@@ -76,6 +103,15 @@ start_as_user() {
     XDG_CACHE_HOME=/home/qubicl/.cache \
     XDG_RUNTIME_DIR=/tmp/qubicl-runtime \
     "${user_network_env[@]}" \
+    "$@" &
+  pids+=("$!")
+}
+
+start_as_viewer() {
+  runuser -u qubicl-viewer -- env -i \
+    HOME=/nonexistent USER=qubicl-viewer LOGNAME=qubicl-viewer SHELL=/usr/sbin/nologin \
+    PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+    DISPLAY="${DISPLAY:-:0}" \
     "$@" &
   pids+=("$!")
 }
@@ -216,15 +252,74 @@ start_display() {
   exit 1
 }
 
+prepare_viewer_runtime() {
+  install -d -m 0750 -o root -g qubicl-viewer /run/qubicl-viewer
+  install -d -m 0700 -o qubicl-viewer -g qubicl-viewer /run/qubicl-viewer/sockets
+  rm -f /run/qubicl-viewer/key
+  rm -f /run/qubicl-viewer/sockets/view.sock /run/qubicl-viewer/sockets/control.sock
+  case "$baked_viewer_authentication" in
+    legacy)
+      viewer_authentication=legacy
+      ;;
+    header-v1)
+      if [[ "$runtime_viewer_authentication" != header-v1 ]]; then
+        echo "Qubicl viewer authentication does not match the baked image contract." >&2
+        exit 78
+      fi
+      viewer_key="${viewer_key_handoff:?protected viewer key is missing}"
+      if [[ ! "$viewer_key" =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+        echo "Qubicl received malformed protected viewer authentication material." >&2
+        exit 78
+      fi
+      (umask 077; printf '%s\n' "$viewer_key" >/run/qubicl-viewer/key)
+      chown root:qubicl-viewer /run/qubicl-viewer/key
+      chmod 0640 /run/qubicl-viewer/key
+      unset viewer_key
+      ;;
+    *)
+      echo "Qubicl received an unsupported viewer authentication mode." >&2
+      exit 78
+      ;;
+  esac
+  unset runtime_viewer_authentication viewer_key_handoff
+}
+
 start_viewer() {
   runuser -u qubicl -- env DISPLAY="$DISPLAY" xset s off -dpms >/dev/null 2>&1 || true
-  start_as_user env DISPLAY="$DISPLAY" x11vnc -display "$DISPLAY" -forever -shared -viewonly -localhost -nopw -rfbport 5900 -o /tmp/x11vnc-view.log
-  start_as_user env DISPLAY="$DISPLAY" x11vnc -display "$DISPLAY" -forever -shared -localhost -nopw -rfbport 5901 -o /tmp/x11vnc-control.log
-  start_as_user websockify --web=/usr/share/novnc 6080 localhost:5900
-  start_as_user websockify 6081 localhost:5901
+  start_as_viewer socat \
+    UNIX-LISTEN:/run/qubicl-viewer/sockets/view.sock,fork,mode=0600 \
+    EXEC:/usr/local/bin/qubicl-x11vnc-view,nofork
+  start_as_viewer socat \
+    UNIX-LISTEN:/run/qubicl-viewer/sockets/control.sock,fork,mode=0600 \
+    EXEC:/usr/local/bin/qubicl-x11vnc-control,nofork
+  for _ in $(seq 1 100); do
+    if [[ -S /run/qubicl-viewer/sockets/view.sock && -S /run/qubicl-viewer/sockets/control.sock ]]; then break; fi
+    sleep 0.1
+  done
+  if [[ ! -S /run/qubicl-viewer/sockets/view.sock || ! -S /run/qubicl-viewer/sockets/control.sock ]]; then
+    echo "Qubicl viewer relays did not become ready." >&2
+    exit 1
+  fi
+  viewer_auth_args=()
+  viewer_web_auth_args=()
+  if [[ "$viewer_authentication" == header-v1 ]]; then
+    viewer_auth_args=(--auth-plugin=qubicl_viewer_auth.HeaderKeyAuth --auth-source=/run/qubicl-viewer/key)
+    viewer_web_auth_args=(--web-auth)
+  fi
+  start_as_viewer /usr/bin/python3 -I /usr/bin/websockify \
+    --web=/usr/share/novnc \
+    "${viewer_web_auth_args[@]}" \
+    "${viewer_auth_args[@]}" \
+    --unix-target=/run/qubicl-viewer/sockets/view.sock \
+    0.0.0.0:6080
+  start_as_viewer /usr/bin/python3 -I /usr/bin/websockify \
+    "${viewer_auth_args[@]}" \
+    --unix-target=/run/qubicl-viewer/sockets/control.sock \
+    0.0.0.0:6081
 }
 
 if [[ "$runtime_role" == session || "$runtime_role" == computer ]]; then
+if [[ "$baked_profile" != file-system ]]; then prepare_viewer_runtime; fi
 case "$baked_profile" in
   file-system)
     unset DISPLAY

@@ -257,6 +257,49 @@ test('ordinary computer startup never recursively rewrites a durable home', asyn
   assert.match(commands, /ownership-repair\.json/);
 });
 
+test('viewer images isolate raw VNC behind authenticated dedicated-user Unix relays', async () => {
+  const dockerfile = await readFile(join(root, 'images/computer/Dockerfile'), 'utf8');
+  const entrypoint = await readFile(join(root, 'images/computer/entrypoint.sh'), 'utf8');
+  const relay = await readFile(join(root, 'images/computer/x11vnc-relay.sh'), 'utf8');
+  const authentication = await readFile(join(root, 'images/computer/qubicl_viewer_auth.py'), 'utf8');
+  const builder = await readFile(join(root, 'scripts/build.mjs'), 'utf8');
+
+  assert.match(dockerfile, /^\s+socat \\$/m);
+  assert.match(dockerfile, /useradd --system --gid qubicl-viewer/);
+  assert.match(dockerfile, /COPY --chown=root:root qubicl_viewer_auth\.py \/usr\/lib\/python3\/dist-packages\/qubicl_viewer_auth\.py/);
+  assert.doesNotMatch(dockerfile, /COPY[^\n]*qubicl_viewer_auth\.py[^\n]*\/opt\/qubicl/);
+  assert.match(dockerfile, /python3 -I -c 'import qubicl_viewer_auth;/);
+  assert.match(dockerfile, /runuser -u qubicl -- test ! -w \/usr\/lib\/python3\/dist-packages\/qubicl_viewer_auth\.py/);
+  assert.match(dockerfile, /dev\.qubicl\.viewer-authentication="header-v1"/);
+  assert.match(dockerfile, /QUBICL_IMAGE_VIEWER_AUTHENTICATION=header-v1/);
+  assert.match(entrypoint, /UNIX-LISTEN:\/run\/qubicl-viewer\/sockets\/view\.sock,fork,mode=0600/);
+  assert.match(entrypoint, /--unix-target=\/run\/qubicl-viewer\/sockets\/control\.sock/);
+  assert.match(entrypoint, /--web-auth/);
+  assert.match(entrypoint, /runuser -u qubicl-viewer -- env -i/);
+  assert.match(entrypoint, /install -d -m 0750 -o root -g qubicl-viewer \/run\/qubicl-viewer/);
+  assert.match(entrypoint, /baked_viewer_authentication="\$\{QUBICL_IMAGE_VIEWER_AUTHENTICATION:-legacy\}"/);
+  assert.match(entrypoint, /runtime_viewer_authentication="\$\{QUBICL_VIEWER_AUTHENTICATION:-\}"/);
+  assert.match(entrypoint, /viewer_key_handoff="\$\{QUBICL_VIEWER_KEY:-\}"\s+unset QUBICL_VIEWER_AUTHENTICATION QUBICL_VIEWER_KEY/);
+  assert.ok(entrypoint.indexOf('unset QUBICL_VIEWER_AUTHENTICATION QUBICL_VIEWER_KEY') < entrypoint.indexOf('exec node /opt/qubicl/control.mjs'));
+  assert.match(entrypoint, /--auth-source=\/run\/qubicl-viewer\/key/);
+  assert.match(entrypoint, /\/usr\/bin\/python3 -I \/usr\/bin\/websockify/);
+  assert.match(entrypoint, /\(umask 077; printf '[^']*' "\$viewer_key" >\/run\/qubicl-viewer\/key\)/);
+  assert.doesNotMatch(entrypoint, /^umask 077$/m);
+  assert.doesNotMatch(entrypoint, /\/home\/[^\n]*(?:viewer|key)|(?:viewer|key)[^\n]*\/home\//i);
+  assert.doesNotMatch(entrypoint, /--auth-source=.*(?:QUBICL_VIEWER_KEY|viewer_key_handoff)/);
+  assert.doesNotMatch(entrypoint, /localhost:590[01]|-rfbport 590[01]/);
+  assert.match(relay, /-inetd/);
+  assert.match(relay, /-rfbport 0/);
+  assert.doesNotMatch(relay, /QUBICL_VIEWER_KEY|590[01]/);
+  assert.match(authentication, /X-Qubicl-Viewer-Key/);
+  assert.match(authentication, /KEY_PATTERN\.fullmatch\(received\)/);
+  assert.match(authentication, /compare_digest/);
+  assert.doesNotMatch(authentication, /response_msg=.*(?:key|header|credential)/i);
+  assert.doesNotMatch(authentication, /print\s*\(/);
+  assert.match(builder, /images\/computer\/qubicl_viewer_auth\.py/);
+  assert.match(builder, /images\/computer\/x11vnc-relay\.sh/);
+});
+
 test('performance checks are local and dependency-free', async () => {
   const workspace = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
   assert.equal(workspace.scripts?.performance, 'node scripts/performance.mjs');

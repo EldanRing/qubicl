@@ -1,13 +1,15 @@
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { access, mkdir, readFile } from 'node:fs/promises';
+import { access, lstat, mkdir, readFile } from 'node:fs/promises';
 import YAML from 'yaml';
 import {
   IMAGE_CATALOG,
   CONTROL_PROTOCOL_VERSION,
+  GATEWAY_PROTOCOL_VERSION,
   PRESET_DEFINITIONS,
   QUBICL_BUILD,
+  VIEWER_AUTHENTICATION_HEADER_V1,
   deriveInternalServiceKey,
   hashToken,
   managedSshForCompatibility,
@@ -15,9 +17,11 @@ import {
   previewHostname,
   toolsForCapabilities,
   viewerForCapabilities,
+  type ComputerConfig,
   type ImageIdentity,
   type Preset,
   type RuntimeRoutes,
+  type ViewerAuthentication,
 } from '@qubicl/core';
 import type { LoadedState } from './state.js';
 import { atomicWrite, statePaths, writeMountedRuntimeFile } from './state.js';
@@ -32,6 +36,91 @@ export const LEGACY_SPLIT_CONTROL_PROTOCOL_VERSION = 9;
 const LEGACY_PROJECT_NAME = 'qubicl';
 const INSTALLATION_FINGERPRINT_LENGTH = 20;
 const COMPUTER_FINGERPRINT_LENGTH = 24;
+const RUNTIME_IMAGE_CONTRACTS_VERSION = 1;
+
+export const LEGACY_VIEWER_AUTHENTICATION = 'legacy' as const;
+export type RuntimeViewerAuthentication = typeof LEGACY_VIEWER_AUTHENTICATION | ViewerAuthentication;
+
+export interface RuntimeImageContract {
+  kind: 'gateway' | 'computer';
+  contentId: `sha256:${string}`;
+  viewerAuthentication: RuntimeViewerAuthentication;
+  gatewayProtocolVersion?: number;
+}
+
+export interface RuntimeImageContractsDocument {
+  version: typeof RUNTIME_IMAGE_CONTRACTS_VERSION;
+  images: Record<string, RuntimeImageContract>;
+}
+
+export function runtimeImageContractsPath(state: LoadedState): string {
+  return join(state.paths.runtime, 'image-contracts.json');
+}
+
+export async function readRuntimeImageContracts(state: LoadedState): Promise<RuntimeImageContractsDocument> {
+  let raw: string;
+  try {
+    const info = await lstat(runtimeImageContractsPath(state));
+    if (!info.isFile() || (info.mode & 0o777) !== 0o600) {
+      throw new Error(`Runtime image contracts ${runtimeImageContractsPath(state)} must be a regular file with mode 0600.`);
+    }
+    raw = await readFile(runtimeImageContractsPath(state), 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: RUNTIME_IMAGE_CONTRACTS_VERSION, images: {} };
+    throw error;
+  }
+  const value = JSON.parse(raw) as { version?: unknown; images?: unknown };
+  if (value.version !== RUNTIME_IMAGE_CONTRACTS_VERSION || !value.images || typeof value.images !== 'object' || Array.isArray(value.images)) {
+    throw new Error(`Runtime image contracts ${runtimeImageContractsPath(state)} are invalid.`);
+  }
+  const images: Record<string, RuntimeImageContract> = {};
+  for (const [contentId, candidate] of Object.entries(value.images)) {
+    const contract = candidate as Partial<RuntimeImageContract> | null;
+    const viewerAuthentication = contract?.viewerAuthentication;
+    const validComputer = contract?.kind === 'computer'
+      && contract.gatewayProtocolVersion === undefined;
+    const validGateway = contract?.kind === 'gateway'
+      && (viewerAuthentication === LEGACY_VIEWER_AUTHENTICATION
+        ? contract.gatewayProtocolVersion === undefined
+        : contract.gatewayProtocolVersion === GATEWAY_PROTOCOL_VERSION);
+    if (!/^sha256:[a-f0-9]{64}$/u.test(contentId)
+      || !contract || contract.contentId !== contentId
+      || (contract.kind !== 'gateway' && contract.kind !== 'computer')
+      || (viewerAuthentication !== LEGACY_VIEWER_AUTHENTICATION && viewerAuthentication !== VIEWER_AUTHENTICATION_HEADER_V1)
+      || (!validComputer && !validGateway)) {
+      throw new Error(`Runtime image contract ${JSON.stringify(contentId)} is invalid.`);
+    }
+    images[contentId] = contract as RuntimeImageContract;
+  }
+  return { version: RUNTIME_IMAGE_CONTRACTS_VERSION, images };
+}
+
+export async function recordRuntimeImageContracts(state: LoadedState, contracts: readonly RuntimeImageContract[]): Promise<void> {
+  const document = await readRuntimeImageContracts(state);
+  for (const contract of contracts) document.images[contract.contentId] = contract;
+  await atomicWrite(runtimeImageContractsPath(state), `${JSON.stringify(document, null, 2)}\n`, 0o600);
+}
+
+function viewerAuthenticationForComputer(
+  computer: Pick<ComputerConfig, 'name' | 'capabilities' | 'image'>,
+  contracts: RuntimeImageContractsDocument,
+): ViewerAuthentication | undefined {
+  if (!viewerForCapabilities(computer.capabilities)) return undefined;
+  // State migrated from releases that predate content-ID pinning can only use
+  // the legacy viewer contract. Image acquisition rejects a hardened viewer
+  // until it has been explicitly rebound to an immutable content ID.
+  if (!computer.image.contentId) return undefined;
+  const contract = contracts.images[computer.image.contentId];
+  if (!contract) {
+    throw new Error(`Viewer image ${computer.image.resolved} for ${computer.name} has no verified runtime image contract for ${computer.image.contentId}. Reinspect the exact image or retained computer before rendering its runtime.`);
+  }
+  if (contract.kind !== 'computer') {
+    throw new Error(`Viewer image ${computer.image.resolved} for ${computer.name} has a ${contract.kind} runtime image contract for ${computer.image.contentId}. Reinspect the exact computer image or retained computer before rendering its runtime.`);
+  }
+  return contract.viewerAuthentication === LEGACY_VIEWER_AUTHENTICATION
+    ? undefined
+    : contract.viewerAuthentication;
+}
 
 function httpHealthcheck(port: number, startPeriod: string): Record<string, unknown> {
   return {
@@ -231,6 +320,7 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
   const { uid: hostUid, gid: hostGid } = hostIdentity();
   const installationId = state.config.installationId;
   const gatewayAuditVolumes: Array<Record<string, unknown>> = [];
+  const imageContracts = await readRuntimeImageContracts(state);
   const routes: RuntimeRoutes = {
     version: 2,
     generatedAt: new Date().toISOString(),
@@ -238,6 +328,7 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
       const secret = state.secrets.computers[computer.id];
       if (!secret) throw new Error(`Missing secret material for ${computer.name}.`);
       const viewer = viewerForCapabilities(computer.capabilities);
+      const viewerAuthentication = viewerAuthenticationForComputer(computer, imageContracts);
       return {
         id: computer.id,
         name: computer.name,
@@ -245,6 +336,7 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
         ...(viewer ? { viewHost: usesUnifiedComputerRuntime(computer) ? computerContainerName(state, computer) : computerSessionContainerName(state, computer) } : {}),
         controlPort: 3212,
         ...(viewer ? { viewPort: 6080, controlViewPort: 6081 } : {}),
+        ...(viewerAuthentication ? { viewerAuthentication } : {}),
         preset: computer.preset,
         compatibility: computer.compatibility,
         capabilities: computer.capabilities,
@@ -306,6 +398,10 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
   for (const computer of state.config.computers) {
     const secret = state.secrets.computers[computer.id]!;
     const policy = PRESET_DEFINITIONS[computer.compatibility];
+    const viewerAuthentication = viewerAuthenticationForComputer(computer, imageContracts);
+    const viewerKey = viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1
+      ? deriveInternalServiceKey(secret.internalKey, 'viewer')
+      : undefined;
     const networkKey = `control_${computer.id.replaceAll('-', '')}`;
     const workspaceNetworkKey = `workspace_${computer.id.replaceAll('-', '')}`;
     const executorService = computerExecutorServiceName(state, computer);
@@ -394,6 +490,7 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
           ...(computer.environment ? { QUBICL_WORKLOAD_ENV_JSON: JSON.stringify(computer.environment) } : {}),
           ...(proxyUrl ? { QUBICL_PROXY_URL: proxyUrl } : {}),
           ...(policy.viewer ? { DISPLAY: ':0', QUBICL_POINTER_URL: 'http://127.0.0.1:3212/_qubicl/session/pointer' } : {}),
+          ...(viewerKey ? { QUBICL_VIEWER_AUTHENTICATION: VIEWER_AUTHENTICATION_HEADER_V1, QUBICL_VIEWER_KEY: viewerKey } : {}),
           ...(computer.ssh?.enabled ? { QUBICL_SSH_PUBLIC_KEY: computer.ssh.publicKey } : {}),
         },
         volumes: [
@@ -574,6 +671,7 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
           ...(computer.environment ? { QUBICL_WORKLOAD_ENV_JSON: JSON.stringify(computer.environment) } : {}),
           QUBICL_INITIALIZE_HOME: '1',
           DISPLAY: ':0',
+          ...(viewerKey ? { QUBICL_VIEWER_AUTHENTICATION: VIEWER_AUTHENTICATION_HEADER_V1, QUBICL_VIEWER_KEY: viewerKey } : {}),
           ...(proxyUrl ? { QUBICL_PROXY_URL: proxyUrl } : {}),
         },
         volumes: [homeVolume, { type: 'volume', source: displayVolumeKey, target: '/tmp/.X11-unix' }],

@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import YAML from 'yaml';
-import { CONTROL_PROTOCOL_VERSION, IMAGE_CATALOG, imageIdentity, presetDefaults, type ComputerConfig } from '@qubicl/core';
+import { CONTROL_PROTOCOL_VERSION, IMAGE_CATALOG, deriveInternalServiceKey, imageIdentity, presetDefaults, type ComputerConfig } from '@qubicl/core';
 import {
   containerName,
   computerExecutorServiceName,
@@ -16,8 +16,10 @@ import {
   controlNetwork,
   gatewayContainerName,
   gatewayNetworkName,
+  LEGACY_VIEWER_AUTHENTICATION,
   projectName,
   readableContainerName,
+  recordRuntimeImageContracts,
   renderRuntime,
   runtimeImageReference,
   serviceName,
@@ -57,8 +59,8 @@ test('source runtime prefers a recorded local content ID without changing stored
   const root = await mkdtemp(join(tmpdir(), 'qubicl-runtime-development-image-'));
   try {
     const state = await initializeState(statePaths(root));
-    const gatewayContentId = `sha256:${'1'.repeat(64)}`;
-    const computerContentId = `sha256:${'2'.repeat(64)}`;
+    const gatewayContentId = `sha256:${'1'.repeat(64)}` as const;
+    const computerContentId = `sha256:${'2'.repeat(64)}` as const;
     state.config.gateway.image = {
       requested: IMAGE_CATALOG.gateway.requested,
       resolved: `qubicl/gateway@sha256:${'3'.repeat(64)}`,
@@ -78,6 +80,11 @@ test('source runtime prefers a recorded local content ID without changing stored
     };
     state.config.computers.push(configured);
     state.secrets.computers[configured.id] = { token: 't'.repeat(43), internalKey: 'i'.repeat(43) };
+    await recordRuntimeImageContracts(state, [{
+      kind: 'computer',
+      contentId: computerContentId,
+      viewerAuthentication: LEGACY_VIEWER_AUTHENTICATION,
+    }]);
 
     await renderRuntime(state);
     const document = YAML.parse(await readFile(state.paths.compose, 'utf8')) as {
@@ -97,6 +104,47 @@ test('source runtime prefers a recorded local content ID without changing stored
   }
 });
 
+test('content-ID-bound viewers fail closed before render writes when their contract cache is unavailable or unusable', async (context) => {
+  for (const scenario of ['missing', 'empty-document', 'wrong-kind', 'truncated'] as const) {
+    await context.test(scenario, async () => {
+      const root = await mkdtemp(join(tmpdir(), `qubicl-runtime-contract-${scenario}-`));
+      try {
+        const state = await initializeState(statePaths(root));
+        const computer: ComputerConfig = {
+          id: '00000000-0000-4000-8000-000000000320',
+          name: `contract-${scenario}`,
+          createdAt: new Date().toISOString(),
+          ...presetDefaults('workstation'),
+        };
+        const contentId = `sha256:${'6'.repeat(64)}` as const;
+        computer.image = { ...computer.image, contentId };
+        state.config.computers.push(computer);
+        state.secrets.computers[computer.id] = { token: 't'.repeat(43), internalKey: 'i'.repeat(43) };
+        await writeFile(state.paths.compose, 'compose-sentinel\n', { mode: 0o600 });
+        await writeFile(state.paths.routes, 'routes-sentinel\n', { mode: 0o600 });
+        const contractsPath = join(state.paths.runtime, 'image-contracts.json');
+        if (scenario === 'empty-document') {
+          await writeFile(contractsPath, `${JSON.stringify({ version: 1, images: {} })}\n`, { mode: 0o600 });
+        } else if (scenario === 'wrong-kind') {
+          await recordRuntimeImageContracts(state, [{
+            kind: 'gateway',
+            contentId,
+            viewerAuthentication: LEGACY_VIEWER_AUTHENTICATION,
+          }]);
+        } else if (scenario === 'truncated') {
+          await writeFile(contractsPath, '', { mode: 0o600 });
+        }
+
+        await assert.rejects(renderRuntime(state));
+        assert.equal(await readFile(state.paths.compose, 'utf8'), 'compose-sentinel\n');
+        assert.equal(await readFile(state.paths.routes, 'utf8'), 'routes-sentinel\n');
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test('current computers use one bounded runtime container plus the shared gateway', async () => {
   const root = await mkdtemp(join(tmpdir(), 'qubicl-runtime-isolated-topology-'));
   try {
@@ -113,6 +161,9 @@ test('current computers use one bounded runtime container plus the shared gatewa
     };
     state.config.computers.push(computer);
     state.secrets.computers[computer.id] = { token: 't'.repeat(43), internalKey: 'i'.repeat(43) };
+    const viewerImageContentId = `sha256:${'a'.repeat(64)}` as const;
+    computer.image.contentId = viewerImageContentId;
+    await recordRuntimeImageContracts(state, [{ kind: 'computer', contentId: viewerImageContentId, viewerAuthentication: 'header-v1' }]);
     await renderRuntime(state);
 
     const document = YAML.parse(await readFile(state.paths.compose, 'utf8')) as {
@@ -142,9 +193,36 @@ test('current computers use one bounded runtime container plus the shared gatewa
     assert.equal(runtime.environment?.QUBICL_WEB_URL, 'http://127.0.0.1:3215');
     assert.equal(runtime.environment?.QUBICL_POINTER_URL, 'http://127.0.0.1:3212/_qubicl/session/pointer');
     assert.equal(runtime.environment?.QUBICL_WORKLOAD_ENV_JSON, JSON.stringify({ PROJECT_MODE: 'test' }));
+    assert.doesNotMatch(runtime.environment?.QUBICL_WORKLOAD_ENV_JSON ?? '', /VIEWER|[A-Za-z0-9_-]{43}/u);
+    assert.equal(runtime.environment?.QUBICL_VIEWER_AUTHENTICATION, 'header-v1');
+    assert.match(runtime.environment?.QUBICL_VIEWER_KEY ?? '', /^[A-Za-z0-9_-]{43}$/u);
     assert.match(runtime.environment?.QUBICL_PROXY_URL ?? '', /@.+gateway:3128$/u);
     assert.equal(runtime.volumes?.some(({ target }) => target === '/run/qubicl/audit.jsonl'), true);
     assert.equal(gateway.volumes?.some(({ target }) => target === '/audit'), true);
+
+    const routes = JSON.parse(await readFile(state.paths.routes, 'utf8')) as { routes: Array<{ viewerAuthentication?: string; viewerKey?: string }> };
+    const viewerKey = deriveInternalServiceKey('i'.repeat(43), 'viewer');
+    assert.equal(routes.routes[0]?.viewerAuthentication, 'header-v1');
+    assert.equal(routes.routes[0]?.viewerKey, undefined, 'viewer keys are derived independently at each endpoint, not serialized into routes');
+    assert.equal(viewerKey, runtime.environment?.QUBICL_VIEWER_KEY);
+    assert.match(viewerKey ?? '', /^[A-Za-z0-9_-]{43}$/u);
+    await assert.rejects(lstat(join(state.paths.runtime, 'viewer-keys')), { code: 'ENOENT' });
+    const contractsPath = join(state.paths.runtime, 'image-contracts.json');
+    assert.equal((await lstat(contractsPath)).mode & 0o777, 0o600);
+    const contracts = await readFile(contractsPath, 'utf8');
+    assert.doesNotMatch(contracts, new RegExp(viewerKey));
+    assert.doesNotMatch(contracts, new RegExp('i'.repeat(43)));
+
+    await renderRuntime(state);
+    const rerenderedDocument = YAML.parse(await readFile(state.paths.compose, 'utf8')) as typeof document;
+    assert.equal(rerenderedDocument.services[computerServiceName(state, computer)]?.environment?.QUBICL_VIEWER_KEY, viewerKey, 'retained and gateway-only rerenders derive the same key');
+
+    state.secrets.computers[computer.id]!.internalKey = 'r'.repeat(43);
+    await renderRuntime(state);
+    const rotatedDocument = YAML.parse(await readFile(state.paths.compose, 'utf8')) as typeof document;
+    const rotatedKey = deriveInternalServiceKey('r'.repeat(43), 'viewer');
+    assert.notEqual(rotatedKey, viewerKey, 'restore secret rotation also rotates the domain-separated viewer key');
+    assert.equal(rotatedKey, rotatedDocument.services[computerServiceName(state, computer)]?.environment?.QUBICL_VIEWER_KEY);
 
     const controlKey = runtime.networks![0]!;
     assert.equal(document.networks[controlKey]?.name, controlNetwork(state.config.installationId, computer.id, state.paths.root));
@@ -178,6 +256,35 @@ test('current computers use one bounded runtime container plus the shared gatewa
     assert.equal(runtime.healthcheck?.test?.[0], 'CMD');
     assert.equal(runtime.healthcheck?.test?.[1], 'node');
     assert.equal(runtime.healthcheck?.test?.includes('curl'), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('unmarked viewer computers retain legacy routing without generating authentication material', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-runtime-legacy-viewer-'));
+  try {
+    const state = await initializeState(statePaths(root));
+    const defaults = presetDefaults('browser');
+    const computer: ComputerConfig = {
+      id: '00000000-0000-4000-8000-000000000324',
+      name: 'legacy-browser',
+      createdAt: new Date().toISOString(),
+      controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
+      ...defaults,
+    };
+    state.config.computers.push(computer);
+    state.secrets.computers[computer.id] = { token: 't'.repeat(43), internalKey: 'i'.repeat(43) };
+    await renderRuntime(state);
+
+    const routes = JSON.parse(await readFile(state.paths.routes, 'utf8')) as { routes: Array<Record<string, unknown>> };
+    assert.equal(routes.routes[0]?.viewerAuthentication, undefined);
+    assert.equal(routes.routes[0]?.viewerKey, undefined);
+    const document = YAML.parse(await readFile(state.paths.compose, 'utf8')) as { services: Record<string, { environment?: Record<string, string> }> };
+    const runtime = document.services[computerServiceName(state, computer)];
+    assert.equal(runtime?.environment?.QUBICL_VIEWER_AUTHENTICATION, undefined);
+    assert.equal(runtime?.environment?.QUBICL_VIEWER_KEY, undefined);
+    await assert.rejects(lstat(join(state.paths.runtime, 'viewer-keys', `${computer.id}.key`)), { code: 'ENOENT' });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -501,6 +608,11 @@ test('renaming a primary computer recreates only its service despite an unrelate
     state.config.computers.push(computer, unrelated);
     state.secrets.computers[computer.id] = { token: 't'.repeat(43), internalKey: 'i'.repeat(43) };
     state.secrets.computers[unrelated.id] = { token: 'u'.repeat(43), internalKey: 'j'.repeat(43) };
+    await recordRuntimeImageContracts(state, [{
+      kind: 'computer',
+      contentId: unrelated.image.contentId as `sha256:${string}`,
+      viewerAuthentication: LEGACY_VIEWER_AUTHENTICATION,
+    }]);
     await renderRuntime(state);
     const inspections = new Map<string, RuntimeInspection>([
       ['gateway', {

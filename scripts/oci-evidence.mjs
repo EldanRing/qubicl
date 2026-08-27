@@ -116,10 +116,22 @@ export async function inspectOciArchive(archive, {
           assert(labels['dev.qubicl.compatibility'] === expectedPreset, `${archive} ${platform} has the wrong compatibility label.`);
           assert(labels['dev.qubicl.capabilities'] === expectedManifestDocument.capabilities.join(','), `${archive} ${platform} has the wrong capability label.`);
           assert(labels['dev.qubicl.manifest-sha256'] === digestCanonical(expectedManifestDocument), `${archive} ${platform} has the wrong manifest digest label.`);
+          const viewerAuthentication = labels['dev.qubicl.viewer-authentication'];
+          const bakedViewerAuthentication = environmentValue(config.config?.Env ?? [], 'QUBICL_IMAGE_VIEWER_AUTHENTICATION');
+          if (expectedManifestDocument.viewer) {
+            assert(viewerAuthentication === 'header-v1', `${archive} ${platform} has the wrong viewer authentication label.`);
+            assert(bakedViewerAuthentication === 'header-v1', `${archive} ${platform} has the wrong baked viewer authentication mode.`);
+          } else {
+            assert(viewerAuthentication === undefined && bakedViewerAuthentication === undefined, `${archive} ${platform} unexpectedly enables viewer authentication.`);
+          }
           const embedded = await embeddedComputerManifest(extracted, manifest.layers, archive);
           assert(canonicalJson(embedded) === canonicalJson(expectedManifestDocument), `${archive} ${platform} embeds a different computer manifest.`);
         } else {
-          assert(!Object.keys(labels).some((name) => name.startsWith('dev.qubicl.')), `${archive} ${platform} gateway unexpectedly has computer-only Qubicl labels.`);
+          const qubiclLabels = Object.fromEntries(Object.entries(labels).filter(([name]) => name.startsWith('dev.qubicl.')));
+          assert(canonicalJson(qubiclLabels) === canonicalJson({
+            'dev.qubicl.gateway-protocol-version': '2',
+            'dev.qubicl.viewer-authentication': 'header-v1',
+          }), `${archive} ${platform} gateway has the wrong authenticated-viewer contract labels.`);
         }
       }
 
@@ -152,6 +164,11 @@ export async function inspectOciArchive(archive, {
   } finally {
     await rm(extracted, { recursive: true, force: true });
   }
+}
+
+function environmentValue(environment, name) {
+  const prefix = `${name}=`;
+  return environment.toReversed().find((entry) => entry.startsWith(prefix))?.slice(prefix.length);
 }
 
 async function extractOciArchive(archive, destination) {

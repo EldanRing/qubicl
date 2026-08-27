@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import YAML from 'yaml';
-import { presetDefaults, type ComputerConfig, type TransactionCheckpoint } from '../../packages/core/dist/index.js';
+import { VIEWER_AUTHENTICATION_HEADER_V1, presetDefaults, type ComputerConfig, type TransactionCheckpoint } from '../../packages/core/dist/index.js';
 import { auditState, initializeState, loadState, newSecret, readMetadata, saveMetadata, saveState, statePaths, withStateLock } from '../../packages/cli/dist/state.js';
+import { recordRuntimeImageContracts } from '../../packages/cli/dist/runtime.js';
 import { createStateTransaction, executeStateTransaction, prepareStateTransaction, readPendingTransaction, recoverPendingTransaction, restoreReadyMarker, restoreStage, type TransactionRuntime } from '../../packages/cli/dist/transactions.js';
 
 const checkpoints: TransactionCheckpoint[] = [
@@ -89,6 +90,55 @@ test('durable-only recovery leaves a committed journal for later Docker replay',
   await rm(fixture.paths.root, { recursive: true, force: true });
 });
 
+test('policy- and SSH-style transaction recovery reconciles viewer contracts before durable state or render mutation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-contract-transaction-'));
+  try {
+    const paths = statePaths(root);
+    const state = await initializeState(paths);
+    const configured = computer('00000000-0000-4000-8000-000000000123', 'policy-ssh-contract');
+    const contentId = `sha256:${'c'.repeat(64)}` as const;
+    configured.image.contentId = contentId;
+    state.config.computers.push(configured);
+    state.secrets.computers[configured.id] = newSecret();
+    await saveMetadata(paths, configured);
+    await saveState(state);
+    const originalCpus = configured.cpus;
+    configured.cpus += 1;
+    const transaction = createStateTransaction('config', state);
+    await prepareStateTransaction(paths, transaction);
+    await writeFile(paths.compose, 'compose-sentinel\n', { mode: 0o600 });
+
+    let allowRepair = false;
+    const calls: string[] = [];
+    const runtime: TransactionRuntime = {
+      ...fakeRuntime,
+      reconcileContracts: async (target) => {
+        calls.push(allowRepair ? 'reconcile:repaired' : 'reconcile:blocked');
+        if (!allowRepair) throw new Error('exact viewer evidence unavailable');
+        await recordRuntimeImageContracts(target, [{
+          kind: 'computer',
+          contentId,
+          viewerAuthentication: VIEWER_AUTHENTICATION_HEADER_V1,
+        }]);
+      },
+    };
+
+    await assert.rejects(recoverPendingTransaction(paths, { includeRuntime: false, runtime }), /exact viewer evidence unavailable/);
+    assert.equal((await loadState(paths)).config.computers[0]?.cpus, originalCpus);
+    assert.equal((await readPendingTransaction(paths))?.phase, 'prepared');
+    assert.equal(await readFile(paths.compose, 'utf8'), 'compose-sentinel\n');
+
+    allowRepair = true;
+    await recoverPendingTransaction(paths, { includeRuntime: false, runtime });
+    assert.equal((await loadState(paths)).config.computers[0]?.cpus, originalCpus + 1);
+    assert.notEqual(await readFile(paths.compose, 'utf8'), 'compose-sentinel\n');
+    assert.deepEqual(calls, ['reconcile:blocked', 'reconcile:repaired']);
+    await assert.rejects(lstat(paths.journal), { code: 'ENOENT' });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('an interrupted active-runtime replacement rolls forward without changing durable identity', async () => {
   const root = await mkdtemp(join(tmpdir(), 'qubicl-upgrade-'));
   const paths = statePaths(root);
@@ -132,6 +182,45 @@ test('an interrupted active-runtime replacement rolls forward without changing d
   assert.equal(starts, 1);
   await assert.rejects(lstat(paths.journal), { code: 'ENOENT' });
   await rm(root, { recursive: true, force: true });
+});
+
+test('gateway capability verification and existing-network reconnection precede computer replacement', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-gateway-sequence-'));
+  try {
+    const paths = statePaths(root);
+    const state = await initializeState(paths);
+    const existing = computer('00000000-0000-4000-8000-000000000121', 'existing');
+    const replacement = computer('00000000-0000-4000-8000-000000000122', 'replacement');
+    state.config.computers.push(existing, replacement);
+    state.secrets.computers[existing.id] = newSecret();
+    state.secrets.computers[replacement.id] = newSecret();
+    await saveMetadata(paths, existing);
+    await saveMetadata(paths, replacement);
+    await saveState(state);
+    const calls: string[] = [];
+    const runtime: TransactionRuntime = {
+      ...fakeRuntime,
+      reconcileContracts: async () => { calls.push('contracts:reconcile'); },
+      startGateway: async () => { calls.push('gateway:start'); },
+      verifyGateway: async () => { calls.push('gateway:verify'); },
+      reconnect: async (_state, value) => { calls.push(`reconnect:${value.id}`); },
+      remove: async (_state, id) => { calls.push(`remove:${id}`); },
+      start: async (_state, value) => { calls.push(`start:${value.id}`); },
+    };
+    await executeStateTransaction(paths, createStateTransaction('upgrade', state, {
+      runtime: { startGateway: true, reconnectIds: [existing.id], replaceIds: [replacement.id] },
+    }), { runtime });
+    assert.deepEqual(calls, [
+      'contracts:reconcile',
+      'gateway:start',
+      'gateway:verify',
+      `reconnect:${existing.id}`,
+      `remove:${replacement.id}`,
+      `start:${replacement.id}`,
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('an interrupted backup extraction rolls back its journal and staged home', async () => {
@@ -352,9 +441,11 @@ function legacyComputer(computer: ComputerConfig): { id: string; name: string; i
 }
 
 const fakeRuntime: TransactionRuntime = {
+  reconcileContracts: async () => undefined,
   validate: async () => undefined,
   ensureImages: async () => undefined,
   startGateway: async () => undefined,
+  verifyGateway: async () => undefined,
   reconnect: async () => undefined,
   waitForRemoval: async () => undefined,
   remove: async () => undefined,

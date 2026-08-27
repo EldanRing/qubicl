@@ -12,7 +12,9 @@ LABEL org.opencontainers.image.title="Qubicl gateway" \
       org.opencontainers.image.url="$QUBICL_SOURCE" \
       org.opencontainers.image.version="$QUBICL_VERSION" \
       org.opencontainers.image.revision="$QUBICL_REVISION" \
-      org.opencontainers.image.created="$QUBICL_CREATED"
+      org.opencontainers.image.created="$QUBICL_CREATED" \
+      dev.qubicl.gateway-protocol-version="2" \
+      dev.qubicl.viewer-authentication="header-v1"
 
 WORKDIR /app
 RUN apk upgrade --no-cache libcrypto3 libssl3 \
