@@ -1,5 +1,7 @@
 import type { Stats } from 'node:fs';
+import { isAbsolute, relative, sep } from 'node:path';
 import { QubiclError } from './errors.js';
+import { BoundedFileSystemCapabilityError, BoundedMutationOutcomeError } from './bounded-files.js';
 
 export type FileOperation = 'list' | 'inspect' | 'read' | 'write' | 'edit' | 'copy' | 'move' | 'delete';
 
@@ -18,6 +20,17 @@ export function creationTime(info: Pick<Stats, 'birthtimeMs'>): string | null {
 
 export function mapFileSystemError(error: unknown, context: FileErrorContext): unknown {
   if (error instanceof QubiclError) return error;
+  if (error instanceof BoundedFileSystemCapabilityError) {
+    return new QubiclError('filesystem_hardening_unavailable', error.message, 503);
+  }
+  if (error instanceof BoundedMutationOutcomeError) {
+    const code = error.outcome === 'cleanup_incomplete'
+      ? 'mutation_committed_cleanup_incomplete'
+      : error.outcome === 'durability_uncertain'
+        ? 'mutation_durability_uncertain'
+        : 'mutation_recovery_incomplete';
+    return new QubiclError(code, error.message, error.outcome === 'recovery_incomplete' ? 409 : 500);
+  }
   const code = errnoCode(error);
   const reportedPath = errnoPath(error);
   const path = inputPath(context, reportedPath);
@@ -46,13 +59,13 @@ export function mapFileSystemError(error: unknown, context: FileErrorContext): u
     if (context.operation === 'list') {
       return new QubiclError('not_a_directory', `Path ${context.path ?? path} is not a directory. Choose a directory and retry.`, 400);
     }
-    if (context.destination) {
+    if (isDestinationError(context, reportedPath)) {
       return new QubiclError('destination_invalid', `Destination ${context.destination} has a parent path that is not a directory. Choose another destination.`, 400);
     }
     return new QubiclError('path_invalid', `Path ${context.path ?? path} contains a component that is not a directory. Check the path and retry.`, 400);
   }
   if (code === 'EISDIR') {
-    if (context.destination) {
+    if (isDestinationError(context, reportedPath)) {
       return new QubiclError('destination_invalid', `Destination ${context.destination} is a directory where a file is required. Choose another destination.`, 400);
     }
     return new QubiclError('not_a_file', `Path ${context.path ?? path} is not a regular file.`, 400);
@@ -60,8 +73,11 @@ export function mapFileSystemError(error: unknown, context: FileErrorContext): u
   if (code === 'ENOTEMPTY') {
     return new QubiclError('directory_not_empty', `Directory ${context.path ?? context.destination ?? path} is not empty. Retry with recursive deletion or choose another destination.`, 409);
   }
+  if (code === 'ESTALE') {
+    return new QubiclError('path_changed', `Path ${path} changed while the operation was in progress. Retry the operation.`, 409);
+  }
   if (code === 'EINVAL' || code === 'ENAMETOOLONG' || code === 'ELOOP') {
-    if (context.destination) {
+    if (isDestinationError(context, reportedPath)) {
       return new QubiclError('destination_invalid', `Destination ${context.destination} is invalid for this operation. Choose another destination.`, 400);
     }
     return new QubiclError('path_invalid', `Path ${context.path ?? path} is invalid for this operation. Check the path and retry.`, 400);
@@ -83,11 +99,21 @@ export function mapFileSystemError(error: unknown, context: FileErrorContext): u
 
 function inputPath(context: FileErrorContext, reportedPath: string | undefined): string {
   const inputs = [context.path, context.source, context.destination];
-  return inputs.find((path) => path === reportedPath)
+  return inputs.find((path) => path !== undefined && isPathAtOrBelow(path, reportedPath))
     ?? context.path
     ?? context.source
     ?? context.destination
     ?? 'the requested path';
+}
+
+function isDestinationError(context: FileErrorContext, reportedPath: string | undefined): boolean {
+  return context.destination !== undefined && isPathAtOrBelow(context.destination, reportedPath);
+}
+
+function isPathAtOrBelow(path: string, reportedPath: string | undefined): boolean {
+  if (!reportedPath) return false;
+  const nested = relative(path, reportedPath);
+  return nested === '' || (nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested));
 }
 
 function errnoCode(error: unknown): string | undefined {

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,6 +9,7 @@ import { ProcessManager } from '@qubicl/control/processes';
 import { invokeTool } from '../../packages/control/dist/contract.js';
 import { errorPayload } from '../../packages/control/dist/errors.js';
 import { creationTime } from '../../packages/control/dist/file-errors.js';
+import { BoundedFileSystem, type BoundedFileHookEvent } from '@qubicl/control/bounded-files';
 
 const owner = { id: 'test-lease', generation: 1, epoch: 'test-epoch' };
 
@@ -330,7 +332,640 @@ test('generic file tools are confined to the durable workspace and reject symlin
       executor.call('write_file', { lease, path: join(root, 'escape', 'created.txt'), content: 'blocked' }),
       (error: unknown) => error instanceof Error && /resolves outside/.test(error.message),
     );
+    await assert.rejects(
+      executor.call('get_file_info', { lease, path: join(root, 'escape', 'secret.txt') }),
+      (error: unknown) => error instanceof Error && /resolves outside/.test(error.message),
+    );
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('bounded file tools preserve compatible symlink semantics without following mutation targets', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'qubicl-bounded-symlinks-'));
+  const root = join(directory, 'home');
+  const outside = join(directory, 'outside');
+  await Promise.all([mkdir(root), mkdir(outside)]);
+  await mkdir(join(root, 'target'));
+  await writeFile(join(root, 'target', 'file.txt'), 'inside');
+  await writeFile(join(outside, 'secret.txt'), 'outside');
+  await symlink('target', join(root, 'directory-link'));
+  await symlink('target/file.txt', join(root, 'file-link'));
+  await symlink('target/file.txt', join(root, 'edit-link'));
+  await symlink('.', join(root, 'root-link'));
+  await symlink(outside, join(root, 'outside-link'));
+  try {
+    const executor = new ToolExecutor(undefined, { durableRoot: root });
+    const lease = executor.leases.acquire(60);
+
+    const listing = await executor.call('list_files', { lease, path: join(root, 'directory-link') }) as { entries: Array<{ name: string }> };
+    assert.deepEqual(listing.entries.map(({ name }) => name), ['file.txt']);
+    const read = await executor.call('read_file', { lease, path: join(root, 'file-link') }) as { content: string };
+    assert.equal(read.content, 'inside');
+    const info = await executor.call('get_file_info', { lease, path: join(root, 'file-link') }) as { type: string };
+    assert.equal(info.type, 'symlink');
+    const rootListing = await executor.call('list_files', { lease, path: join(root, 'root-link') }) as { entries: Array<{ name: string }> };
+    assert.equal(rootListing.entries.some(({ name }) => name === 'target'), true);
+
+    await executor.call('copy_path', { lease, source: join(root, 'file-link'), destination: join(root, 'copied-link') });
+    assert.equal((await lstat(join(root, 'copied-link'))).isSymbolicLink(), true);
+    assert.equal(await readlink(join(root, 'copied-link')), join(root, 'target', 'file.txt'));
+
+    const referentCopy = await invokeTool(executor, 'copy_path', {
+      lease,
+      source: join(root, 'file-link'),
+      destination: join(root, 'target', 'file.txt'),
+      overwrite: true,
+    });
+    assert.equal(referentCopy.ok, false);
+    if (referentCopy.ok) assert.fail('copy unexpectedly replaced the referent of its final source symlink');
+    assert.equal(referentCopy.status, 400);
+    assert.equal(referentCopy.value.error.code, 'destination_invalid');
+    assert.equal((await lstat(join(root, 'file-link'))).isSymbolicLink(), true);
+    assert.equal(await readFile(join(root, 'target', 'file.txt'), 'utf8'), 'inside');
+
+    await symlink('target/file.txt', join(root, 'move-referent-link'));
+    const referentMove = await invokeTool(executor, 'move_path', {
+      lease,
+      source: join(root, 'move-referent-link'),
+      destination: join(root, 'target', 'file.txt'),
+      overwrite: true,
+    });
+    assert.equal(referentMove.ok, false);
+    if (referentMove.ok) assert.fail('move unexpectedly replaced the referent of its final source symlink');
+    assert.equal(referentMove.status, 400);
+    assert.equal(referentMove.value.error.code, 'destination_invalid');
+    assert.equal((await lstat(join(root, 'move-referent-link'))).isSymbolicLink(), true);
+    assert.equal(await readFile(join(root, 'target', 'file.txt'), 'utf8'), 'inside');
+
+    const copyChainTarget = join(root, 'copy-chain-target.txt');
+    const copyChainMiddle = join(root, 'copy-chain-middle');
+    const copyChainSource = join(root, 'copy-chain-source');
+    await writeFile(copyChainTarget, 'copy chain target');
+    await symlink('copy-chain-target.txt', copyChainMiddle);
+    await symlink('copy-chain-middle', copyChainSource);
+    const chainCopy = await invokeTool(executor, 'copy_path', {
+      lease,
+      source: copyChainSource,
+      destination: copyChainMiddle,
+      overwrite: true,
+    });
+    assert.equal(chainCopy.ok, false);
+    if (chainCopy.ok) assert.fail('copy unexpectedly replaced an intermediate symlink in its final-source referent chain');
+    assert.equal(chainCopy.status, 400);
+    assert.equal(chainCopy.value.error.code, 'destination_invalid');
+    assert.equal(await readlink(copyChainMiddle), 'copy-chain-target.txt');
+    assert.equal(await readlink(copyChainSource), 'copy-chain-middle');
+    assert.equal(await readFile(copyChainTarget, 'utf8'), 'copy chain target');
+
+    const moveChainTarget = join(root, 'move-chain-target.txt');
+    const moveChainMiddle = join(root, 'move-chain-middle');
+    const moveChainSource = join(root, 'move-chain-source');
+    await writeFile(moveChainTarget, 'move chain target');
+    await symlink('move-chain-target.txt', moveChainMiddle);
+    await symlink('move-chain-middle', moveChainSource);
+    const chainMove = await invokeTool(executor, 'move_path', {
+      lease,
+      source: moveChainSource,
+      destination: moveChainMiddle,
+      overwrite: true,
+    });
+    assert.equal(chainMove.ok, false);
+    if (chainMove.ok) assert.fail('move unexpectedly replaced an intermediate symlink in its final-source referent chain');
+    assert.equal(chainMove.status, 400);
+    assert.equal(chainMove.value.error.code, 'destination_invalid');
+    assert.equal(await readlink(moveChainMiddle), 'move-chain-target.txt');
+    assert.equal(await readlink(moveChainSource), 'move-chain-middle');
+    assert.equal(await readFile(moveChainTarget, 'utf8'), 'move chain target');
+
+    await mkdir(join(root, 'copy-source'));
+    await mkdir(join(root, 'copy-destination'));
+    await writeFile(join(root, 'copy-source', 'new.txt'), 'new');
+    await writeFile(join(root, 'copy-destination', 'preserved.txt'), 'preserved');
+    await executor.call('copy_path', {
+      lease,
+      source: join(root, 'copy-source'),
+      destination: join(root, 'copy-destination'),
+      overwrite: true,
+    });
+    assert.equal(await readFile(join(root, 'copy-destination', 'new.txt'), 'utf8'), 'new');
+    assert.equal(await readFile(join(root, 'copy-destination', 'preserved.txt'), 'utf8'), 'preserved');
+
+    await executor.call('write_file', { lease, path: join(root, 'file-link'), content: 'replacement' });
+    assert.equal((await lstat(join(root, 'file-link'))).isFile(), true);
+    assert.equal(await readFile(join(root, 'file-link'), 'utf8'), 'replacement');
+    assert.equal(await readFile(join(root, 'target', 'file.txt'), 'utf8'), 'inside');
+
+    await executor.call('edit_file', {
+      lease,
+      path: join(root, 'edit-link'),
+      edits: [{ oldText: 'inside', newText: 'edited replacement' }],
+    });
+    assert.equal((await lstat(join(root, 'edit-link'))).isFile(), true);
+    assert.equal(await readFile(join(root, 'edit-link'), 'utf8'), 'edited replacement');
+    assert.equal(await readFile(join(root, 'target', 'file.txt'), 'utf8'), 'inside');
+
+    const aliasedMoveSource = join(root, 'target', 'aliased-move.txt');
+    await writeFile(aliasedMoveSource, 'preserved');
+    const aliasedMove = await invokeTool(executor, 'move_path', {
+      lease,
+      source: aliasedMoveSource,
+      destination: join(root, 'directory-link', 'aliased-move.txt'),
+      overwrite: true,
+    });
+    assert.equal(aliasedMove.ok, false);
+    if (aliasedMove.ok) assert.fail('move unexpectedly treated two aliases of one named entry as distinct');
+    assert.equal(aliasedMove.status, 400);
+    assert.equal(aliasedMove.value.error.code, 'destination_invalid');
+    assert.equal(await readFile(aliasedMoveSource, 'utf8'), 'preserved');
+
+    await executor.call('delete_path', { lease, path: join(root, 'outside-link'), recursive: false });
+    await assert.rejects(lstat(join(root, 'outside-link')), { code: 'ENOENT' });
+    assert.equal(await readFile(join(outside, 'secret.txt'), 'utf8'), 'outside');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('descriptor-anchored tools resist deterministic parent and destination replacement', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'qubicl-bounded-races-'));
+  const root = join(directory, 'home');
+  const outside = join(directory, 'outside');
+  await Promise.all([mkdir(root), mkdir(outside)]);
+  await writeFile(join(outside, 'sentinel.txt'), 'outside');
+  try {
+    const run = async (
+      match: (event: BoundedFileHookEvent) => boolean,
+      action: (event: BoundedFileHookEvent) => Promise<void>,
+      invoke: (executor: ToolExecutor, lease: ReturnType<ToolExecutor['leases']['acquire']>) => Promise<void>,
+    ): Promise<void> => {
+      let used = false;
+      const files = new BoundedFileSystem(root, {
+        beforeUse: async (event) => {
+          if (used || !match(event)) return;
+          used = true;
+          await action(event);
+        },
+      });
+    const executor = new ToolExecutor(undefined, { durableRoot: root, files });
+      const lease = executor.leases.acquire(60);
+      await invoke(executor, lease);
+      assert.equal(used, true, 'the deterministic race hook must run');
+    };
+
+    const metadataParent = join(root, 'metadata-parent');
+    const displacedMetadataParent = join(root, 'metadata-parent-pinned');
+    await mkdir(metadataParent);
+    await writeFile(join(metadataParent, 'value.txt'), 'inside');
+    await writeFile(join(outside, 'value.txt'), 'outside metadata');
+    await run(
+      (event) => event.operation === 'inspect' && event.stage === 'parent-resolved'
+        && event.path === join(metadataParent, 'value.txt'),
+      async () => { await rename(metadataParent, displacedMetadataParent); await symlink(outside, metadataParent); },
+      async (executor, lease) => {
+        const result = await executor.call('get_file_info', { lease, path: join(metadataParent, 'value.txt') }) as { size: number; type: string };
+        assert.deepEqual({ size: result.size, type: result.type }, { size: 6, type: 'file' });
+      },
+    );
+
+    const readParent = join(root, 'read-parent');
+    const displacedReadParent = join(root, 'read-parent-pinned');
+    await mkdir(readParent);
+    await writeFile(join(readParent, 'value.txt'), 'inside');
+    await run(
+      (event) => event.operation === 'read' && event.stage === 'parent-resolved',
+      async () => { await rename(readParent, displacedReadParent); await symlink(outside, readParent); },
+      async (executor, lease) => {
+        const result = await executor.call('read_file', { lease, path: join(readParent, 'value.txt') }) as { content: string };
+        assert.equal(result.content, 'inside');
+      },
+    );
+
+    const writeParent = join(root, 'write-parent');
+    const displacedWriteParent = join(root, 'write-parent-pinned');
+    await mkdir(writeParent);
+    await writeFile(join(writeParent, 'value.txt'), 'before');
+    await run(
+      (event) => event.operation === 'write' && event.stage === 'parent-resolved',
+      async () => { await rename(writeParent, displacedWriteParent); await symlink(outside, writeParent); },
+      async (executor, lease) => { await executor.call('write_file', { lease, path: join(writeParent, 'value.txt'), content: 'after' }); },
+    );
+    assert.equal(await readFile(join(displacedWriteParent, 'value.txt'), 'utf8'), 'after');
+    assert.equal(await readFile(join(outside, 'sentinel.txt'), 'utf8'), 'outside');
+
+    const copySource = join(root, 'copy-source.txt');
+    const copyDestination = join(root, 'copy-destination.txt');
+    await writeFile(copySource, 'copied');
+    await run(
+      (event) => event.operation === 'copy' && event.stage === 'destination-checked',
+      async () => { await symlink(join(outside, 'sentinel.txt'), copyDestination); },
+      async (executor, lease) => { await executor.call('copy_path', { lease, source: copySource, destination: copyDestination, overwrite: true }); },
+    );
+    assert.equal(await readFile(copyDestination, 'utf8'), 'copied');
+    assert.equal(await readFile(join(outside, 'sentinel.txt'), 'utf8'), 'outside');
+
+    const guardedCopySource = join(root, 'guarded-copy-source.txt');
+    const guardedCopyDestination = join(root, 'guarded-copy-destination.txt');
+    await writeFile(guardedCopySource, 'must not overwrite');
+    await run(
+      (event) => event.operation === 'copy' && event.stage === 'destination-checked'
+        && event.destination === guardedCopyDestination,
+      async () => { await symlink(join(outside, 'sentinel.txt'), guardedCopyDestination); },
+      async (executor, lease) => {
+        const result = await invokeTool(executor, 'copy_path', {
+          lease,
+          source: guardedCopySource,
+          destination: guardedCopyDestination,
+          overwrite: false,
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) assert.fail('copy unexpectedly replaced a destination introduced during the operation');
+        assert.equal(result.status, 409);
+        assert.equal(result.value.error.code, 'destination_exists');
+      },
+    );
+    assert.equal((await lstat(guardedCopyDestination)).isSymbolicLink(), true);
+    assert.equal(await readFile(join(outside, 'sentinel.txt'), 'utf8'), 'outside');
+
+    const chainRaceCopyTarget = join(root, 'chain-race-copy-target.txt');
+    const chainRaceCopyDestination = join(root, 'chain-race-copy-destination.txt');
+    const chainRaceCopyMiddle = join(root, 'chain-race-copy-middle');
+    const displacedChainRaceCopyMiddle = join(root, 'chain-race-copy-middle-original');
+    const chainRaceCopySource = join(root, 'chain-race-copy-source');
+    await writeFile(chainRaceCopyTarget, 'original copy referent');
+    await writeFile(chainRaceCopyDestination, 'protected copy destination');
+    await symlink('chain-race-copy-target.txt', chainRaceCopyMiddle);
+    await symlink('chain-race-copy-middle', chainRaceCopySource);
+    await run(
+      (event) => event.operation === 'copy' && event.stage === 'destination-checked'
+        && event.source === chainRaceCopySource,
+      async () => {
+        await rename(chainRaceCopyMiddle, displacedChainRaceCopyMiddle);
+        await symlink('chain-race-copy-destination.txt', chainRaceCopyMiddle);
+      },
+      async (executor, lease) => {
+        const result = await invokeTool(executor, 'copy_path', {
+          lease,
+          source: chainRaceCopySource,
+          destination: chainRaceCopyDestination,
+          overwrite: true,
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) assert.fail('copy unexpectedly committed after its final-source symlink chain changed');
+        assert.equal(result.status, 409);
+        assert.equal(result.value.error.code, 'path_changed');
+      },
+    );
+    assert.equal(await readFile(chainRaceCopyDestination, 'utf8'), 'protected copy destination');
+    assert.equal(await readlink(chainRaceCopySource), 'chain-race-copy-middle');
+    assert.equal(await readlink(chainRaceCopyMiddle), 'chain-race-copy-destination.txt');
+    assert.equal(await readlink(displacedChainRaceCopyMiddle), 'chain-race-copy-target.txt');
+
+    const chainRaceMoveTarget = join(root, 'chain-race-move-target.txt');
+    const chainRaceMoveDestination = join(root, 'chain-race-move-destination.txt');
+    const chainRaceMoveMiddle = join(root, 'chain-race-move-middle');
+    const displacedChainRaceMoveMiddle = join(root, 'chain-race-move-middle-original');
+    const chainRaceMoveSource = join(root, 'chain-race-move-source');
+    await writeFile(chainRaceMoveTarget, 'original move referent');
+    await writeFile(chainRaceMoveDestination, 'protected move destination');
+    await symlink('chain-race-move-target.txt', chainRaceMoveMiddle);
+    await symlink('chain-race-move-middle', chainRaceMoveSource);
+    await run(
+      (event) => event.operation === 'move' && event.stage === 'destination-checked'
+        && event.source === chainRaceMoveSource,
+      async () => {
+        await rename(chainRaceMoveMiddle, displacedChainRaceMoveMiddle);
+        await symlink('chain-race-move-destination.txt', chainRaceMoveMiddle);
+      },
+      async (executor, lease) => {
+        const result = await invokeTool(executor, 'move_path', {
+          lease,
+          source: chainRaceMoveSource,
+          destination: chainRaceMoveDestination,
+          overwrite: true,
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) assert.fail('move unexpectedly committed after its final-source symlink chain changed');
+        assert.equal(result.status, 409);
+        assert.equal(result.value.error.code, 'path_changed');
+      },
+    );
+    assert.equal(await readFile(chainRaceMoveDestination, 'utf8'), 'protected move destination');
+    assert.equal(await readlink(chainRaceMoveSource), 'chain-race-move-middle');
+    assert.equal(await readlink(chainRaceMoveMiddle), 'chain-race-move-destination.txt');
+    assert.equal(await readlink(displacedChainRaceMoveMiddle), 'chain-race-move-target.txt');
+
+    const editPath = join(root, 'edit-race.txt');
+    const displacedEditPath = join(root, 'edit-race-original.txt');
+    await writeFile(editPath, 'before edit');
+    await run(
+      (event) => event.operation === 'edit' && event.stage === 'destination-checked'
+        && event.path === editPath,
+      async () => { await rename(editPath, displacedEditPath); await symlink(join(outside, 'sentinel.txt'), editPath); },
+      async (executor, lease) => {
+        const result = await invokeTool(executor, 'edit_file', {
+          lease,
+          path: editPath,
+          edits: [{ oldText: 'before', newText: 'after' }],
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) assert.fail('edit unexpectedly replaced a changed destination');
+        assert.equal(result.status, 409);
+        assert.equal(result.value.error.code, 'path_changed');
+      },
+    );
+    assert.equal(await readFile(displacedEditPath, 'utf8'), 'before edit');
+    assert.equal((await lstat(editPath)).isSymbolicLink(), true);
+    assert.equal(await readFile(join(outside, 'sentinel.txt'), 'utf8'), 'outside');
+
+    const moveSource = join(root, 'move-source.txt');
+    const moveDestination = join(root, 'move-destination.txt');
+    await writeFile(moveSource, 'moved');
+    await run(
+      (event) => event.operation === 'move' && event.stage === 'destination-checked',
+      async () => { await symlink(join(outside, 'sentinel.txt'), moveDestination); },
+      async (executor, lease) => { await executor.call('move_path', { lease, source: moveSource, destination: moveDestination, overwrite: true }); },
+    );
+    assert.equal(await readFile(moveDestination, 'utf8'), 'moved');
+    await assert.rejects(lstat(moveSource), { code: 'ENOENT' });
+    assert.equal(await readFile(join(outside, 'sentinel.txt'), 'utf8'), 'outside');
+
+    const replacedMoveSource = join(root, 'replaced-move-source.txt');
+    const displacedMoveSource = join(root, 'replaced-move-original.txt');
+    const replacedMoveDestination = join(root, 'replaced-move-destination.txt');
+    await writeFile(replacedMoveSource, 'original move source');
+    await run(
+      (event) => event.operation === 'move' && event.stage === 'destination-checked'
+        && event.source === replacedMoveSource,
+      async () => {
+        await rename(replacedMoveSource, displacedMoveSource);
+        await writeFile(replacedMoveSource, 'replacement move source');
+      },
+      async (executor, lease) => {
+        const result = await invokeTool(executor, 'move_path', {
+          lease,
+          source: replacedMoveSource,
+          destination: replacedMoveDestination,
+          overwrite: true,
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) assert.fail('move unexpectedly committed a replaced final source');
+        assert.equal(result.status, 409);
+        assert.equal(result.value.error.code, 'path_changed');
+      },
+    );
+    assert.equal(await readFile(replacedMoveSource, 'utf8'), 'replacement move source');
+    assert.equal(await readFile(displacedMoveSource, 'utf8'), 'original move source');
+    await assert.rejects(lstat(replacedMoveDestination), { code: 'ENOENT' });
+
+    const replacedDeleteSource = join(root, 'replaced-delete-source.txt');
+    const displacedDeleteSource = join(root, 'replaced-delete-original.txt');
+    await writeFile(replacedDeleteSource, 'original delete source');
+    await run(
+      (event) => event.operation === 'delete' && event.stage === 'parent-resolved'
+        && event.path === replacedDeleteSource,
+      async () => {
+        await rename(replacedDeleteSource, displacedDeleteSource);
+        await writeFile(replacedDeleteSource, 'replacement delete source');
+      },
+      async (executor, lease) => {
+        const result = await invokeTool(executor, 'delete_path', { lease, path: replacedDeleteSource });
+        assert.equal(result.ok, false);
+        if (result.ok) assert.fail('delete unexpectedly removed a replaced final source');
+        assert.equal(result.status, 409);
+        assert.equal(result.value.error.code, 'path_changed');
+      },
+    );
+    assert.equal(await readFile(replacedDeleteSource, 'utf8'), 'replacement delete source');
+    assert.equal(await readFile(displacedDeleteSource, 'utf8'), 'original delete source');
+
+    const deleteParent = join(root, 'delete-parent');
+    const displacedDeleteParent = join(root, 'delete-parent-pinned');
+    await mkdir(join(deleteParent, 'tree'), { recursive: true });
+    await writeFile(join(deleteParent, 'tree', 'inside.txt'), 'inside');
+    await mkdir(join(outside, 'tree'));
+    await writeFile(join(outside, 'tree', 'sentinel.txt'), 'outside-tree');
+    await run(
+      (event) => event.operation === 'delete' && event.stage === 'parent-resolved',
+      async () => { await rename(deleteParent, displacedDeleteParent); await symlink(outside, deleteParent); },
+      async (executor, lease) => { await executor.call('delete_path', { lease, path: join(deleteParent, 'tree'), recursive: true }); },
+    );
+    await assert.rejects(lstat(join(displacedDeleteParent, 'tree')), { code: 'ENOENT' });
+    assert.equal(await readFile(join(outside, 'tree', 'sentinel.txt'), 'utf8'), 'outside-tree');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('recursive copy removes partial staging after a deterministic special-file failure', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'qubicl-copy-staging-'));
+  const root = join(directory, 'home');
+  const source = join(root, 'source');
+  const destination = join(root, 'destination');
+  const socketPath = join(source, 'z-special.sock');
+  await mkdir(source, { recursive: true });
+  await writeFile(join(source, 'a-copied-first.txt'), 'staged before failure');
+  const socket = createServer();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.once('error', reject);
+      socket.listen(socketPath, resolve);
+    });
+    const executor = new ToolExecutor(undefined, { durableRoot: root });
+    const lease = executor.leases.acquire(60);
+    const result = await invokeTool(executor, 'copy_path', { lease, source, destination });
+    assert.equal(result.ok, false);
+    if (result.ok) assert.fail('recursive copy unexpectedly accepted a Unix socket');
+    assert.equal(result.status, 400);
+    assert.equal(result.value.error.code, 'path_invalid');
+    assert.match(result.value.error.message, new RegExp(escapeRegExp(source)));
+    await assert.rejects(lstat(destination), { code: 'ENOENT' });
+    assert.deepEqual(
+      (await readdir(root)).filter((name) => name.startsWith('.qubicl-copy-') || name.startsWith('.qubicl-quarantine-')),
+      [],
+    );
+    assert.equal(await readFile(join(source, 'a-copied-first.txt'), 'utf8'), 'staged before failure');
+  } finally {
+    if (socket.listening) await new Promise<void>((resolve) => socket.close(() => resolve()));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('bounded mutations report post-commit cleanup, durability, and capability outcomes precisely', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'qubicl-bounded-outcomes-'));
+  const root = join(directory, 'home');
+  await mkdir(root);
+  try {
+    const cleanupSource = join(root, 'cleanup-source.txt');
+    const cleanupDestination = join(root, 'cleanup-destination.txt');
+    await writeFile(cleanupSource, 'new destination');
+    await writeFile(cleanupDestination, 'old destination');
+    const cleanupFiles = new BoundedFileSystem(root, {
+      beforeUse: (event) => {
+        if (event.operation === 'copy' && event.stage === 'before-quarantine-cleanup' && event.path === cleanupDestination) {
+          throw new Error('deterministic cleanup failure');
+        }
+      },
+    });
+    const cleanupExecutor = new ToolExecutor(undefined, { durableRoot: root, files: cleanupFiles });
+    const cleanupLease = cleanupExecutor.leases.acquire(60);
+    const cleanup = await invokeTool(cleanupExecutor, 'copy_path', {
+      lease: cleanupLease,
+      source: cleanupSource,
+      destination: cleanupDestination,
+      overwrite: true,
+    });
+    assert.equal(cleanup.ok, false);
+    if (cleanup.ok) assert.fail('copy unexpectedly hid its post-commit cleanup failure');
+    assert.equal(cleanup.status, 500);
+    assert.equal(cleanup.value.error.code, 'mutation_committed_cleanup_incomplete');
+    assert.equal(await readFile(cleanupDestination, 'utf8'), 'new destination');
+    assert.equal((await readdir(root)).some((name) => name.startsWith('.qubicl-quarantine-')), true);
+
+    const durabilityPath = join(root, 'durability.txt');
+    const durabilityFiles = new BoundedFileSystem(root, {
+      beforeUse: (event) => {
+        if (event.operation === 'write' && event.stage === 'before-parent-sync' && event.path === durabilityPath) {
+          throw new Error('deterministic parent fsync failure');
+        }
+      },
+    });
+    const durabilityExecutor = new ToolExecutor(undefined, { durableRoot: root, files: durabilityFiles });
+    const durabilityLease = durabilityExecutor.leases.acquire(60);
+    const durability = await invokeTool(durabilityExecutor, 'write_file', {
+      lease: durabilityLease,
+      path: durabilityPath,
+      content: 'committed before fsync',
+    });
+    assert.equal(durability.ok, false);
+    if (durability.ok) assert.fail('write unexpectedly hid its post-commit durability uncertainty');
+    assert.equal(durability.status, 500);
+    assert.equal(durability.value.error.code, 'mutation_durability_uncertain');
+    assert.equal(await readFile(durabilityPath, 'utf8'), 'committed before fsync');
+
+    const capabilityPath = join(root, 'capability.txt');
+    await writeFile(capabilityPath, 'unread by an unprobed runtime');
+    const unavailableFiles = new BoundedFileSystem(root, {
+      capabilityProbe: () => { throw new Error('deterministic missing capability'); },
+    });
+    const unavailableExecutor = new ToolExecutor(undefined, { durableRoot: root, files: unavailableFiles });
+    const unavailableLease = unavailableExecutor.leases.acquire(60);
+    const unavailable = await invokeTool(unavailableExecutor, 'read_file', { lease: unavailableLease, path: capabilityPath });
+    assert.equal(unavailable.ok, false);
+    if (unavailable.ok) assert.fail('file access unexpectedly continued after its capability probe failed');
+    assert.equal(unavailable.status, 503);
+    assert.equal(unavailable.value.error.code, 'filesystem_hardening_unavailable');
+    assert.match(unavailable.value.error.message, /bounded filesystem runtime probe failed/);
+
+    const locusSource = join(root, 'locus-source.txt');
+    const locusDestination = join(root, 'locus-destination.txt');
+    await writeFile(locusSource, 'source remains available');
+    const locusFiles = new BoundedFileSystem(root, {
+      beforeUse: (event) => {
+        if (event.operation === 'copy' && event.stage === 'destination-checked' && event.destination === locusDestination) {
+          const error = new Error('deterministic destination denial') as NodeJS.ErrnoException;
+          error.code = 'EACCES';
+          throw error;
+        }
+      },
+    });
+    const locusExecutor = new ToolExecutor(undefined, { durableRoot: root, files: locusFiles });
+    const locusLease = locusExecutor.leases.acquire(60);
+    const locus = await invokeTool(locusExecutor, 'copy_path', {
+      lease: locusLease,
+      source: locusSource,
+      destination: locusDestination,
+    });
+    assert.equal(locus.ok, false);
+    if (locus.ok) assert.fail('copy unexpectedly ignored a destination permission failure');
+    assert.equal(locus.status, 403);
+    assert.equal(locus.value.error.code, 'permission_denied');
+    assert.match(locus.value.error.message, new RegExp(escapeRegExp(locusDestination)));
+    await assert.rejects(lstat(locusDestination), { code: 'ENOENT' });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('bounded filesystem uses execute-only traversal, compatible mkdir symlinks, sparse copies, and root-wide mutation serialization', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'qubicl-bounded-platform-'));
+  const root = join(directory, 'home');
+  const outside = join(directory, 'outside');
+  const executeOnly = join(root, 'execute-only');
+  await Promise.all([mkdir(root), mkdir(outside)]);
+  await mkdir(executeOnly);
+  try {
+    const files = new BoundedFileSystem(root);
+    await writeFile(join(executeOnly, 'readable.txt'), 'through O_PATH');
+    await chmod(executeOnly, 0o111);
+    const traversed = await files.readFile(join(executeOnly, 'readable.txt'));
+    assert.equal(traversed.data.toString('utf8'), 'through O_PATH');
+    await chmod(executeOnly, 0o755);
+
+    const mkdirTarget = join(root, 'mkdir-target');
+    const mkdirLink = join(root, 'mkdir-link');
+    await mkdir(mkdirTarget);
+    await symlink('mkdir-target', mkdirLink);
+    await files.mkdir(mkdirLink);
+    assert.equal((await lstat(mkdirLink)).isSymbolicLink(), true);
+
+    const outsideLink = join(root, 'outside-mkdir-link');
+    await symlink(outside, outsideLink);
+    await assert.rejects(files.mkdir(outsideLink), /resolves outside the bounded root/);
+    assert.equal((await lstat(outsideLink)).isSymbolicLink(), true);
+
+    const sparseSource = join(root, 'sparse-source.bin');
+    const sparseDestination = join(root, 'sparse-destination.bin');
+    const sparseSize = 4 * 1024 * 1024;
+    const sparseHandle = await open(sparseSource, 'w', 0o644);
+    try {
+      await sparseHandle.truncate(sparseSize);
+      await sparseHandle.write(Buffer.from('tail'), 0, 4, sparseSize - 4);
+      await sparseHandle.sync();
+    } finally {
+      await sparseHandle.close();
+    }
+    await files.copy(sparseSource, sparseDestination, false);
+    const [sourceInfo, destinationInfo] = await Promise.all([lstat(sparseSource), lstat(sparseDestination)]);
+    assert.equal(destinationInfo.size, sparseSize);
+    assert.ok(destinationInfo.blocks <= sourceInfo.blocks + 32, 'descriptor-safe copy should preserve sparse/reflink-friendly allocation');
+
+    const realParent = join(root, 'serialized-parent');
+    const aliasParent = join(root, 'serialized-alias');
+    await mkdir(realParent);
+    await symlink('serialized-parent', aliasParent);
+    let releaseFirst!: () => void;
+    let markFirstEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => { markFirstEntered = resolve; });
+    const firstRelease = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let secondEntered = false;
+    const firstFiles = new BoundedFileSystem(root, {
+      beforeUse: async (event) => {
+        if (event.operation === 'write' && event.stage === 'parent-resolved' && event.path.endsWith('/first.txt')) {
+          markFirstEntered();
+          await firstRelease;
+        }
+      },
+    });
+    const secondFiles = new BoundedFileSystem(root, {
+      beforeUse: (event) => {
+        if (event.operation === 'write' && event.stage === 'parent-resolved' && event.path.endsWith('/second.txt')) {
+          secondEntered = true;
+        }
+      },
+    });
+    const firstWrite = firstFiles.writeFile(join(realParent, 'first.txt'), Buffer.from('first'), { createParents: false });
+    await firstEntered;
+    const secondWrite = secondFiles.writeFile(join(aliasParent, 'second.txt'), Buffer.from('second'), { createParents: false });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(secondEntered, false, 'a mutation through an alias must wait for the root mutation queue');
+    releaseFirst();
+    await Promise.all([firstWrite, secondWrite]);
+    assert.equal(secondEntered, true);
+    assert.equal(await readFile(join(realParent, 'first.txt'), 'utf8'), 'first');
+    assert.equal(await readFile(join(realParent, 'second.txt'), 'utf8'), 'second');
+  } finally {
+    await chmod(executeOnly, 0o755).catch(() => undefined);
     await rm(directory, { recursive: true, force: true });
   }
 });

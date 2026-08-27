@@ -30,6 +30,13 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   only, without rebuilding, rescanning, or rerunning artifact acceptance; all
   candidate verification remains pinned to the clean reviewed revision.
 
+### Security
+
+- Durable-home reads and mutations, including Open Terminal file routes, now
+  traverse descriptor-anchored Linux paths with no-follow checks and atomic
+  no-replace renames. Copy, move, overwrite, and delete operations reject
+  symlink and destination replacement races without escaping `/home/qubicl`.
+
 ## 0.1.1 - 2026-08-27
 
 ### Fixed

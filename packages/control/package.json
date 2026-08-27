@@ -18,7 +18,8 @@
     "./skills": "./dist/skills.js",
     "./web": "./dist/web.js",
     "./egress": "./dist/egress.js",
-    "./viewer-actions": "./dist/viewer-actions.js"
+    "./viewer-actions": "./dist/viewer-actions.js",
+    "./bounded-files": "./dist/bounded-files.js"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.0.0",

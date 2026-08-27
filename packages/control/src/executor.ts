@@ -1,6 +1,6 @@
-import { cp, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { annotateUntrustedToolResult, MODEL_TEXT_BUDGET_BYTES, toolDefinitions, type ComputerManifest, type DesktopApplicationName, type ToolName } from '@qubicl/core';
 import type { z } from 'zod';
@@ -11,7 +11,7 @@ import { LeaseManager, type LeaseProof } from './lease.js';
 import { ProcessManager, type ProcessOutputMode, type StopSignal } from './processes.js';
 import { readEffectiveResourceLimits } from './resource-limits.js';
 import { developmentComputerManifest } from './image-manifest.js';
-import { atomicReplaceFile, withFileMutation } from './file-mutations.js';
+import { withFileMutation } from './file-mutations.js';
 import { BrowserManager, type BrowserComputerAction, type BrowserMouseButton, type BrowserViewerResult } from './browser.js';
 import { desktopHelperEnvironment } from './environments.js';
 import { RemoteBrokerManager, RemoteBrowserManager, RemoteDesktopApplicationManager, RemoteDesktopManager, RemotePortManager, RemoteProcessManager, RemoteWebManager, type RemoteProcessStatus } from './remote-runners.js';
@@ -21,6 +21,7 @@ import { AuditLog, contentAuditMetadata, toolAuditMetadata } from './audit.js';
 import { SkillManager } from './skills.js';
 import { RuntimePolicy } from './policy.js';
 import { ViewerPointerStore, type ViewerPointerUpdate } from './viewer-actions.js';
+import { BoundedFileSystem, BoundedPathError } from './bounded-files.js';
 
 type ToolInput = Record<string, unknown>;
 
@@ -35,6 +36,7 @@ export interface ToolExecutorOptions {
   policy?: RuntimePolicy;
   web?: WebController;
   viewerPointers?: ViewerPointerStore;
+  files?: BoundedFileSystem;
 }
 
 type ProcessController = Pick<ProcessManager, 'exec' | 'write' | 'stop' | 'terminateOwner'> & {
@@ -83,6 +85,7 @@ export class ToolExecutor {
   readonly manifest: ComputerManifest;
   readonly manifestSha256: string;
   readonly durableRoot: string;
+  readonly files: BoundedFileSystem;
   private gatewayEpoch: string | undefined;
   private gatewayTransition: Promise<void> | undefined;
 
@@ -91,7 +94,9 @@ export class ToolExecutor {
     this.manifestSha256 = contract.sha256;
     this.policy = options.policy ?? new RuntimePolicy(contract.manifest);
     this.viewerPointers = options.viewerPointers ?? new ViewerPointerStore();
-    this.durableRoot = resolve(options.durableRoot ?? '/home/qubicl');
+    this.durableRoot = resolve(options.durableRoot ?? options.files?.root ?? '/home/qubicl');
+    this.files = options.files ?? new BoundedFileSystem(this.durableRoot);
+    if (this.files.root !== this.durableRoot) throw new Error('The bounded filesystem root must match the durable root.');
     this.processes = options.processes ?? configuredProcessController(this.durableRoot);
     this.desktopApplications = options.desktopApplications ?? configuredDesktopApplicationController(contract.manifest.compatibility, this.durableRoot);
     this.browser = options.browser ?? configuredBrowserController(contract.manifest.capabilities.includes('browser'), this.durableRoot);
@@ -265,49 +270,46 @@ export class ToolExecutor {
       }
       case 'list_files': {
         const path = this.workspacePath(input.path as string);
-        return respond(await fileOperation({ operation: 'list', path }, async () => {
-          await requireCanonicalWorkspacePath(this.durableRoot, path);
-          return listFiles(path, input.recursive as boolean, input.cursor as number, input.maxEntries as number);
+        return respond(await fileOperation(this.durableRoot, { operation: 'list', path }, async () => {
+          const entryBudget = Math.max(1024, MODEL_TEXT_BUDGET_BYTES - Buffer.byteLength(path) - 512);
+          const listing = await this.files.list(path, input.recursive as boolean, input.cursor as number, input.maxEntries as number, entryBudget);
+          return { root: path, cursor: input.cursor as number, ...listing };
         }));
       }
       case 'get_file_info': {
         const path = this.workspacePath(input.path as string);
-        return respond(await fileOperation({ operation: 'inspect', path }, () => fileInfo(path)));
+        return respond(await fileOperation(this.durableRoot, { operation: 'inspect', path }, async () => fileInfo(path, await this.files.info(path))));
       }
       case 'read_file': {
         const path = this.workspacePath(input.path as string);
-        return respond(await fileOperation({ operation: 'read', path }, async () => {
-          await requireCanonicalWorkspacePath(this.durableRoot, path);
-          return readToolFile(path, input.offset as number, input.limit as number, input.encoding as 'auto' | 'utf8', input.maxBytes as number);
-        }));
+        return respond(await fileOperation(this.durableRoot, { operation: 'read', path }, () => readToolFile(
+          this.files,
+          path,
+          input.offset as number,
+          input.limit as number,
+          input.encoding as 'auto' | 'utf8',
+          input.maxBytes as number,
+        )));
       }
       case 'write_file': {
         const target = this.workspacePath(input.path as string);
-        await requireWorkspaceDestination(this.durableRoot, target);
         const data = Buffer.from(input.content as string, input.encoding as BufferEncoding);
-        return respond(await fileOperation({ operation: 'write', path: target }, async () => {
-          await withFileMutation(target, () => atomicReplaceFile(target, data, input.createParents as boolean));
+        return respond(await fileOperation(this.durableRoot, { operation: 'write', path: target }, async () => {
+          await withFileMutation(target, () => this.files.writeFile(target, data, { createParents: input.createParents as boolean }));
           return { path: target, bytesWritten: data.length };
         }));
       }
       case 'edit_file': {
         const path = this.workspacePath(input.path as string);
-        return respond(await fileOperation({ operation: 'edit', path }, async () => {
-          await requireCanonicalWorkspacePath(this.durableRoot, path);
-          return editFile(path, input.edits as EditOperation[]);
-        }));
+        return respond(await fileOperation(this.durableRoot, { operation: 'edit', path }, () => editFile(this.files, path, input.edits as EditOperation[])));
       }
       case 'copy_path': {
         const source = this.workspacePath(input.source as string);
         const destination = this.workspacePath(input.destination as string);
         const overwrite = input.overwrite as boolean;
-        return respond(await fileOperation({ operation: 'copy', source, destination }, async () => {
-          await requireCanonicalWorkspacePath(this.durableRoot, source);
-          await requireWorkspaceDestination(this.durableRoot, destination);
-          await requireExistingSource(source);
+        return respond(await fileOperation(this.durableRoot, { operation: 'copy', source, destination }, async () => {
           requireNonOverlappingDestination(source, destination);
-          if (!overwrite && await pathExists(destination)) throw destinationExists(destination);
-          await cp(source, destination, { recursive: true, force: overwrite, errorOnExist: !overwrite });
+          await this.files.copy(source, destination, overwrite);
           return { source, destination };
         }));
       }
@@ -315,29 +317,19 @@ export class ToolExecutor {
         const source = this.workspacePath(input.source as string);
         const destination = this.workspacePath(input.destination as string);
         const overwrite = input.overwrite as boolean;
-        return respond(await fileOperation({ operation: 'move', source, destination }, async () => {
-          await requireWorkspaceEntry(this.durableRoot, source);
-          await requireWorkspaceDestination(this.durableRoot, destination);
-          await requireExistingSource(source);
+        return respond(await fileOperation(this.durableRoot, { operation: 'move', source, destination }, async () => {
           requireNonOverlappingDestination(source, destination);
-          if (!overwrite) {
-            if (await pathExists(destination)) throw destinationExists(destination);
-          } else {
-            await rm(destination, { recursive: true, force: true });
-          }
-          await mkdir(dirname(destination), { recursive: true });
-          await rename(source, destination);
+          await this.files.move(source, destination, overwrite);
           return { source, destination };
         }));
       }
       case 'delete_path': {
         const target = this.workspacePath(input.path as string);
-        await requireWorkspaceEntry(this.durableRoot, target);
         if (target === this.durableRoot) {
           throw new QubiclError('unsafe_delete', `Refusing to delete protected path ${target}.`, 400);
         }
-        return respond(await fileOperation({ operation: 'delete', path: target }, async () => {
-          await rm(target, { recursive: input.recursive as boolean, force: false });
+        return respond(await fileOperation(this.durableRoot, { operation: 'delete', path: target }, async () => {
+          await this.files.remove(target, input.recursive as boolean);
           return { path: target, deleted: true };
         }));
       }
@@ -501,11 +493,11 @@ export class ToolExecutor {
   }
 
   private workspacePath(value: string): string {
-    const candidate = isAbsolute(value) ? resolve(value) : resolve(this.durableRoot, value);
-    if (candidate !== this.durableRoot && !isWithin(this.durableRoot, candidate)) {
+    try { return this.files.absolutePath(value); }
+    catch (error) {
+      if (!(error instanceof BoundedPathError)) throw error;
       throw new QubiclError('path_outside_workspace', `Paths must stay beneath the durable workspace ${this.durableRoot}.`, 403);
     }
-    return candidate;
   }
 }
 
@@ -619,8 +611,7 @@ const MAX_TEXT_READ_BYTES = MODEL_TEXT_BUDGET_BYTES;
 const MAX_TEXT_SOURCE_BYTES = 20_000_000;
 const MAX_EDIT_DIFF_BYTES = MODEL_TEXT_BUDGET_BYTES;
 
-async function fileInfo(target: string): Promise<unknown> {
-  const info = await lstat(target);
+function fileInfo(target: string, info: import('node:fs').Stats): unknown {
   return {
     path: target,
     name: basename(target),
@@ -636,55 +627,14 @@ function commandWorkingDirectory(root: string, value: string): string {
   return isAbsolute(value) ? resolve(value) : resolve(root, value);
 }
 
-async function requireCanonicalWorkspacePath(root: string, target: string): Promise<void> {
-  const [canonicalRoot, canonicalTarget] = await Promise.all([realpath(root), realpath(target)]);
-  if (canonicalTarget !== canonicalRoot && !isWithin(canonicalRoot, canonicalTarget)) {
-    throw new QubiclError('path_outside_workspace', `Path ${target} resolves outside the durable workspace ${root}.`, 403);
-  }
-}
-
-async function requireWorkspaceEntry(root: string, target: string): Promise<void> {
-  const canonicalRoot = await realpath(root);
-  const parent = await realpath(dirname(target));
-  if (parent !== canonicalRoot && !isWithin(canonicalRoot, parent)) {
-    throw new QubiclError('path_outside_workspace', `Path ${target} resolves outside the durable workspace ${root}.`, 403);
-  }
-}
-
-async function requireWorkspaceDestination(root: string, target: string): Promise<void> {
-  let existing = dirname(target);
-  for (;;) {
-    try {
-      const [canonicalRoot, canonicalParent] = await Promise.all([realpath(root), realpath(existing)]);
-      if (canonicalParent !== canonicalRoot && !isWithin(canonicalRoot, canonicalParent)) {
-        throw new QubiclError('path_outside_workspace', `Path ${target} resolves outside the durable workspace ${root}.`, 403);
-      }
-      return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      const parent = dirname(existing);
-      if (parent === existing) throw error;
-      existing = parent;
-    }
-  }
-}
-
-async function fileOperation<T>(context: FileErrorContext, action: (context: FileErrorContext) => Promise<T>): Promise<T> {
+async function fileOperation<T>(root: string, context: FileErrorContext, action: (context: FileErrorContext) => Promise<T>): Promise<T> {
   try { return await action(context); }
-  catch (error) { throw mapFileSystemError(error, context); }
-}
-
-async function requireExistingSource(source: string): Promise<void> {
-  await lstat(source);
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await lstat(path);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    throw error;
+  catch (error) {
+    if (error instanceof BoundedPathError) {
+      const path = error.path;
+      throw new QubiclError('path_outside_workspace', `Path ${path} resolves outside the durable workspace ${root}.`, 403);
+    }
+    throw mapFileSystemError(error, context);
   }
 }
 
@@ -699,66 +649,19 @@ function isWithin(parent: string, candidate: string): boolean {
   return nested !== '' && nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested);
 }
 
-function destinationExists(destination: string): QubiclError {
-  return new QubiclError('destination_exists', `Destination ${destination} already exists. Choose another destination or retry with overwrite enabled.`, 409);
-}
-
-async function listFiles(root: string, recursive: boolean, cursor: number, maxEntries: number): Promise<unknown> {
-  const results: Array<{ name: string; type: string }> = [];
-  let resultBytes = 0;
-  const entryBudget = Math.max(1024, MODEL_TEXT_BUDGET_BYTES - Buffer.byteLength(root) - 512);
-  let position = 0;
-  let hasMore = false;
-  const visit = async (directory: string): Promise<boolean> => {
-    const entries = (await readdir(directory, { withFileTypes: true }))
-      .sort((left, right) => left.name.localeCompare(right.name));
-    for (const entry of entries) {
-      if (position >= cursor) {
-        if (results.length >= maxEntries) {
-          hasMore = true;
-          return true;
-        }
-        const target = join(directory, entry.name);
-        const result = {
-          name: relative(root, target),
-          type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : entry.isSymbolicLink() ? 'symlink' : 'other',
-        };
-        const entryBytes = Buffer.byteLength(JSON.stringify(result)) + (results.length ? 1 : 0);
-        if (results.length && resultBytes + entryBytes > entryBudget) {
-          hasMore = true;
-          return true;
-        }
-        results.push(result);
-        resultBytes += entryBytes;
-      }
-      position += 1;
-      if (recursive && entry.isDirectory() && await visit(join(directory, entry.name))) return true;
-    }
-    return false;
-  };
-  await visit(root);
-  return {
-    root,
-    entries: results,
-    cursor,
-    truncated: hasMore,
-    ...(hasMore ? { nextCursor: cursor + results.length } : {}),
-  };
-}
-
 async function readToolFile(
+  files: BoundedFileSystem,
   target: string,
   offset: number,
   limit: number,
   encoding: 'auto' | 'utf8',
   maxBytes: number,
 ): Promise<unknown> {
-  const info = await stat(target);
+  const { data, info } = await files.readFile(target, MAX_TEXT_SOURCE_BYTES + 1);
   if (!info.isFile()) throw new QubiclError('not_a_file', `${target} is not a regular file.`, 400);
-  if (info.size > MAX_TEXT_SOURCE_BYTES) {
+  if (info.size > MAX_TEXT_SOURCE_BYTES || data.length > MAX_TEXT_SOURCE_BYTES) {
     throw new QubiclError('file_too_large', `${target} is ${info.size} bytes; files larger than ${MAX_TEXT_SOURCE_BYTES} bytes cannot be read through this tool.`, 413);
   }
-  const data = await readFile(target);
   const mimeType = encoding === 'auto' ? supportedImageMimeType(data) : undefined;
   if (mimeType) {
     if (data.length > maxBytes) throw new QubiclError('file_too_large', `${target} is ${data.length} bytes; the image read limit is ${maxBytes}.`, 413);
@@ -795,9 +698,10 @@ async function readToolFile(
   };
 }
 
-async function editFile(target: string, edits: EditOperation[]): Promise<unknown> {
+async function editFile(files: BoundedFileSystem, target: string, edits: EditOperation[]): Promise<unknown> {
   return withFileMutation(target, async () => {
-    const originalData = await readFile(target);
+    const read = await files.readFile(target, undefined, 'edit');
+    const originalData = read.data;
     const hasBom = originalData.length >= 3 && originalData[0] === 0xef && originalData[1] === 0xbb && originalData[2] === 0xbf;
     const bodyData = hasBom ? originalData.subarray(3) : originalData;
     let original: string;
@@ -813,7 +717,12 @@ async function editFile(target: string, edits: EditOperation[]): Promise<unknown
     let updated = original;
     for (const edit of resolved.toReversed()) updated = `${updated.slice(0, edit.start)}${edit.newText}${updated.slice(edit.end)}`;
     const updatedData = Buffer.concat([hasBom ? Buffer.from([0xef, 0xbb, 0xbf]) : Buffer.alloc(0), Buffer.from(updated, 'utf8')]);
-    await atomicReplaceFile(target, updatedData, false);
+    await files.writeFile(target, updatedData, {
+      createParents: false,
+      operation: 'edit',
+      expectedIdentity: read.identity,
+      expectedNamedIdentity: read.namedIdentity,
+    });
     const rendered = renderEditDiff(target, original, resolved);
     const boundedDiff = truncateUtf8(rendered, MAX_EDIT_DIFF_BYTES);
     return {

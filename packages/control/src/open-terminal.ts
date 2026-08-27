@@ -1,6 +1,4 @@
-import { constants } from 'node:fs';
-import { access, mkdir, readFile, realpath, stat } from 'node:fs/promises';
-import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, extname, isAbsolute, join, resolve } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   buildOpenTerminalOpenApi,
@@ -14,6 +12,7 @@ import { QubiclError } from './errors.js';
 import type { ToolExecutor } from './executor.js';
 import { mapFileSystemError, type FileErrorContext } from './file-errors.js';
 import type { LeaseProof } from './lease.js';
+import { BoundedPathError, type BoundedFileSystem } from './bounded-files.js';
 
 const PREFIX = '/open-terminal';
 const FILE_SERVE_PREFIX = '/files/serve/';
@@ -57,6 +56,9 @@ export class OpenTerminalCompatibility {
     options: OpenTerminalCompatibilityOptions = {},
   ) {
     this.home = resolve(options.home ?? DEFAULT_HOME);
+    if (this.home !== this.executor.files.root) {
+      throw new Error('The Open Terminal home must match the bounded filesystem root.');
+    }
   }
 
   async handle(request: IncomingMessage, response: ServerResponse, url: URL): Promise<boolean> {
@@ -64,7 +66,9 @@ export class OpenTerminalCompatibility {
     try {
       await this.dispatch(request, response, url);
     } catch (error) {
-      sendCompatibilityError(response, error);
+      sendCompatibilityError(response, error instanceof BoundedPathError
+        ? new QubiclError('path_outside_home', `Open Terminal compatibility is restricted to ${this.home}.`, 403)
+        : error);
     }
     return true;
   }
@@ -152,9 +156,9 @@ export class OpenTerminalCompatibility {
         .map(async (entry) => ({
           name: entry.name!,
           type: entry.type!,
-          ...await compatibilityMetadata(join(target, entry.name!)),
+          ...await compatibilityMetadata(this.executor.files, join(target, entry.name!)),
         })));
-      sendJson(response, 200, { dir: target, entries, writable: await isWritable(target) });
+      sendJson(response, 200, { dir: target, entries, writable: await this.executor.files.isWritable(target) });
       return;
     }
     if (request.method === 'GET' && path === '/files/search') {
@@ -177,7 +181,7 @@ export class OpenTerminalCompatibility {
         path: join(target, entry.name),
         name: basename(entry.name),
         type: entry.type,
-        ...await compatibilityMetadata(join(target, entry.name)),
+        ...await compatibilityMetadata(this.executor.files, join(target, entry.name)),
       })));
       sendJson(response, 200, { results });
       return;
@@ -252,10 +256,11 @@ export class OpenTerminalCompatibility {
       const target = await this.resolvePath(requested, request, true, { operation: 'read', path: requested });
       const data = await this.withLease(async () => {
         try {
-          const info = await stat(target);
+          const read = await this.executor.files.readFile(target, MAX_UPLOAD_BYTES + 1);
+          const info = read.info;
           if (!info.isFile()) throw new QubiclError('not_a_file', `${target} is not a regular file.`, 400);
-          if (info.size > MAX_UPLOAD_BYTES) throw new QubiclError('file_too_large', `${target} exceeds the ${MAX_UPLOAD_BYTES}-byte download limit.`, 413);
-          return await readFile(target);
+          if (info.size > MAX_UPLOAD_BYTES || read.data.length > MAX_UPLOAD_BYTES) throw new QubiclError('file_too_large', `${target} exceeds the ${MAX_UPLOAD_BYTES}-byte download limit.`, 413);
+          return read.data;
         } catch (error) {
           if (error instanceof QubiclError) throw error;
           throw mapFileSystemError(error, { operation: 'read', path: target });
@@ -287,7 +292,7 @@ export class OpenTerminalCompatibility {
       const target = await this.resolvePath(requested, request, false, { operation: 'write', path: requested });
       await this.withLease(async () => {
         try {
-          await mkdir(target, { recursive: true, mode: 0o755 });
+          await this.executor.files.mkdir(target, 0o755);
         } catch (error) {
           throw mapFileSystemError(error, { operation: 'write', path: target });
         }
@@ -392,12 +397,12 @@ export class OpenTerminalCompatibility {
       const candidate = join(target, entry.name);
       if (entry.type === 'file' && scannedFiles < MAX_CONTENT_SEARCH_FILES && scannedBytes < MAX_CONTENT_SEARCH_BYTES) {
         try {
-          const info = await stat(candidate);
+          const read = await this.executor.files.readFile(candidate, MAX_CONTENT_SEARCH_FILE_SIZE + 1);
+          const info = read.info;
           if (info.isFile() && info.size <= MAX_CONTENT_SEARCH_FILE_SIZE && scannedBytes + info.size <= MAX_CONTENT_SEARCH_BYTES) {
             scannedFiles += 1;
             scannedBytes += info.size;
-            const data = await readFile(candidate);
-            const content = decodeSearchText(data);
+            const content = decodeSearchText(read.data);
             if (content !== undefined) {
               for (const [index, line] of content.split(/\r?\n/u).entries()) {
                 const column = line.toLocaleLowerCase().indexOf(lowered);
@@ -495,28 +500,19 @@ export class OpenTerminalCompatibility {
     context: FileErrorContext,
   ): Promise<string> {
     const candidate = resolve(isAbsolute(value) ? value : resolve(this.cwdFor(request), value));
-    requireInsideHome(this.home, candidate);
-    if (mustExist) {
-      try {
-        const canonical = await realpath(candidate);
-        requireInsideHome(this.home, canonical);
-        return canonical;
-      } catch (error) {
-        throw mapFileSystemError(error, context);
+    try {
+      const bounded = this.executor.files.absolutePath(candidate);
+      if (mustExist) {
+        const followFinal = context.operation !== 'delete' && context.operation !== 'move';
+        return await this.executor.files.canonicalPath(bounded, followFinal);
       }
-    }
-    let existing = candidate;
-    while (true) {
-      try {
-        const canonical = await realpath(existing);
-        requireInsideHome(this.home, canonical);
-        return candidate;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw mapFileSystemError(error, context);
-        const parent = dirname(existing);
-        if (parent === existing) throw mapFileSystemError(error, context);
-        existing = parent;
+      await this.executor.files.assertDestination(bounded);
+      return bounded;
+    } catch (error) {
+      if (error instanceof BoundedPathError) {
+        throw new QubiclError('path_outside_home', `Open Terminal compatibility is restricted to ${this.home}.`, 403);
       }
+      throw mapFileSystemError(error, context);
     }
   }
 
@@ -612,18 +608,9 @@ function decodeSearchText(data: Buffer): string | undefined {
   }
 }
 
-async function compatibilityMetadata(path: string): Promise<{ size: number; modified: number; writable: boolean }> {
-  const info = await stat(path);
-  return { size: info.size, modified: info.mtimeMs / 1000, writable: await isWritable(path) };
-}
-
-async function isWritable(path: string): Promise<boolean> {
-  try {
-    await access(path, constants.W_OK);
-    return true;
-  } catch {
-    return false;
-  }
+async function compatibilityMetadata(files: BoundedFileSystem, path: string): Promise<{ size: number; modified: number; writable: boolean }> {
+  const info = await files.stat(path);
+  return { size: info.size, modified: info.mtimeMs / 1000, writable: await files.isWritable(path) };
 }
 
 function isListeningPort(value: unknown): value is { port: number } {
@@ -645,12 +632,6 @@ function servedFilePath(path: string): string {
 function sessionKey(request: IncomingMessage): string {
   const value = request.headers['x-session-id'];
   return typeof value === 'string' && value.length > 0 && value.length <= 256 ? value : 'default';
-}
-
-function requireInsideHome(home: string, path: string): void {
-  const nested = relative(home, path);
-  if (nested === '' || (nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested))) return;
-  throw new QubiclError('path_outside_home', `Open Terminal compatibility is restricted to ${home}.`, 403);
 }
 
 function sameProof(left: LeaseProof | undefined, right: LeaseProof): boolean {

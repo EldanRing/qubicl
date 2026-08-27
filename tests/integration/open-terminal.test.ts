@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,6 +9,7 @@ import { ToolExecutor } from '@qubicl/control/executor';
 import { PreviewManager } from '../../packages/control/dist/previews.js';
 import type { BrowserManager } from '@qubicl/control/browser';
 import { enabledToolNames, PRESET_DEFINITIONS } from '@qubicl/core';
+import { BoundedFileSystem, type BoundedFileHookEvent } from '@qubicl/control/bounded-files';
 
 test('Open Terminal compatibility provides native files through a transparent fenced lease', async (context) => {
   const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-'));
@@ -243,6 +244,14 @@ test('Open Terminal compatibility provides native files through a transparent fe
   });
   assert.equal(move.status, 200);
 
+  const archive = await fetch(`${base}/files/archive`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ paths: [join(home, 'moved.txt')] }),
+  });
+  assert.equal(archive.status, 501);
+  assert.match(JSON.stringify(await archive.json()), /feature_unsupported/);
+
   const outside = await fetch(`${base}/files/list?directory=${encodeURIComponent(tmpdir())}`);
   assert.equal(outside.status, 403);
   assert.match(JSON.stringify(await outside.json()), /path_outside_home/);
@@ -266,6 +275,129 @@ test('Open Terminal compatibility provides native files through a transparent fe
   const protectedHome = await fetch(`${base}/files/delete?path=${encodeURIComponent(home)}`, { method: 'DELETE' });
   assert.equal(protectedHome.status, 400);
   assert.match(JSON.stringify(await protectedHome.json()), /unsafe_delete/);
+});
+
+test('Open Terminal direct file routes stay descriptor-anchored during deterministic pathname swaps', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-races-'));
+  const home = join(directory, 'home');
+  const outside = join(directory, 'outside');
+  await Promise.all([mkdir(home), mkdir(outside)]);
+  let pendingHook: ((event: BoundedFileHookEvent) => Promise<void>) | undefined;
+  const files = new BoundedFileSystem(home, {
+    beforeUse: async (event) => pendingHook?.(event),
+  });
+  const executor = new ToolExecutor(undefined, { durableRoot: home, files });
+  const compatibility = new OpenTerminalCompatibility(executor, enabledToolNames(PRESET_DEFINITIONS.workstation.capabilities), { home });
+  const server = createServer(async (request, response) => {
+    const handled = await compatibility.handle(request, response, new URL(request.url ?? '/', 'http://test.local'));
+    if (!handled) { response.writeHead(404); response.end(); }
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+  const base = `http://127.0.0.1:${port}/open-terminal`;
+  context.after(async () => {
+    await compatibility.shutdown();
+    await executor.shutdown();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const arm = (
+    match: (event: BoundedFileHookEvent) => boolean,
+    action: () => Promise<void>,
+  ): (() => void) => {
+    let used = false;
+    pendingHook = async (event) => {
+      if (used || !match(event)) return;
+      used = true;
+      await action();
+    };
+    return () => {
+      assert.equal(used, true, 'the deterministic Open Terminal race hook must run');
+      pendingHook = undefined;
+    };
+  };
+
+  const viewParent = join(home, 'view-parent');
+  const displacedViewParent = join(home, 'view-parent-pinned');
+  await mkdir(viewParent);
+  await writeFile(join(viewParent, 'note.txt'), 'inside view');
+  await writeFile(join(outside, 'note.txt'), 'outside view');
+  let assertHook = arm(
+    (event) => event.operation === 'read' && event.stage === 'parent-resolved' && event.path.endsWith('/note.txt'),
+    async () => { await rename(viewParent, displacedViewParent); await symlink(outside, viewParent); },
+  );
+  const view = await fetch(`${base}/files/view?path=${encodeURIComponent(join(viewParent, 'note.txt'))}`);
+  assert.equal(view.status, 200);
+  assert.equal(await view.text(), 'inside view');
+  assertHook();
+  assert.equal(await readFile(join(outside, 'note.txt'), 'utf8'), 'outside view');
+
+  const matchParent = join(home, 'match-parent');
+  const displacedMatchParent = join(home, 'match-parent-pinned');
+  await mkdir(matchParent);
+  await writeFile(join(matchParent, 'inside.txt'), 'inside needle');
+  await mkdir(join(outside, 'match-parent'));
+  await writeFile(join(outside, 'match-parent', 'inside.txt'), 'outside needle');
+  assertHook = arm(
+    (event) => event.operation === 'read' && event.stage === 'parent-resolved' && event.path.endsWith('/inside.txt'),
+    async () => { await rename(matchParent, displacedMatchParent); await symlink(join(outside, 'match-parent'), matchParent); },
+  );
+  const matches = await fetch(`${base}/files/matches?path=${encodeURIComponent(matchParent)}&query=needle`);
+  assert.equal(matches.status, 200);
+  const matchResult = await matches.json() as { results: Array<{ content_matches: Array<{ text: string }> }> };
+  assert.deepEqual(matchResult.results.flatMap(({ content_matches }) => content_matches.map(({ text }) => text)), ['inside needle']);
+  assertHook();
+
+  const searchParent = join(home, 'search-parent');
+  const displacedSearchParent = join(home, 'search-parent-pinned');
+  await mkdir(searchParent);
+  await writeFile(join(searchParent, 'alpha.txt'), 'inside');
+  await mkdir(join(outside, 'search-parent'));
+  await writeFile(join(outside, 'search-parent', 'alpha.txt'), 'outside metadata');
+  assertHook = arm(
+    (event) => event.operation === 'inspect' && event.stage === 'parent-resolved'
+      && event.path === join(searchParent, 'alpha.txt'),
+    async () => { await rename(searchParent, displacedSearchParent); await symlink(join(outside, 'search-parent'), searchParent); },
+  );
+  const search = await fetch(`${base}/files/search?path=${encodeURIComponent(searchParent)}&query=alpha`);
+  assert.equal(search.status, 200);
+  const searchResult = await search.json() as { results: Array<{ name: string; size: number }> };
+  assert.deepEqual(searchResult.results.map(({ name, size }) => ({ name, size })), [{ name: 'alpha.txt', size: 6 }]);
+  assertHook();
+  assert.equal(await readFile(join(outside, 'search-parent', 'alpha.txt'), 'utf8'), 'outside metadata');
+
+  const mkdirParent = join(home, 'mkdir-parent');
+  const displacedMkdirParent = join(home, 'mkdir-parent-pinned');
+  await mkdir(mkdirParent);
+  await mkdir(join(outside, 'mkdir-parent'));
+  assertHook = arm(
+    (event) => event.operation === 'write' && event.stage === 'parent-resolved' && event.path.endsWith('/created'),
+    async () => { await rename(mkdirParent, displacedMkdirParent); await symlink(join(outside, 'mkdir-parent'), mkdirParent); },
+  );
+  const created = await fetch(`${base}/files/mkdir`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: join(mkdirParent, 'created') }),
+  });
+  assert.equal(created.status, 200);
+  assertHook();
+  assert.equal((await lstat(join(displacedMkdirParent, 'created'))).isDirectory(), true);
+  await assert.rejects(lstat(join(outside, 'mkdir-parent', 'created')), { code: 'ENOENT' });
+
+  const uploadParent = join(home, 'upload-parent');
+  const displacedUploadParent = join(home, 'upload-parent-pinned');
+  await mkdir(uploadParent);
+  await mkdir(join(outside, 'upload-parent'));
+  assertHook = arm(
+    (event) => event.operation === 'write' && event.stage === 'parent-resolved' && event.path.endsWith('/upload.txt'),
+    async () => { await rename(uploadParent, displacedUploadParent); await symlink(join(outside, 'upload-parent'), uploadParent); },
+  );
+  const form = new FormData();
+  form.append('file', new Blob(['inside upload'], { type: 'text/plain' }), 'upload.txt');
+  const upload = await fetch(`${base}/files/upload?directory=${encodeURIComponent(uploadParent)}`, { method: 'POST', body: form });
+  assert.equal(upload.status, 200);
+  assertHook();
+  assert.equal(await readFile(join(displacedUploadParent, 'upload.txt'), 'utf8'), 'inside upload');
+  await assert.rejects(lstat(join(outside, 'upload-parent', 'upload.txt')), { code: 'ENOENT' });
 });
 
 async function json(url: string): Promise<unknown> {
