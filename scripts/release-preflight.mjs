@@ -139,6 +139,7 @@ try {
         expectedCatalogText,
         expectedSbomPath: options.npmSbom,
         expectedManifest: cliManifest,
+        expectedReadme: await readFile(join(root, 'packages', 'cli', 'README.md'), 'utf8'),
       });
     }
     npmResult = { files: files.length, catalog: catalog.development ? 'development' : 'exact-release' };

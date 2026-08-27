@@ -450,6 +450,7 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
         expectedCatalogText,
         expectedSbomPath: join(candidateDirectory, 'qubicl-npm.spdx.json'),
         expectedManifest: await jsonFile(join(root, 'packages', 'cli', 'package.json')),
+        expectedReadme: await readFile(join(root, 'packages', 'cli', 'README.md'), 'utf8'),
       });
     }
 

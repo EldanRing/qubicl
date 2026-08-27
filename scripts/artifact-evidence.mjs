@@ -51,6 +51,7 @@ export async function assertNpmArtifact({
   expectedCatalogText,
   expectedSbomPath,
   expectedManifest,
+  expectedReadme,
 }) {
   const files = entries.filter((entry) => entry.type === '-' && entry.name.startsWith('package/'))
     .map((entry) => entry.name.slice('package/'.length))
@@ -70,6 +71,9 @@ export async function assertNpmArtifact({
 
   const manifest = await jsonFile(join(root, 'package.json'));
   assertNpmPublicationManifest(manifest, expectedManifest, { version });
+  const readme = await readFile(join(root, 'README.md'), 'utf8');
+  assert(typeof expectedReadme === 'string' && expectedReadme.length > 0, 'A reviewed npm README is required.');
+  assert(readme === expectedReadme, 'Packed npm README differs from the reviewed source package README.');
 
   const catalogText = await readFile(join(root, 'dist', 'assets', 'image-catalog.json'), 'utf8');
   assert(catalogText === expectedCatalogText, 'The staged npm archive embeds a different image catalog.');
