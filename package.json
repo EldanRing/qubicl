@@ -62,7 +62,7 @@
     "@modelcontextprotocol/client": "^2.0.0",
     "@types/node": "^22.0.0",
     "esbuild": "^0.28.2",
-    "oxlint": "1.79.0",
+    "oxlint": "1.80.0",
     "postject": "^1.0.0-alpha.6",
     "typescript": "^7.0.0"
   },
