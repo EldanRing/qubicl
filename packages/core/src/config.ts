@@ -358,11 +358,25 @@ const TrashTransactionEntrySchema = z.strictObject({ metadata: MetadataSchema.re
 const LegacyActiveTransactionEntrySchema = z.strictObject({ source: z.enum(['active', 'create', 'trash']), metadata: LegacyComputerConfigSchema });
 const LegacyTrashTransactionEntrySchema = z.strictObject({ metadata: LegacyMetadataV2Schema.required({ deletedAt: true }) });
 
+export const RuntimeContainerBindingSchema = z.strictObject({
+  name: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/),
+  id: z.string().regex(/^[a-f0-9]{64}$/),
+  status: z.string().min(1),
+  imageId: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  role: z.enum(['gateway', 'computer', 'computer-executor', 'computer-egress', 'computer-web', 'computer-session', 'computer-ssh']),
+  topologyVersion: z.string().min(1).optional(),
+});
+
 const runtimeFields = z.strictObject({
   ensureImages: z.boolean(),
   startGateway: z.boolean(),
+  replaceGatewayRunning: z.boolean().default(false),
+  replaceGatewayStopped: z.boolean().default(false),
+  gatewayRuntimeBinding: z.array(RuntimeContainerBindingSchema).default([]),
   reconnectIds: z.array(z.uuid()).default([]),
   replaceIds: z.array(z.uuid()).default([]),
+  replaceStoppedIds: z.array(z.uuid()).default([]),
+  computerRuntimeBindings: z.record(z.uuid(), z.array(RuntimeContainerBindingSchema)).default({}),
   startIds: z.array(z.uuid()),
   removeIds: z.array(z.uuid()),
   verifyTokenIds: z.array(z.uuid()),
@@ -381,7 +395,19 @@ interface TransactionValidationValue {
   secrets: { computers: Record<string, { token: string; internalKey: string }> };
   active: Array<{ source: 'active' | 'create' | 'trash' | 'staged'; metadata: { id: string } }>;
   trash: Array<{ metadata: { id: string; deletedAt?: string } }>;
-  runtime: { reconnectIds: string[]; replaceIds: string[]; startIds: string[]; removeIds: string[]; verifyTokenIds: string[] };
+  runtime: {
+    startGateway: boolean;
+    replaceGatewayRunning: boolean;
+    replaceGatewayStopped: boolean;
+    gatewayRuntimeBinding: Array<{ name: string; id: string; status: string; imageId: string; role: string; topologyVersion?: string | undefined }>;
+    reconnectIds: string[];
+    replaceIds: string[];
+    replaceStoppedIds: string[];
+    computerRuntimeBindings: Record<string, Array<{ name: string; id: string; status: string; imageId: string; role: string; topologyVersion?: string | undefined }>>;
+    startIds: string[];
+    removeIds: string[];
+    verifyTokenIds: string[];
+  };
 }
 
 function validateStateTransaction(transaction: TransactionValidationValue, context: z.RefinementCtx): void {
@@ -411,14 +437,45 @@ function validateStateTransaction(transaction: TransactionValidationValue, conte
   if (!sameSet(configIds, activeIds)) context.addIssue({ code: 'custom', path: ['active'], message: 'active transaction entries must exactly match target computer IDs' });
   validateRuntimeIds(transaction.runtime.reconnectIds, configIds, ['runtime', 'reconnectIds'], context);
   validateRuntimeIds(transaction.runtime.replaceIds, configIds, ['runtime', 'replaceIds'], context);
+  validateRuntimeIds(transaction.runtime.replaceStoppedIds, configIds, ['runtime', 'replaceStoppedIds'], context);
+  validateRuntimeIds(Object.keys(transaction.runtime.computerRuntimeBindings), configIds, ['runtime', 'computerRuntimeBindings'], context);
   validateRuntimeIds(transaction.runtime.startIds, configIds, ['runtime', 'startIds'], context);
   const mutuallyExclusiveIds = [
     ...transaction.runtime.reconnectIds,
     ...transaction.runtime.replaceIds,
+    ...transaction.runtime.replaceStoppedIds,
     ...transaction.runtime.startIds,
   ];
   if (new Set(mutuallyExclusiveIds).size !== mutuallyExclusiveIds.length) {
     context.addIssue({ code: 'custom', path: ['runtime'], message: 'reconnectIds, replaceIds, and startIds must not overlap' });
+  }
+  if (transaction.runtime.replaceGatewayRunning && !transaction.runtime.startGateway) {
+    context.addIssue({ code: 'custom', path: ['runtime', 'replaceGatewayRunning'], message: 'running gateway replacement requires startGateway' });
+  }
+  if (transaction.runtime.replaceGatewayRunning && transaction.runtime.replaceGatewayStopped) {
+    context.addIssue({ code: 'custom', path: ['runtime'], message: 'running and stopped gateway replacement are mutually exclusive' });
+  }
+  if (transaction.runtime.startGateway && transaction.runtime.replaceGatewayStopped) {
+    context.addIssue({ code: 'custom', path: ['runtime'], message: 'startGateway and stopped gateway replacement are mutually exclusive' });
+  }
+  if (transaction.runtime.gatewayRuntimeBinding.length > 1) {
+    context.addIssue({ code: 'custom', path: ['runtime', 'gatewayRuntimeBinding'], message: 'gateway runtime binding may contain at most one container' });
+  }
+  if (transaction.runtime.gatewayRuntimeBinding.length > 0
+    && !transaction.runtime.startGateway
+    && !transaction.runtime.replaceGatewayStopped
+    && transaction.runtime.replaceIds.length === 0) {
+    context.addIssue({ code: 'custom', path: ['runtime', 'gatewayRuntimeBinding'], message: 'gateway runtime binding requires gateway or running-computer lifecycle work' });
+  }
+  const replacementIds = new Set([...transaction.runtime.replaceIds, ...transaction.runtime.replaceStoppedIds]);
+  for (const [id, bindings] of Object.entries(transaction.runtime.computerRuntimeBindings)) {
+    if (!replacementIds.has(id)) {
+      context.addIssue({ code: 'custom', path: ['runtime', 'computerRuntimeBindings', id], message: 'computer runtime binding requires a matching replacement ID' });
+    }
+    if (new Set(bindings.map(({ name }) => name)).size !== bindings.length
+      || new Set(bindings.map(({ id: containerId }) => containerId)).size !== bindings.length) {
+      context.addIssue({ code: 'custom', path: ['runtime', 'computerRuntimeBindings', id], message: 'computer runtime binding names and IDs must be unique' });
+    }
   }
   validateRuntimeIds(transaction.runtime.verifyTokenIds, configIds, ['runtime', 'verifyTokenIds'], context);
   validateRuntimeIds(transaction.runtime.removeIds, trashIds, ['runtime', 'removeIds'], context);
@@ -455,6 +512,7 @@ export const StateTransactionSchema = z.strictObject({
 }).superRefine(validateStateTransaction);
 
 export type StateTransaction = z.infer<typeof StateTransactionSchema>;
+export type RuntimeContainerBinding = z.infer<typeof RuntimeContainerBindingSchema>;
 export type TransactionOperation = z.infer<typeof TransactionOperationSchema>;
 export type TransactionCheckpoint = z.infer<typeof TransactionCheckpointSchema>;
 

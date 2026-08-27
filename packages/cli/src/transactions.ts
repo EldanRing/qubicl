@@ -8,14 +8,20 @@ import {
   parseStateTransactionDocument,
   type ComputerConfig,
   type ComputerMetadata,
+  type RuntimeContainerBinding,
   type StateTransaction,
   type TransactionCheckpoint,
   type TransactionOperation,
 } from '@qubicl/core';
 import {
+  assertGatewayRuntimeBinding,
   ensureSystemImages,
   reconnectComputerAfterGateway,
   removeComputerRuntime,
+  removeComputerRuntimeForLifecycleReplacement,
+  removeGatewayRuntimeForLifecycleReplacement,
+  replaceStoppedComputerRuntime,
+  replaceStoppedGatewayRuntime,
   reconcileRuntimeImageContracts,
   startComputerAfterGateway,
   startGateway,
@@ -49,11 +55,14 @@ export interface TransactionRuntime {
   reconcileContracts(state: LoadedState): Promise<void>;
   validate(): Promise<void>;
   ensureImages(state: LoadedState): Promise<void>;
-  startGateway(state: LoadedState): Promise<void>;
-  verifyGateway(state: LoadedState): Promise<void>;
+  startGateway(state: LoadedState, binding?: readonly RuntimeContainerBinding[], replace?: boolean): Promise<void>;
+  replaceStoppedGateway(state: LoadedState, binding?: readonly RuntimeContainerBinding[]): Promise<void>;
+  verifyGateway(state: LoadedState, skipComputerIds?: readonly string[]): Promise<void>;
   reconnect(state: LoadedState, computer: ComputerConfig): Promise<void>;
   waitForRemoval(state: LoadedState, id: string): Promise<void>;
   remove(state: LoadedState, id: string): Promise<void>;
+  removeReplacement(state: LoadedState, computer: ComputerConfig, binding: readonly RuntimeContainerBinding[]): Promise<void>;
+  replaceStopped(state: LoadedState, computer: ComputerConfig, binding: readonly RuntimeContainerBinding[]): Promise<void>;
   start(state: LoadedState, computer: ComputerConfig): Promise<void>;
   verifyToken(state: LoadedState, id: string, token: string): Promise<void>;
 }
@@ -68,11 +77,18 @@ export const defaultTransactionRuntime: TransactionRuntime = {
   reconcileContracts: reconcileRuntimeImageContracts,
   validate: async () => { await validateDocker(); },
   ensureImages: (state) => ensureSystemImages(state, true),
-  startGateway,
+  startGateway: async (state, binding, replace) => {
+    if (replace) await removeGatewayRuntimeForLifecycleReplacement(state, binding ?? [], false);
+    else if (binding?.length) await assertGatewayRuntimeBinding(state, binding);
+    await startGateway(state);
+  },
+  replaceStoppedGateway: replaceStoppedGatewayRuntime,
   verifyGateway: verifyGatewayCompatibility,
   reconnect: reconnectComputerAfterGateway,
   waitForRemoval: waitForGatewayRemoval,
   remove: removeComputerRuntime,
+  removeReplacement: (state, computer, binding) => removeComputerRuntimeForLifecycleReplacement(state, computer, binding, false),
+  replaceStopped: replaceStoppedComputerRuntime,
   start: startComputerAfterGateway,
   verifyToken: waitForGatewayComputerIfRunning,
 };
@@ -102,8 +118,13 @@ export function createStateTransaction(
     runtime: {
       ensureImages: plan.runtime?.ensureImages ?? false,
       startGateway: plan.runtime?.startGateway ?? false,
+      replaceGatewayRunning: plan.runtime?.replaceGatewayRunning ?? false,
+      replaceGatewayStopped: plan.runtime?.replaceGatewayStopped ?? false,
+      gatewayRuntimeBinding: structuredClone(plan.runtime?.gatewayRuntimeBinding ?? []),
       reconnectIds: [...(plan.runtime?.reconnectIds ?? [])],
       replaceIds: [...(plan.runtime?.replaceIds ?? [])],
+      replaceStoppedIds: [...(plan.runtime?.replaceStoppedIds ?? [])],
+      computerRuntimeBindings: structuredClone(plan.runtime?.computerRuntimeBindings ?? {}),
       startIds: [...(plan.runtime?.startIds ?? [])],
       removeIds: [...(plan.runtime?.removeIds ?? [])],
       verifyTokenIds: [...(plan.runtime?.verifyTokenIds ?? [])],
@@ -175,25 +196,19 @@ export async function recoverPendingTransaction(paths: StatePaths, options: Tran
 function transactionHasRuntimeWork(transaction: StateTransaction): boolean {
   return transaction.runtime.ensureImages
     || transaction.runtime.startGateway
+    || transaction.runtime.replaceGatewayStopped
     || transaction.runtime.reconnectIds.length > 0
     || transaction.runtime.replaceIds.length > 0
+    || transaction.runtime.replaceStoppedIds.length > 0
     || transaction.runtime.startIds.length > 0
     || transaction.runtime.removeIds.length > 0
     || transaction.runtime.verifyTokenIds.length > 0;
 }
 
 export async function readPendingTransaction(paths: StatePaths): Promise<StateTransaction | undefined> {
-  let info;
-  try {
-    info = await lstat(paths.journal);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw error;
-  }
-  if (!info.isFile()) throw new Error(`Transaction journal ${paths.journal} is not a regular file.`);
-  if ((info.mode & 0o777) !== 0o600) throw new Error(`Transaction journal ${paths.journal} must have mode 0600.`);
-  const contents = await readFile(paths.journal, 'utf8');
-  const { transaction, migrated, sourceVersion } = parseStateTransactionDocument(YAML.parse(contents));
+  const pending = await readPendingTransactionDocument(paths);
+  if (!pending) return undefined;
+  const { contents, transaction, migrated, sourceVersion } = pending;
   if (migrated) {
     await writeUpgradeBackup(paths, {
       reason: 'lifecycle-journal',
@@ -205,6 +220,39 @@ export async function readPendingTransaction(paths: StatePaths): Promise<StateTr
     await writeTransaction(paths, transaction);
   }
   return transaction;
+}
+
+/** Parse pending recovery state in memory without migrating or writing it. */
+export async function inspectPendingTransaction(paths: StatePaths): Promise<StateTransaction | undefined> {
+  return (await readPendingTransactionDocument(paths))?.transaction;
+}
+
+async function readPendingTransactionDocument(paths: StatePaths): Promise<{
+  contents: string;
+  transaction: StateTransaction;
+  migrated: boolean;
+  sourceVersion?: number;
+} | undefined> {
+  let info;
+  try {
+    info = await lstat(paths.journal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  if (!info.isFile()) throw new Error(`Transaction journal ${paths.journal} is not a regular file.`);
+  if ((info.mode & 0o777) !== 0o600) throw new Error(`Transaction journal ${paths.journal} must have mode 0600.`);
+  let contents: string;
+  try {
+    contents = await readFile(paths.journal, 'utf8');
+  } catch (error) {
+    // A read-only observer may race locked recovery removing the completed
+    // journal. Absence is the only safe conclusion; never recreate it.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  const parsed = parseStateTransactionDocument(YAML.parse(contents));
+  return { contents, ...parsed };
 }
 
 async function writeTransaction(paths: StatePaths, transaction: StateTransaction): Promise<void> {
@@ -315,8 +363,10 @@ async function completeRuntime(
 ): Promise<void> {
   const needsDocker = transaction.runtime.ensureImages
     || transaction.runtime.startGateway
+    || transaction.runtime.replaceGatewayStopped
     || effectiveReconnectIds(transaction).length > 0
     || transaction.runtime.replaceIds.length > 0
+    || transaction.runtime.replaceStoppedIds.length > 0
     || transaction.runtime.startIds.length > 0
     || transaction.runtime.removeIds.length > 0;
   if (needsDocker) {
@@ -332,8 +382,16 @@ async function completeRuntime(
     await checkpoint('images-ready', transaction, options);
   }
   if (transaction.runtime.startGateway || effectiveReconnectIds(transaction).length > 0 || transaction.runtime.replaceIds.length > 0 || transaction.runtime.startIds.length > 0) {
-    await runtime.startGateway(state);
-    await runtime.verifyGateway(state);
+    await runtime.startGateway(
+      state,
+      transaction.runtime.gatewayRuntimeBinding,
+      transaction.runtime.replaceGatewayRunning,
+    );
+    await runtime.verifyGateway(state, transaction.runtime.replaceIds);
+    await checkpoint('gateway-ready', transaction, options);
+  }
+  if (transaction.runtime.replaceGatewayStopped) {
+    await runtime.replaceStoppedGateway(state, transaction.runtime.gatewayRuntimeBinding);
     await checkpoint('gateway-ready', transaction, options);
   }
   for (const id of transaction.runtime.removeIds) {
@@ -349,9 +407,16 @@ async function completeRuntime(
   }
   for (const id of transaction.runtime.replaceIds) {
     const computer = state.config.computers.find((candidate) => candidate.id === id)!;
-    await runtime.remove(state, id);
+    const binding = transaction.runtime.computerRuntimeBindings[id] ?? [];
+    await runtime.removeReplacement(state, computer, binding);
     await checkpoint('runtime-removed', transaction, options);
     await runtime.start(state, computer);
+    await checkpoint('computers-started', transaction, options);
+  }
+  for (const id of transaction.runtime.replaceStoppedIds) {
+    const computer = state.config.computers.find((candidate) => candidate.id === id)!;
+    await runtime.replaceStopped(state, computer, transaction.runtime.computerRuntimeBindings[id] ?? []);
+    await checkpoint('runtime-removed', transaction, options);
     await checkpoint('computers-started', transaction, options);
   }
   for (const id of transaction.runtime.startIds) {

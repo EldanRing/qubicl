@@ -122,6 +122,26 @@ For Open WebUI, copy the generated configuration into **Admin Panel → Settings
 chat uploads, screenshots, browser tools, and explicitly published local
 previews without joining Open WebUI's Docker network.
 
+## Review updates safely
+
+`qubicl status` shows pending exact curated gateway/default/computer targets.
+`qubicl upgrade --all` prints the deduplicated targets, expected download and
+expanded sizes, honest capacity limits, preserved runtime state, and roll-forward
+order before confirmation. It acquires and inspects every target before the first
+state or runtime mutation. Custom images remain manual.
+
+Optional notices are local and default off:
+
+```sh
+qubicl config set --update-notifications on
+```
+
+They compare only with the CLI's bundled catalog and never use telemetry, make a
+network check, pull an image, or apply an update. `qubicl cleanup --orphans
+[--images]` likewise previews exact verified candidates; Docker images and
+volumes remain manual because daemon-global or name-only resources cannot be
+proven exclusive to one installation.
+
 ## Watch and take over
 
 ```sh

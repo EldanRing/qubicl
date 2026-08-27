@@ -24,11 +24,12 @@ import {
   type ImageCatalog,
   type ImageIdentity,
   type Preset,
+  type RuntimeContainerBinding,
   type ViewerAuthentication,
 } from '@qubicl/core';
 import { atomicWrite, durableRemove, type LoadedState } from './state.js';
 import { packagedAssetsPath } from './assets.js';
-import { COMPUTER_RUNTIME_TOPOLOGY_VERSION, LEGACY_SPLIT_CONTROL_PROTOCOL_VERSION, LEGACY_VIEWER_AUTHENTICATION, computerContainerName, computerEgressServiceName, computerExecutorServiceName, computerRuntimeContainerNames, computerServiceName, computerSessionServiceName, computerWebServiceName, containerName, controlNetwork, displaySocketVolume, gatewayContainerName, gatewayNetworkName, hostIdentity, projectName, readRuntimeImageContracts, recordRuntimeImageContracts, runtimeImageReference, serviceName, usesUnifiedComputerRuntime, workspaceNetwork, type RuntimeImageContract, type RuntimeImageContractsDocument } from './runtime.js';
+import { COMPUTER_RUNTIME_TOPOLOGY_VERSION, LEGACY_SPLIT_CONTROL_PROTOCOL_VERSION, LEGACY_VIEWER_AUTHENTICATION, computerContainerName, computerEgressContainerName, computerEgressServiceName, computerExecutorContainerName, computerExecutorServiceName, computerRuntimeContainerNames, computerServiceName, computerSessionContainerName, computerSessionServiceName, computerSshContainerName, computerWebContainerName, computerWebServiceName, containerName, controlNetwork, displaySocketVolume, gatewayContainerName, gatewayNetworkName, hostIdentity, projectName, readRuntimeImageContracts, recordRuntimeImageContracts, runtimeImageReference, serviceName, usesUnifiedComputerRuntime, workspaceNetwork, type RuntimeImageContract, type RuntimeImageContractsDocument } from './runtime.js';
 
 export interface RunOptions {
   cwd?: string;
@@ -78,8 +79,10 @@ interface NamedRuntimeMigration {
 type RuntimeMigration = LegacyRuntimeMigration | NamedRuntimeMigration;
 
 export interface RuntimeInspection {
+  Id?: string;
+  Name?: string;
   Image?: string;
-  State?: { Status?: string };
+  State?: { Status?: string; Health?: { Status?: string } };
   Config?: { Labels?: Record<string, string> | null; Env?: string[] | null };
   Mounts?: Array<{ Source?: string; Destination?: string }>;
 }
@@ -1551,7 +1554,7 @@ export async function startGateway(state: LoadedState): Promise<void> {
   await waitForContainerHealthy(gatewayContainerName(state.config.installationId, state.paths.root), 'Gateway');
 }
 
-export async function verifyGatewayCompatibility(state: LoadedState): Promise<void> {
+export async function verifyGatewayCompatibility(state: LoadedState, skipComputerIds: readonly string[] = []): Promise<void> {
   const routes = RuntimeRoutesSchema.parse(JSON.parse(await readFile(state.paths.routes, 'utf8')));
   if (routes.routes.some(({ viewerAuthentication }) => viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1)) {
     const response = await fetch(`http://127.0.0.1:${state.config.gateway.port}/health`, { signal: AbortSignal.timeout(5_000) });
@@ -1561,8 +1564,14 @@ export async function verifyGatewayCompatibility(state: LoadedState): Promise<vo
   // Compose may recreate the shared gateway for an image, port, label, or
   // binary-version change from any lifecycle command. Reattach every running
   // computer after the capability gate; stopped computers remain untouched.
+  const skipped = new Set(skipComputerIds);
   for (const computer of state.config.computers) {
-    if ((await containerStatus(state, computer.id)).status === 'running') {
+    if (skipped.has(computer.id)) continue;
+    const runtime = await managedComputerRuntimeObservation(state, computer);
+    if (runtime.group === 'partial' || runtime.group === 'inconsistent') {
+      throw new Error(`Computer ${computer.name} runtime is ${runtime.group}; gateway reconnection cannot be verified.`);
+    }
+    if (runtime.group === 'complete' && runtime.status === 'running') {
       await connectComputerToGateway(state, computer);
     }
   }
@@ -1639,9 +1648,12 @@ export async function startComputerAfterGateway(state: LoadedState, computer: Co
 }
 
 export async function reconnectComputerAfterGateway(state: LoadedState, computer: ComputerConfig): Promise<void> {
-  const status = await containerStatus(state, computer.id);
-  if (status.status !== 'running') {
-    console.warn(`Computer ${computer.name} was running before the gateway change but is now ${status.status}; it was left stopped. Its identity and home are unchanged. Run qubicl start ${computer.name}; only a missing retained container requires the exact pinned image.`);
+  const runtime = await managedComputerRuntimeObservation(state, computer);
+  if (runtime.group === 'partial' || runtime.group === 'inconsistent') {
+    throw new Error(`Computer ${computer.name} runtime is ${runtime.group}; refusing to complete gateway reconnection.`);
+  }
+  if (runtime.group !== 'complete' || runtime.status !== 'running') {
+    console.warn(`Computer ${computer.name} was running before the gateway change but is now ${runtime.status}; it was left stopped. Its identity and home are unchanged. Run qubicl start ${computer.name}; only a missing retained container requires the exact pinned image.`);
     return;
   }
   await connectComputerToGateway(state, computer);
@@ -1727,6 +1739,243 @@ export async function gatewayStatus(state: LoadedState): Promise<{ status: strin
   return runtimeContainerStatus(gatewayContainerName(state.config.installationId, state.paths.root));
 }
 
+export interface ManagedRuntimeGroupObservation {
+  status: string;
+  group: 'complete' | 'absent' | 'partial' | 'inconsistent';
+  containers: RuntimeContainerBinding[];
+}
+
+export interface ManagedRuntimeObservationAdapter {
+  docker(args: string[], options?: RunOptions): Promise<string>;
+  inspectContainer(reference: string, expectedName?: string): Promise<RuntimeInspection | undefined>;
+}
+
+export type LifecycleDockerRunner = (args: string[], options?: RunOptions) => Promise<string>;
+
+/**
+ * Container-only lifecycle inspection. Only Docker's exact not-found response
+ * is absence; daemon, permission, timeout, truncation, and malformed-output
+ * failures remain errors so an upgrade cannot silently infer an absent runtime.
+ */
+export async function strictLifecycleContainerInspection(
+  reference: string,
+  runDocker: LifecycleDockerRunner = docker,
+  expectedName = reference,
+): Promise<RuntimeInspection | undefined> {
+  if (!validDockerName(reference) || !validDockerName(expectedName)) {
+    throw new Error(`Lifecycle inspection received an invalid Docker reference or name.`);
+  }
+  let output: string;
+  try {
+    output = await runDocker(['container', 'inspect', reference], {
+      timeoutMs: PROBE_TIMEOUT_MS,
+      maxOutputBytes: PROBE_OUTPUT_LIMIT_BYTES,
+    });
+  } catch (error) {
+    if (exactContainerNotFound(error, reference)) return undefined;
+    throw new Error(`Could not inspect managed container ${expectedName}; refusing to infer absence: ${errorMessage(error)}`, { cause: error });
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(output);
+  } catch (error) {
+    throw new Error(`Docker container inspection for ${expectedName} returned invalid JSON.`, { cause: error });
+  }
+  if (!Array.isArray(value) || value.length !== 1) {
+    throw new Error(`Docker container inspection for ${expectedName} did not return exactly one container.`);
+  }
+  const inspection = value[0];
+  if (!inspection || typeof inspection !== 'object' || Array.isArray(inspection)) {
+    throw new Error(`Docker container inspection for ${expectedName} returned a non-object entry.`);
+  }
+  const record = inspection as RuntimeInspection;
+  if (!record.Id || !/^[a-f0-9]{64}$/.test(record.Id)) {
+    throw new Error(`Docker container inspection for ${expectedName} omitted its full container ID.`);
+  }
+  if (/^[a-f0-9]{64}$/.test(reference) && record.Id !== reference) {
+    throw new Error(`Docker container inspection for ${expectedName} substituted immutable container ID ${record.Id}.`);
+  }
+  if (record.Name !== expectedName && record.Name !== `/${expectedName}`) {
+    throw new Error(`Docker container inspection for ${expectedName} returned a different container name ${JSON.stringify(record.Name)}.`);
+  }
+  if (!record.State || typeof record.State.Status !== 'string' || !record.State.Status) {
+    throw new Error(`Docker container inspection for ${expectedName} omitted its runtime status.`);
+  }
+  if (!record.Image || !/^sha256:[a-f0-9]{64}$/.test(record.Image)) {
+    throw new Error(`Docker container inspection for ${expectedName} omitted its immutable image ID.`);
+  }
+  if (record.State.Health !== undefined
+    && (typeof record.State.Health !== 'object'
+      || typeof record.State.Health.Status !== 'string'
+      || !record.State.Health.Status)) {
+    throw new Error(`Docker container inspection for ${expectedName} returned invalid health status.`);
+  }
+  return record;
+}
+
+export async function strictLifecycleRuntimeStatus(
+  name: string,
+  runDocker: LifecycleDockerRunner = docker,
+): Promise<{ status: string; health?: string }> {
+  const inspection = await strictLifecycleContainerInspection(name, runDocker);
+  if (!inspection) return { status: 'absent' };
+  const status = inspection.State!.Status!;
+  const health = inspection.State!.Health?.Status;
+  return { status, ...(health ? { health } : {}) };
+}
+
+/** Read-only inventory of the exact managed runtime group for upgrade planning. */
+export async function managedComputerRuntimeObservation(
+  state: LoadedState,
+  computer: ComputerConfig,
+  adapter: ManagedRuntimeObservationAdapter = defaultManagedRuntimeObservationAdapter(),
+): Promise<ManagedRuntimeGroupObservation> {
+  const expectedRoles = expectedComputerRuntimeRoles(state, computer);
+  const actualInventory = await labeledComputerRuntimeInventory(state, computer.id, adapter);
+  const actualByName = new Map(actualInventory.map((binding) => [binding.name, binding]));
+  const containers: RuntimeContainerBinding[] = [];
+  for (const inventory of actualInventory) {
+    const inspection = await adapter.inspectContainer(inventory.id, inventory.name);
+    if (!inspection) throw new Error(`Managed runtime container ${inventory.name} disappeared during immutable-ID inspection.`);
+    const expectedRole = expectedRoles.get(inventory.name);
+    if (!expectedRole) {
+      return { status: inspection.State!.Status!, group: 'inconsistent', containers: [] };
+    }
+    assertExpectedComputerRuntimeInspection(state, computer, inventory.name, expectedRole, inspection);
+    containers.push(runtimeBinding(inspection, inventory.name));
+  }
+  for (const name of expectedRoles.keys()) {
+    if (actualByName.has(name)) continue;
+    const inspection = await adapter.inspectContainer(name, name);
+    if (inspection) return { status: inspection.State!.Status!, group: 'inconsistent', containers: [] };
+  }
+  if (containers.length === 0) return { status: 'absent', group: 'absent', containers: [] };
+  containers.sort((left, right) => compareRuntimeBindingNames(expectedRoles, left.name, right.name));
+  const primary = containers.find(({ name }) => name === computerContainerName(state, computer));
+  const primaryStatus = primary?.status ?? containers[0]!.status;
+  if (containers.length !== expectedRoles.size) return { status: primaryStatus, group: 'partial', containers };
+  if (new Set(containers.map(({ status }) => status)).size !== 1) {
+    return { status: primaryStatus, group: 'inconsistent', containers };
+  }
+  return { status: primaryStatus, group: 'complete', containers };
+}
+
+/** Read-only gateway ownership/status observation for upgrade planning. */
+export async function managedGatewayRuntimeObservation(
+  state: LoadedState,
+  adapter: ManagedRuntimeObservationAdapter = defaultManagedRuntimeObservationAdapter(),
+): Promise<ManagedRuntimeGroupObservation> {
+  const name = gatewayContainerName(state.config.installationId, state.paths.root);
+  const inspection = await adapter.inspectContainer(name, name);
+  if (!inspection) return { status: 'absent', group: 'absent', containers: [] };
+  try {
+    verifyManagedGateway(state, inspection, name);
+  } catch {
+    return { status: inspection.State!.Status!, group: 'inconsistent', containers: [] };
+  }
+  return { status: inspection.State!.Status!, group: 'complete', containers: [runtimeBinding(inspection, name)] };
+}
+
+/**
+ * Recovery-safe stopped gateway replacement. The transaction journal remains
+ * until the newly rendered service exists in a non-running state.
+ */
+export async function replaceStoppedGatewayRuntime(
+  state: LoadedState,
+  binding: readonly RuntimeContainerBinding[] = [],
+): Promise<void> {
+  const name = gatewayContainerName(state.config.installationId, state.paths.root);
+  const source = await inspectBoundGatewayTransition(state, binding, 'stopped', 'replace');
+  if (source) {
+    await docker(['rm', source.id]);
+  }
+  await compose(state, ['create', '--no-deps', 'gateway']);
+  const replacement = await strictLifecycleContainerInspection(name);
+  if (!replacement) throw new Error('Stopped gateway replacement was not created.');
+  verifyManagedGateway(state, replacement, name);
+  assertStoppedReplacementStatus(replacement.State?.Status ?? 'unknown', 'Replacement gateway');
+}
+
+/**
+ * Recovery-safe stopped computer replacement. Every discovered member must
+ * retain the exact installation/computer labels and be non-running.
+ */
+export async function replaceStoppedComputerRuntime(
+  state: LoadedState,
+  computer: ComputerConfig,
+  binding: readonly RuntimeContainerBinding[] = [],
+): Promise<void> {
+  await removeComputerRuntimeForLifecycleReplacement(state, computer, binding, true);
+  await compose(state, ['create', computerServiceName(state, computer)]);
+  const replacement = await managedComputerRuntimeObservation(state, computer);
+  if (replacement.group !== 'complete') {
+    throw new Error(`Stopped replacement for ${computer.name} is ${replacement.group}.`);
+  }
+  assertStoppedReplacementStatus(replacement.status, `Replacement computer ${computer.name}`);
+}
+
+export async function assertGatewayRuntimeBinding(
+  state: LoadedState,
+  binding: readonly RuntimeContainerBinding[],
+  runDocker: LifecycleDockerRunner = docker,
+): Promise<void> {
+  await inspectBoundGatewayTransition(state, binding, 'running', 'assert', runDocker);
+}
+
+export async function removeGatewayRuntimeForLifecycleReplacement(
+  state: LoadedState,
+  binding: readonly RuntimeContainerBinding[],
+  requireStopped: boolean,
+  runDocker: LifecycleDockerRunner = docker,
+): Promise<void> {
+  const source = await inspectBoundGatewayTransition(
+    state,
+    binding,
+    requireStopped ? 'stopped' : 'running',
+    'replace',
+    runDocker,
+  );
+  if (source) await runDocker(['rm', ...(requireStopped ? [] : ['--force']), source.id]);
+}
+
+/**
+ * Removes only immutable source IDs captured in the reviewed lifecycle plan.
+ * Recovery also accepts absent source members and independently verified
+ * target members so interruption after removal/create can roll forward.
+ */
+export async function removeComputerRuntimeForLifecycleReplacement(
+  state: LoadedState,
+  computer: ComputerConfig,
+  sourceBinding: readonly RuntimeContainerBinding[],
+  requireStopped: boolean,
+  adapter: ManagedRuntimeObservationAdapter = defaultManagedRuntimeObservationAdapter(),
+): Promise<void> {
+  if (sourceBinding.length === 0) {
+    const target = await managedComputerRuntimeObservation(state, computer, adapter);
+    if (target.group === 'absent') return;
+    const desired = requireStopped ? 'stopped' : 'running';
+    if ((target.group === 'complete' || target.group === 'partial')
+      && Boolean(computer.image.contentId)
+      && target.containers.every((container) => container.imageId === computer.image.contentId
+        && allowedTransitionStatus(container.status, desired, true))) {
+      // An old journal may recover only when the exact owned target is already
+      // present; Compose can then finish it idempotently without deletion.
+      return;
+    }
+    throw new Error(`Lifecycle journal for ${computer.name} has no immutable source binding; refusing mutable-name deletion. Restore or remove only the verified old runtime, then retry recovery.`);
+  }
+  const transition = await inspectComputerRuntimeTransition(
+    state,
+    computer,
+    sourceBinding,
+    requireStopped ? 'stopped' : 'running',
+    adapter,
+  );
+  if (transition.sourceIds.length) {
+    await adapter.docker(['rm', ...(requireStopped ? [] : ['--force']), ...transition.sourceIds]);
+  }
+}
+
 async function runtimeContainerStatus(name: string): Promise<{ status: string; health?: string }> {
   try {
     const value = await docker(['inspect', '--format', '{{json .State}}', name]);
@@ -1735,6 +1984,292 @@ async function runtimeContainerStatus(name: string): Promise<{ status: string; h
     if (state.Health?.Status) result.health = state.Health.Status;
     return result;
   } catch { return { status: 'absent' }; }
+}
+
+interface ManagedRuntimeInventoryIdentity {
+  id: string;
+  name: string;
+}
+
+async function labeledComputerRuntimeInventory(
+  state: LoadedState,
+  id: string,
+  adapter: ManagedRuntimeObservationAdapter,
+): Promise<ManagedRuntimeInventoryIdentity[]> {
+  const options = { timeoutMs: PROBE_TIMEOUT_MS, maxOutputBytes: PROBE_OUTPUT_LIMIT_BYTES };
+  const primary = parseManagedRuntimeInventory(await adapter.docker([
+    'container', 'ls', '--all', '--no-trunc', '--format', '{{json .}}',
+    '--filter', `label=dev.qubicl.installation=${state.config.installationId}`,
+    '--filter', `label=dev.qubicl.id=${id}`,
+  ], options), 'primary computer runtime inventory');
+  const sidecars = parseManagedRuntimeInventory(await adapter.docker([
+    'container', 'ls', '--all', '--no-trunc', '--format', '{{json .}}',
+    '--filter', `label=dev.qubicl.installation=${state.config.installationId}`,
+    '--filter', `label=dev.qubicl.computer-id=${id}`,
+  ], options), 'computer sidecar runtime inventory');
+  const combined = [...primary, ...sidecars];
+  if (new Set(combined.map(({ id: containerId }) => containerId)).size !== combined.length
+    || new Set(combined.map(({ name }) => name)).size !== combined.length) {
+    throw new Error('Managed computer runtime inventory returned overlapping or duplicate immutable identities.');
+  }
+  return combined.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export function parseManagedRuntimeInventory(output: string, subject: string): ManagedRuntimeInventoryIdentity[] {
+  const lines = output.split('\n').map((value) => value.trim()).filter(Boolean);
+  if (lines.length > 1_024) throw new Error(`${subject} returned too many containers.`);
+  const values = lines.map((line) => {
+    let value: unknown;
+    try { value = JSON.parse(line); }
+    catch (error) { throw new Error(`${subject} returned invalid JSON inventory metadata.`, { cause: error }); }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`${subject} returned a non-object inventory record.`);
+    }
+    const record = value as { ID?: unknown; Names?: unknown };
+    if (typeof record.ID !== 'string' || !/^[a-f0-9]{64}$/.test(record.ID)
+      || typeof record.Names !== 'string' || !validDockerName(record.Names)) {
+      throw new Error(`${subject} returned invalid immutable container identity metadata.`);
+    }
+    return { id: record.ID, name: record.Names };
+  });
+  if (new Set(values.map(({ id }) => id)).size !== values.length
+    || new Set(values.map(({ name }) => name)).size !== values.length) {
+    throw new Error(`${subject} returned duplicate immutable container identities.`);
+  }
+  return values;
+}
+
+function defaultManagedRuntimeObservationAdapter(): ManagedRuntimeObservationAdapter {
+  return {
+    docker,
+    inspectContainer: (reference, expectedName = reference) => strictLifecycleContainerInspection(reference, docker, expectedName),
+  };
+}
+
+function validDockerName(name: string): boolean {
+  return /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(name);
+}
+
+function exactContainerNotFound(error: unknown, name: string): boolean {
+  const match = errorMessage(error).match(/No such (?:container|object): ([^\r\n]+)\s*$/i);
+  return match?.[1]?.trim() === name;
+}
+
+type ComputerRuntimeRole = Exclude<RuntimeContainerBinding['role'], 'gateway'>;
+
+interface ExpectedComputerRuntimeRole {
+  role: ComputerRuntimeRole;
+  topologyVersion?: string;
+}
+
+function expectedComputerRuntimeRoles(
+  state: LoadedState,
+  computer: ComputerConfig,
+): Map<string, ExpectedComputerRuntimeRole> {
+  const primary = computerContainerName(state, computer);
+  const roles = new Map<string, ComputerRuntimeRole>([
+    [primary, 'computer'],
+    [computerExecutorContainerName(state, computer), 'computer-executor'],
+    [computerEgressContainerName(state, computer), 'computer-egress'],
+    [computerWebContainerName(state, computer), 'computer-web'],
+    [computerSessionContainerName(state, computer), 'computer-session'],
+    [computerSshContainerName(state, computer), 'computer-ssh'],
+  ]);
+  return new Map(computerRuntimeContainerNames(state, computer).map((name) => {
+    const role = roles.get(name);
+    if (!role) throw new Error(`Qubicl computed an unknown lifecycle runtime role for ${name}.`);
+    return [name, {
+      role,
+      ...(role === 'computer'
+        ? { topologyVersion: usesUnifiedComputerRuntime(computer) ? COMPUTER_RUNTIME_TOPOLOGY_VERSION : '5' }
+        : {}),
+    }];
+  }));
+}
+
+function assertExpectedComputerRuntimeInspection(
+  state: LoadedState,
+  computer: ComputerConfig,
+  name: string,
+  expected: ExpectedComputerRuntimeRole,
+  inspection: RuntimeInspection,
+): void {
+  assertComputerBindingOwnership(state, computer.id, name, expected.role, expected.topologyVersion, inspection);
+  if (expected.role === 'computer') {
+    verifyManagedComputer(state, computer.id, inspection, name);
+    if (inspection.Config?.Labels?.['dev.qubicl.name'] !== computer.name) {
+      throw new Error(`Managed computer runtime ${name} has an unexpected configured-name binding.`);
+    }
+  }
+}
+
+function assertComputerBindingOwnership(
+  state: LoadedState,
+  computerId: string,
+  name: string,
+  expectedRole: ComputerRuntimeRole,
+  topologyVersion: string | undefined,
+  inspection: RuntimeInspection,
+): void {
+  const labels = inspection.Config?.Labels ?? {};
+  const primary = expectedRole === 'computer';
+  if (labels['dev.qubicl.installation'] !== state.config.installationId
+    || labels['dev.qubicl.role'] !== expectedRole
+    || labels[primary ? 'dev.qubicl.id' : 'dev.qubicl.computer-id'] !== computerId
+    || labels[primary ? 'dev.qubicl.computer-id' : 'dev.qubicl.id'] !== undefined
+    || (topologyVersion !== undefined && labels['dev.qubicl.topology-version'] !== topologyVersion)) {
+    throw new Error(`Managed runtime container ${name} has an unexpected immutable ownership, role, or topology binding.`);
+  }
+}
+
+function runtimeBinding(inspection: RuntimeInspection, name: string): RuntimeContainerBinding {
+  const role = inspection.Config?.Labels?.['dev.qubicl.role'];
+  if (!['gateway', 'computer', 'computer-executor', 'computer-egress', 'computer-web', 'computer-session', 'computer-ssh'].includes(role ?? '')) {
+    throw new Error(`Managed runtime container ${name} has an invalid role binding.`);
+  }
+  const topologyVersion = inspection.Config?.Labels?.['dev.qubicl.topology-version'];
+  return {
+    name,
+    id: inspection.Id!,
+    status: inspection.State!.Status!,
+    imageId: inspection.Image! as `sha256:${string}`,
+    role: role as RuntimeContainerBinding['role'],
+    ...(topologyVersion ? { topologyVersion } : {}),
+  };
+}
+
+function compareRuntimeBindingNames(
+  expected: ReadonlyMap<string, unknown>,
+  left: string,
+  right: string,
+): number {
+  return [...expected.keys()].indexOf(left) - [...expected.keys()].indexOf(right);
+}
+
+function sameRuntimeBinding(left: RuntimeContainerBinding, right: RuntimeContainerBinding): boolean {
+  return left.name === right.name
+    && left.id === right.id
+    && left.status === right.status
+    && left.imageId === right.imageId
+    && left.role === right.role
+    && left.topologyVersion === right.topologyVersion;
+}
+
+function allowedTransitionStatus(status: string, desired: 'running' | 'stopped', target: boolean): boolean {
+  if (desired === 'stopped') return status === 'created' || status === 'exited';
+  return target
+    ? status === 'created' || status === 'exited' || status === 'running'
+    : status === 'running';
+}
+
+async function inspectBoundGatewayTransition(
+  state: LoadedState,
+  sourceBinding: readonly RuntimeContainerBinding[],
+  desired: 'running' | 'stopped',
+  transition: 'assert' | 'replace',
+  runDocker: LifecycleDockerRunner = docker,
+): Promise<RuntimeContainerBinding | undefined> {
+  if (sourceBinding.length > 1) throw new Error('Reviewed gateway runtime binding contains more than one container.');
+  const name = gatewayContainerName(state.config.installationId, state.paths.root);
+  const source = sourceBinding[0];
+  if (!source) {
+    const current = await strictLifecycleContainerInspection(name, runDocker);
+    if (!current) return undefined;
+    verifyManagedGateway(state, current, name);
+    const binding = runtimeBinding(current, name);
+    if (!allowedTransitionStatus(binding.status, desired, false)) {
+      throw new Error(`Gateway changed to ${binding.status}; ${desired} lifecycle replacement is blocked.`);
+    }
+    return binding;
+  }
+  if (source.name !== name || source.role !== 'gateway') throw new Error('Reviewed gateway runtime binding is invalid.');
+  const currentSource = await strictLifecycleContainerInspection(source.id, runDocker, name);
+  if (currentSource) {
+    verifyManagedGateway(state, currentSource, name);
+    const currentBinding = runtimeBinding(currentSource, name);
+    if (!sameRuntimeBinding(currentBinding, source) || !allowedTransitionStatus(currentBinding.status, desired, false)) {
+      throw new Error('Gateway immutable source identity or status changed before lifecycle replacement.');
+    }
+    return currentBinding;
+  }
+  const target = await strictLifecycleContainerInspection(name, runDocker);
+  if (!target) return undefined;
+  verifyManagedGateway(state, target, name);
+  const targetBinding = runtimeBinding(target, name);
+  const expectedTargetImageId = transition === 'assert'
+    ? source.imageId
+    : state.config.gateway.image.contentId;
+  if (!expectedTargetImageId
+    || targetBinding.imageId !== expectedTargetImageId
+    || !allowedTransitionStatus(targetBinding.status, desired, true)) {
+    throw new Error('Gateway source disappeared but its same-name replacement is not the exact owned target runtime.');
+  }
+  return undefined;
+}
+
+async function inspectComputerRuntimeTransition(
+  state: LoadedState,
+  computer: ComputerConfig,
+  sourceBinding: readonly RuntimeContainerBinding[],
+  desired: 'running' | 'stopped',
+  adapter: ManagedRuntimeObservationAdapter,
+): Promise<{ sourceIds: string[] }> {
+  if (new Set(sourceBinding.map(({ id }) => id)).size !== sourceBinding.length
+    || new Set(sourceBinding.map(({ name }) => name)).size !== sourceBinding.length) {
+    throw new Error(`Reviewed runtime binding for ${computer.name} contains duplicate identities.`);
+  }
+  const sourceById = new Map(sourceBinding.map((binding) => [binding.id, binding]));
+  const targetRoles = expectedComputerRuntimeRoles(state, computer);
+  const inventory = await labeledComputerRuntimeInventory(state, computer.id, adapter);
+  const inventoryNames = new Set(inventory.map(({ name }) => name));
+  const sourceIds: string[] = [];
+  for (const item of inventory) {
+    const inspection = await adapter.inspectContainer(item.id, item.name);
+    if (!inspection) throw new Error(`Managed runtime ${item.name} disappeared during transition inspection.`);
+    const reviewedSource = sourceById.get(item.id);
+    if (reviewedSource) {
+      assertComputerBindingOwnership(
+        state,
+        computer.id,
+        item.name,
+        reviewedSource.role as ComputerRuntimeRole,
+        reviewedSource.topologyVersion,
+        inspection,
+      );
+      const observed = runtimeBinding(inspection, item.name);
+      if (!sameRuntimeBinding(observed, reviewedSource)
+        || !allowedTransitionStatus(observed.status, desired, false)) {
+        throw new Error(`Reviewed source runtime ${item.name} changed immutable identity or status.`);
+      }
+      sourceIds.push(item.id);
+      continue;
+    }
+    const targetRole = targetRoles.get(item.name);
+    if (!targetRole) throw new Error(`Runtime transition found unexpected owned container ${item.name}.`);
+    assertExpectedComputerRuntimeInspection(state, computer, item.name, targetRole, inspection);
+    const observed = runtimeBinding(inspection, item.name);
+    if (!computer.image.contentId
+      || observed.imageId !== computer.image.contentId
+      || !allowedTransitionStatus(observed.status, desired, true)) {
+      throw new Error(`Runtime transition container ${item.name} is not the exact owned target runtime.`);
+    }
+  }
+  for (const name of new Set([...sourceBinding.map(({ name }) => name), ...targetRoles.keys()])) {
+    if (inventoryNames.has(name)) continue;
+    if (await adapter.inspectContainer(name, name)) {
+      throw new Error(`Runtime name ${name} is occupied outside the exact source/target ownership inventory.`);
+    }
+  }
+  // A missing source member is safe only after the journal exists: removal may
+  // have completed partially. Remaining reviewed source IDs are removed by
+  // immutable ID; verified target members are retained for idempotent Compose.
+  return { sourceIds: sourceIds.sort() };
+}
+
+function assertStoppedReplacementStatus(status: string, subject: string): void {
+  if (status !== 'exited' && status !== 'created') {
+    throw new Error(`${subject} changed to ${status}; stopped replacement requires exited or created state.`);
+  }
 }
 
 export async function waitForHealthy(state: LoadedState, id: string, timeoutMs = 180_000): Promise<void> {
@@ -1783,12 +2318,16 @@ export async function waitForGatewayComputer(state: LoadedState, id: string, tok
 }
 
 export async function waitForGatewayComputerIfRunning(state: LoadedState, id: string, token?: string): Promise<void> {
-  if ((await runtimeContainerStatus(gatewayContainerName(state.config.installationId, state.paths.root))).status !== 'running') return;
+  const gateway = await managedGatewayRuntimeObservation(state);
+  if (gateway.group === 'inconsistent') throw new Error('Gateway ownership changed while verifying the upgraded computer route.');
+  if (gateway.group !== 'complete' || gateway.status !== 'running') return;
   await waitForGatewayComputer(state, id, token);
 }
 
 export async function waitForGatewayRemoval(state: LoadedState, id: string, timeoutMs = 30_000): Promise<void> {
-  if ((await runtimeContainerStatus(gatewayContainerName(state.config.installationId, state.paths.root))).status !== 'running') return;
+  const gateway = await managedGatewayRuntimeObservation(state);
+  if (gateway.group === 'inconsistent') throw new Error('Gateway ownership changed while verifying route removal.');
+  if (gateway.group !== 'complete' || gateway.status !== 'running') return;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {

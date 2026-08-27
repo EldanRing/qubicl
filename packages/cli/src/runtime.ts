@@ -101,6 +101,20 @@ export async function recordRuntimeImageContracts(state: LoadedState, contracts:
   await atomicWrite(runtimeImageContractsPath(state), `${JSON.stringify(document, null, 2)}\n`, 0o600);
 }
 
+export async function removeRuntimeImageContractRecords(state: LoadedState, contentIds: readonly string[]): Promise<number> {
+  const document = await readRuntimeImageContracts(state);
+  let removed = 0;
+  for (const contentId of new Set(contentIds)) {
+    if (!/^sha256:[a-f0-9]{64}$/u.test(contentId)) throw new Error(`Invalid runtime image-contract record ID ${JSON.stringify(contentId)}.`);
+    if (document.images[contentId]) {
+      delete document.images[contentId];
+      removed += 1;
+    }
+  }
+  if (removed > 0) await atomicWrite(runtimeImageContractsPath(state), `${JSON.stringify(document, null, 2)}\n`, 0o600);
+  return removed;
+}
+
 function viewerAuthenticationForComputer(
   computer: Pick<ComputerConfig, 'name' | 'capabilities' | 'image'>,
   contracts: RuntimeImageContractsDocument,

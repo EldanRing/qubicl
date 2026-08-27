@@ -32,6 +32,7 @@ export interface StatePaths {
   migration: string;
   runtimeMigration: string;
   runtimeNamespacePending: string;
+  preferences: string;
   backups: string;
 }
 
@@ -63,6 +64,7 @@ export function statePaths(root = process.env.QUBICL_HOME ?? join(homedir(), '.q
     migration: join(root, 'state-migration.yaml'),
     runtimeMigration: join(root, 'runtime', 'legacy-runtime-migration.json'),
     runtimeNamespacePending: join(root, 'runtime', 'legacy-runtime-namespace.pending'),
+    preferences: join(root, 'runtime', 'preferences.json'),
     backups: join(root, 'backups'),
   };
 }

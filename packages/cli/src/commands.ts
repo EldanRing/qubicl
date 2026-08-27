@@ -51,6 +51,8 @@ import {
   imageExists,
   imageDrift,
   legacyRuntimeMigrationNeeded,
+  managedComputerRuntimeObservation,
+  managedGatewayRuntimeObservation,
   migrateLegacyRuntime,
   prepareRuntimeMigration,
   reconcileRuntimeImageContracts,
@@ -100,6 +102,15 @@ import { browserOpenInvocation, inspectHostPlatform, windowsWslStdioLauncher } f
 import { validateStatePath } from './preflight.js';
 import { browserProfileCommand } from './browser-profile.js';
 import { printBrowserProfileDisclosure } from './browser-profile-disclosures.js';
+import { cleanupCommand } from './cleanup-command.js';
+import { lifecycleUpdateStatus, upgradeAllCommand, validateUpgradeInvocation } from './lifecycle-command.js';
+import { computerUpgradeRuntimePlan, requirePreservedRuntimeState } from './lifecycle-update.js';
+import {
+  maybePrintLocalUpdateNotification,
+  parseUpdateNotificationPreference,
+  readLocalPreferences,
+  writeUpdateNotificationPreference,
+} from './update-notifications.js';
 
 export async function execute(command: string | undefined, args: ParsedArgs): Promise<void> {
   validateInvocation(command, args);
@@ -108,6 +119,7 @@ export async function execute(command: string | undefined, args: ParsedArgs): Pr
     return;
   }
   await prepareStateBeforeCommand(command, args);
+  await maybePrintLocalUpdateNotification(command, args);
   switch (command) {
     case undefined:
     case 'help':
@@ -121,7 +133,7 @@ export async function execute(command: string | undefined, args: ParsedArgs): Pr
     case 'up': return up();
     case 'down': return down();
     case 'create': return create(args);
-    case 'upgrade': return upgradeComputer(args);
+    case 'upgrade': return upgrade(args);
     case 'list': return list(args);
     case 'status': return status(args.positionals[0]);
     case 'inspect': return inspect(required(args.positionals[0], 'computer name'));
@@ -144,7 +156,7 @@ export async function execute(command: string | undefined, args: ParsedArgs): Pr
     case 'audit': return auditCommand(args);
     case 'skills': return skillsCommand(args);
     case 'tools': return toolsCommand(args);
-    case 'cleanup': return cleanup(args);
+    case 'cleanup': return cleanupCommand(args);
     case 'rename': return renameComputer(required(args.positionals[0], 'old name'), required(args.positionals[1], 'new name'));
     case 'delete': return deleteComputer(required(args.positionals[0], 'computer name'));
     case 'restore': return restoreComputer(required(args.positionals[0], 'computer name or ID'));
@@ -186,6 +198,7 @@ async function config(args: ParsedArgs): Promise<void> {
     image: stringOption(args, 'default-image'),
     cpus: numberOption(args, 'default-cpus'),
     memory: stringOption(args, 'default-memory'),
+    updateNotifications: parseUpdateNotificationPreference(stringOption(args, 'update-notifications')),
   };
   if (Object.values(requested).every((value) => value === undefined)) {
     throw new Error('Config set requires at least one setting option.');
@@ -195,6 +208,16 @@ async function config(args: ParsedArgs): Promise<void> {
   const paths = statePaths();
   await withStateLock(paths, async () => {
     const state = await loadState(paths);
+    const changesManagedConfig = requested.gatewayPort !== undefined
+      || requested.preset !== undefined
+      || requested.image !== undefined
+      || requested.cpus !== undefined
+      || requested.memory !== undefined;
+    if (!changesManagedConfig) {
+      const preferences = await writeUpdateNotificationPreference(requested.updateNotifications!, paths);
+      console.log(JSON.stringify({ localPreferences: preferences }, null, 2));
+      return;
+    }
     const prior = structuredClone(state.config);
     let dockerHost: Awaited<ReturnType<typeof validateDocker>> | undefined;
     if (requested.gatewayPort !== undefined) state.config.gateway.port = requested.gatewayPort;
@@ -244,18 +267,22 @@ async function config(args: ParsedArgs): Promise<void> {
       // or changing stopped computers' lifecycle state.
       runtime: { startGateway: gatewayWasRunning, reconnectIds: runningComputerIds },
     }));
+    if (requested.updateNotifications !== undefined) {
+      await writeUpdateNotificationPreference(requested.updateNotifications, paths);
+    }
     await printConfig(state);
   });
 }
 
 async function printConfig(state: LoadedState): Promise<void> {
-  const [gatewayDrift, defaultDrift] = await Promise.all([
+  const [gatewayDrift, defaultDrift, localPreferences] = await Promise.all([
     imageDrift(state.config.gateway.image),
     imageDrift(state.config.defaults.image, true),
+    readLocalPreferences(state.paths),
   ]);
   const catalogEntry = state.config.defaults.preset === 'custom' ? undefined : IMAGE_CATALOG.presets[state.config.defaults.preset];
   const catalogDrift = catalogEntry ? catalogEntry.manifestSha256 !== state.config.defaults.image.manifestSha256 : false;
-  console.log(JSON.stringify({ gateway: state.config.gateway, defaults: state.config.defaults, drift: { gateway: gatewayDrift, defaultImage: defaultDrift, catalog: catalogDrift } }, null, 2));
+  console.log(JSON.stringify({ gateway: state.config.gateway, defaults: state.config.defaults, localPreferences, drift: { gateway: gatewayDrift, defaultImage: defaultDrift, catalog: catalogDrift } }, null, 2));
 }
 
 async function up(): Promise<void> {
@@ -349,6 +376,12 @@ async function create(args: ParsedArgs): Promise<void> {
   });
 }
 
+async function upgrade(args: ParsedArgs): Promise<void> {
+  if (flag(args, 'all')) return upgradeAllCommand(args);
+  if (flag(args, 'yes')) throw new Error('--yes is accepted only with qubicl upgrade --all.');
+  return upgradeComputer(args);
+}
+
 async function upgradeComputer(args: ParsedArgs): Promise<void> {
   const name = required(args.positionals[0], 'computer name');
   const paths = statePaths();
@@ -356,6 +389,19 @@ async function upgradeComputer(args: ParsedArgs): Promise<void> {
     const state = await loadState(paths);
     const host = await validateDocker();
     const current = findComputer(state, name);
+    const reviewedComputerObservation = await managedComputerRuntimeObservation(state, current);
+    const reviewedRuntime = requirePreservedRuntimeState(
+      reviewedComputerObservation,
+      `Computer ${current.name}`,
+    );
+    const reviewedGatewayObservation = await managedGatewayRuntimeObservation(state);
+    const reviewedGatewayRuntime = requirePreservedRuntimeState(
+      reviewedGatewayObservation,
+      'Gateway',
+    );
+    if (reviewedRuntime === 'running' && reviewedGatewayRuntime !== 'running') {
+      throw new Error(`Computer ${current.name} is running while the gateway is ${reviewedGatewayRuntime}; reconcile the runtime before upgrading.`);
+    }
     printBrowserProfileDisclosure('upgrade');
     const presetValue = stringOption(args, 'preset');
     const image = stringOption(args, 'image');
@@ -396,24 +442,37 @@ async function upgradeComputer(args: ParsedArgs): Promise<void> {
     if (replacement.cpus < recommendation.cpus || memoryBytes(replacement.memory) < memoryBytes(recommendation.memory)) {
       console.warn(`Warning: preserved resources are below the tested ${replacement.compatibility} recommendation (${recommendation.cpus} CPU / ${recommendation.memory}).`);
     }
+    const currentComputerObservation = await managedComputerRuntimeObservation(state, current);
+    const currentRuntime = requirePreservedRuntimeState(
+      currentComputerObservation,
+      `Computer ${current.name}`,
+    );
+    const currentGatewayObservation = await managedGatewayRuntimeObservation(state);
+    const currentGatewayRuntime = requirePreservedRuntimeState(
+      currentGatewayObservation,
+      'Gateway',
+    );
+    if (currentRuntime !== reviewedRuntime
+      || currentGatewayRuntime !== reviewedGatewayRuntime
+      || JSON.stringify(currentComputerObservation.containers) !== JSON.stringify(reviewedComputerObservation.containers)
+      || JSON.stringify(currentGatewayObservation.containers) !== JSON.stringify(reviewedGatewayObservation.containers)) {
+      throw new Error(`Runtime state changed during image acquisition (computer ${reviewedRuntime} -> ${currentRuntime}; gateway ${reviewedGatewayRuntime} -> ${currentGatewayRuntime}). No Qubicl state or runtime was changed.`);
+    }
     const index = state.config.computers.findIndex(({ id }) => id === current.id);
     state.config.computers[index] = replacement;
     state.config = ConfigSchema.parse(state.config);
 
-    // Acquire and inspect the target image before committing the new pin. The
-    // journal then makes removal/recreation recoverable without touching the
-    // computer ID, secret material, or durable home directory.
-    await ensureRuntimeImages(state, [replacement], flag(args, 'offline'));
     await executeStateTransaction(paths, createStateTransaction('upgrade', state, {
-      runtime: {
-        startGateway: true,
-        replaceIds: [replacement.id],
-        verifyTokenIds: [replacement.id],
-      },
+      runtime: computerUpgradeRuntimePlan(
+        reviewedRuntime,
+        replacement.id,
+        reviewedComputerObservation.containers,
+        reviewedGatewayObservation.containers,
+      ),
     }));
-    await synchronizeStartedSkillPolicies(state, [replacement]);
+    if (reviewedRuntime === 'running') await synchronizeStartedSkillPolicies(state, [replacement]);
     console.log(`Upgraded ${replacement.name} to ${replacement.image.resolved}.`);
-    console.log(`Computer ID, token, resources, policy, and durable home are unchanged. The disposable runtime was recreated and is healthy.`);
+    console.log(`Computer ID, token, resources, policy, and durable home are unchanged. Runtime state was preserved as ${reviewedRuntime}.`);
   });
 }
 
@@ -431,14 +490,47 @@ async function list(args: ParsedArgs): Promise<void> {
 
 async function status(name?: string): Promise<void> {
   const state = await loadState();
+  const dockerHost = await validateDocker();
+  const updates = await lifecycleUpdateStatus(state, dockerHost.platform);
   if (name) {
     const computer = findComputer(state, name);
-    console.log(JSON.stringify({ qubicl: QUBICL_BUILD, ...computer, resourceEnvelope: computerResourceEnvelope(computer), runtime: await containerStatus(state, computer.id), imageDrift: await imageDrift(computer.image, true), endpoints: applicableEndpoints(state, computer) }, null, 2));
+    const update = updates.rows.find(({ key }) => key === `computer:${computer.id}`);
+    console.log(JSON.stringify({
+      qubicl: QUBICL_BUILD,
+      ...computer,
+      resourceEnvelope: computerResourceEnvelope(computer),
+      runtime: await containerStatus(state, computer.id),
+      update,
+      imageDrift: await imageDrift(computer.image, true),
+      recoveryRequired: updates.recoveryRequired,
+      endpoints: applicableEndpoints(state, computer),
+    }, null, 2));
     return;
   }
   const gateway = await docker(['inspect', '--format', '{{.State.Status}}', gatewayContainerName(state.config.installationId, state.paths.root)], { allowFailure: true });
-  const computers = await Promise.all(state.config.computers.map(async (computer) => ({ name: computer.name, id: computer.id, preset: computer.preset, compatibility: computer.compatibility, capabilities: computer.capabilities, resourceEnvelope: computerResourceEnvelope(computer), image: computer.image, imageDrift: await imageDrift(computer.image, true), ...(await containerStatus(state, computer.id)) })));
-  console.log(JSON.stringify({ qubicl: QUBICL_BUILD, gateway: { runtime: gateway || 'absent', config: state.config.gateway, imageDrift: await imageDrift(state.config.gateway.image) }, computers }, null, 2));
+  const computers = await Promise.all(state.config.computers.map(async (computer) => ({
+    name: computer.name,
+    id: computer.id,
+    preset: computer.preset,
+    compatibility: computer.compatibility,
+    capabilities: computer.capabilities,
+    resourceEnvelope: computerResourceEnvelope(computer),
+    image: computer.image,
+    update: updates.rows.find(({ key }) => key === `computer:${computer.id}`),
+    imageDrift: await imageDrift(computer.image, true),
+    ...(await containerStatus(state, computer.id)),
+  })));
+  console.log(JSON.stringify({
+    qubicl: QUBICL_BUILD,
+    updates,
+    gateway: {
+      runtime: gateway || 'absent',
+      config: state.config.gateway,
+      update: updates.rows.find(({ key }) => key === 'gateway'),
+      imageDrift: await imageDrift(state.config.gateway.image),
+    },
+    computers,
+  }, null, 2));
 }
 
 async function inspect(name: string): Promise<void> {
@@ -1025,6 +1117,21 @@ async function applyManifest(path: string, dryRun: boolean, prune: boolean): Pro
 async function prepareStateBeforeCommand(command: string | undefined, args: ParsedArgs): Promise<void> {
   if (!command || ['help', 'version', 'image', 'doctor'].includes(command)) return;
   const paths = statePaths();
+  const notificationPreferenceOnly = command === 'config'
+    && args.positionals[0] === 'set'
+    && args.options.has('update-notifications')
+    && [...args.options.keys()].every((name) => name === 'update-notifications');
+  const readOnlyLifecycle = command === 'status'
+    || command === 'cleanup'
+    || (command === 'upgrade' && flag(args, 'all'))
+    || notificationPreferenceOnly;
+  if (readOnlyLifecycle) {
+    const format = await inspectStateFormat(paths);
+    if (format.status !== 'current') {
+      throw new Error(`${command} requires current Qubicl state and will not migrate or recover it implicitly: ${format.detail}`);
+    }
+    return;
+  }
   if (command === 'setup' && (await inspectStateFormat(paths)).status === 'uninitialized') return;
   const requiresRuntime = new Set([
     'setup', 'up', 'down', 'create', 'upgrade', 'start', 'stop', 'restart', 'control', 'rename', 'delete', 'restore', 'purge', 'repair', 'apply',
@@ -1385,25 +1492,6 @@ async function runtimeInventoryCheck(state: LoadedState): Promise<DoctorCheck> {
     : { status: 'ok', check: 'runtime-orphans', detail: 'no labeled orphan containers, networks, or volumes' };
 }
 
-async function cleanup(args: ParsedArgs): Promise<void> {
-  if (!flag(args, 'yes')) throw new Error('Cleanup requires --yes after reviewing qubicl doctor and docker system df.');
-  if (!flag(args, 'orphans') && !flag(args, 'images')) throw new Error('Cleanup requires --orphans and/or --images.');
-  const state = await loadState(); await validateDocker();
-  if (flag(args, 'orphans')) {
-    const orphaned = await runtimeInventory(state);
-    if (orphaned.containers.length) await docker(['rm', '--force', ...orphaned.containers]);
-    for (const name of orphaned.networks) await docker(['network', 'rm', name]);
-    for (const name of orphaned.volumes) await docker(['volume', 'rm', name]);
-    console.log(`Removed ${orphaned.containers.length} verified orphan containers, ${orphaned.networks.length} networks, and ${orphaned.volumes.length} volumes.`);
-  }
-  if (flag(args, 'images')) {
-    const candidates = (await docker(['image', 'ls', '--filter', 'dangling=true', '--filter', 'label=dev.qubicl.contract-version=1', '--quiet'], { allowFailure: true })).split('\n').filter(Boolean);
-    const unique = [...new Set(candidates)];
-    if (unique.length) await docker(['image', 'rm', ...unique], { allowFailure: true, inherit: true });
-    console.log(`Requested removal of ${unique.length} dangling Qubicl contract image${unique.length === 1 ? '' : 's'}; Docker preserved anything still referenced.`);
-  }
-}
-
 function inspectNetworks(label: string, container: DockerInspection, expected: string[], problems: string[]): void {
   const actual = Object.keys(container.NetworkSettings?.Networks ?? {}).toSorted();
   if (JSON.stringify(actual) !== JSON.stringify(expected.toSorted())) problems.push(`${label} networks do not exactly match ${expected.join(', ')}`);
@@ -1446,11 +1534,11 @@ const invocationRules: Record<string, InvocationRule> = {
   help: { minPositionals: 0, maxPositionals: 0 },
   version: { minPositionals: 0, maxPositionals: 0 },
   setup: { minPositionals: 0, maxPositionals: 0, options: ['preset', 'image', 'cpus', 'memory', 'gateway-port', 'create', 'no-create', 'no-start', 'offline', 'allow-unsupported-resources', 'verbose', 'no-clear', 'yes', 'json'] },
-  config: { minPositionals: 1, maxPositionals: 1, options: ['gateway-port', 'default-preset', 'default-image', 'default-cpus', 'default-memory'] },
+  config: { minPositionals: 1, maxPositionals: 1, options: ['gateway-port', 'default-preset', 'default-image', 'default-cpus', 'default-memory', 'update-notifications'] },
   up: { minPositionals: 0, maxPositionals: 0 },
   down: { minPositionals: 0, maxPositionals: 0 },
   create: { minPositionals: 0, maxPositionals: 1, options: ['preset', 'image', 'cpus', 'memory', 'skills', 'tools', 'no-start', 'offline', 'yes', 'json'] },
-  upgrade: { minPositionals: 1, maxPositionals: 1, options: ['preset', 'image', 'offline'] },
+  upgrade: { minPositionals: 0, maxPositionals: 1, options: ['preset', 'image', 'offline', 'all', 'yes'] },
   list: { minPositionals: 0, maxPositionals: 0, options: ['json'] },
   status: { minPositionals: 0, maxPositionals: 1 },
   inspect: { minPositionals: 1, maxPositionals: 1 },
@@ -1498,6 +1586,7 @@ function validateInvocation(command: string | undefined, args: ParsedArgs): void
   if (flag(args, 'help')) return;
   if (args.positionals.length < rule.minPositionals) throw new Error(`Command ${name} is missing required arguments. Run qubicl help.`);
   if (args.positionals.length > rule.maxPositionals) throw new Error(`Command ${name} received too many arguments. Run qubicl help.`);
+  if (name === 'upgrade') validateUpgradeInvocation(args);
 }
 
 const helpText = `Qubicl — private Docker computers for any compatible LLM
@@ -1511,15 +1600,16 @@ Usage: qubicl <command> [arguments]
         [--allow-unsupported-resources] [--verbose] [--no-clear] [--yes] [--json]
   config show                            Print gateway and computer defaults as JSON
   config set [--gateway-port n] [--default-preset id | --default-image ref]
-             [--default-cpus n] [--default-memory 4g]
-                                         Transactionally update managed settings
+             [--default-cpus n] [--default-memory 4g] [--update-notifications on|off]
+                                         Update managed settings and private local preferences
   up | down                              Start or stop all resources
   create [name] [--preset id | --image ref] [--cpus n] [--memory 4g]
                 [--skills core|none|ids] [--tools full|names]
                 [--no-start] [--offline] [--yes] [--json]
                                          Create a computer from exact stored/current catalog identity
   upgrade <name> [--preset id | --image ref] [--offline]
-                                         Recreate one computer on the latest compatible image; preserve ID, token, settings, and home
+                                         Recreate one computer on the latest compatible image; preserve ID, token, settings, home, and runtime state
+  upgrade --all [--offline] [--yes]      Preview exact gateway/default/curated targets, then confirm a deterministic roll-forward upgrade
   list [--json] | status [name] | inspect <name>
                                          Inspect runtime state
   logs [name] | doctor [--json]          Diagnose Qubicl with repair guidance
@@ -1569,7 +1659,7 @@ Usage: qubicl <command> [arguments]
                                          Import, inspect, recover, and reset bounded Agent Skills packages
   tools <computer> [--profile full] [--enable names|categories] [--disable names|categories] [--yes] [--json]
                                          Select the effective per-computer tool policy; control and lease tools stay locked
-  cleanup --orphans [--images] --yes      Remove only verified labeled orphans/dangling Qubicl images
+  cleanup --orphans [--images] [--yes]    Preview verified orphans and obsolete private cache records; images/volumes remain manual
   rename <old> <new>                     Rename without changing identity
   delete <name>                          Move a computer to recoverable trash
   restore <name-or-id>                   Restore with a new token

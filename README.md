@@ -200,9 +200,18 @@ qubicl control release computer-name
 - Import bounded devcontainer definitions and use host-mediated Git workflows.
 - Enable loopback-only SSH for editors and ordinary `ssh`/`scp`.
 - Inspect a private, content-free audit trail and diagnose topology with `doctor`.
-- Upgrade a computer in place while preserving its ID, token, policy, resources, and home.
+- Preview pending curated image updates and their acquisition sizes with `status`.
+- Upgrade one computer or use confirmed `upgrade --all` while preserving IDs,
+  tokens, policies, resources, homes, and prior running/stopped/absent state.
+- Preview exact cleanup candidates; ambiguous daemon-global images and Docker
+  volumes remain manual because one installation cannot prove exclusive ownership.
 
 Use `qubicl help` or `qubicl <command> --help` to explore the full CLI.
+
+Update notices are local, default off, and compare only against the catalog
+bundled with the installed CLI. Enable or disable them explicitly with
+`qubicl config set --update-notifications on|off`; they perform no network
+check, telemetry, image pull, or automatic mutation.
 
 ## Security boundary
 

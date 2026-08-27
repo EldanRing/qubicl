@@ -97,14 +97,50 @@ operate only inside one durable home. HTTPS credential helpers, `gh`/`glab`, or
 the SSH agent remain on the host. `git push` requires `--yes`; no agent-facing
 Qubicl tool stores or publishes with those credentials.
 
+## Lifecycle and local update review
+
+```sh
+qubicl status
+qubicl upgrade research
+qubicl upgrade --all
+qubicl config set --update-notifications on
+```
+
+`status` compares the stored curated gateway, default, and computer identities
+with exact targets in the CLI's bundled catalog. Custom images are reported as
+manual. `upgrade --all` prints one deterministic preview before confirmation:
+current and exact image identities, runtime state, deduplicated acquisition
+targets, expected compressed download and expanded bytes, and the required
+space bound. Docker does not expose portable remaining image-store or VM
+capacity, so Qubicl states that limit instead of inventing a free-space value.
+
+Confirmation occurs before any acquisition. Qubicl then obtains and inspects
+every exact target before the first state/runtime mutation and rolls forward in
+gateway-then-computer order. Computer IDs, tokens, policies, resources, durable
+homes, and running/stopped/absent state remain unchanged. A failure after the
+first mutation leaves a recovery journal and reports the completed prefix; fix
+the stated prerequisite and rerun a normal lifecycle command rather than
+deleting the journal.
+
+Local update notices are default off. Enabling them writes only a private local
+preference. Eligible human-readable commands may then print one stderr notice
+based on the bundled catalog; there is no telemetry, background task, network
+check, pull, or automatic mutation. Use `off` to disable them again.
+
 ## Audit, doctor, cleanup
 
 `qubicl audit show NAME` reads recent private JSONL metadata. Export and pruning
 are explicit. Command text, file content, request bodies, and secret values are
 not recorded. `qubicl doctor` validates exact gateway/computer network topology
-and reports labeled orphans. Only `qubicl cleanup --orphans --yes` removes those
-reviewed resources; `--images` separately asks Docker to remove dangling
-Qubicl-contract images while preserving referenced layers.
+and reports labeled orphans. `qubicl cleanup --orphans [--images]` first prints
+the exact immutable inventory and preservation reasons; adding `--yes` removes
+only candidates that still match an immediate reinspection. Current, running,
+attached, unrelated, or ambiguously owned resources are preserved, and a
+partial Docker failure returns an error without hiding what was removed.
+Daemon-global images can be shared by another Qubicl state root, and Docker
+volumes have only mutable names, so both remain manual. `--images` can remove
+only obsolete private image-contract cache records whose references have been
+revalidated; it never performs a global or dangling-image prune.
 
 `qubicl status NAME` reports the computer's single CPU, memory, and PID boundary.
 Ordinary system tools in a container may still show host/VM-derived totals.

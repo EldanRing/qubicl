@@ -19,6 +19,11 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 - A host-only `qubicl browser profile wipe COMPUTER` command previews domains
   with stored cookies/site data, the exact durable-profile scope, and preserved
   Downloads before requiring typed-name confirmation or an explicit `--yes`.
+- `qubicl upgrade --all` previews exact curated gateway/default/computer
+  targets, acquisition and expanded sizes, preserved runtime state, and
+  deterministic gateway-first order before confirmation. Pending updates also
+  appear in `status`, with default-off bundled-catalog notices available as a
+  private local preference.
 
 ### Changed
 
@@ -34,6 +39,10 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 - Upgrade, full-home backup, checkpoint, clone, delete, restore, and purge
   previews now state whether durable Chromium profile data is preserved,
   copied, restored, or permanently removed.
+- Verified orphan/cache cleanup now previews a deterministic immutable
+  inventory and reinspects every candidate before deletion. Daemon-global
+  images and mutable-name volumes remain manual because one Qubicl state root
+  cannot prove exclusive ownership.
 
 ### Fixed
 
@@ -66,6 +75,10 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   stops a stable managed runtime before inspection and deletion, and restores
   its prior running state on cancellation or success. Partial deletion and
   restart failures remain explicit and fail closed.
+- Lifecycle replacement and recovery bind exact container IDs, roles,
+  topology, image identities, and preserved running/stopped/absent state;
+  read-only status and preview paths cannot rewrite or resurrect a pending
+  journal.
 
 ## 0.1.1 - 2026-08-27
 

@@ -105,6 +105,34 @@ qubicl doctor
 
 For an imported/moved home ownership warning, keep it stopped and run `qubicl repair ownership computer-name` before starting it.
 
+## An all-computer upgrade is blocked or interrupted
+
+Run `qubicl status` first. It reports bundled-catalog targets without applying
+them and reports any pending recovery separately. `qubicl upgrade --all` blocks
+before acquisition when a runtime inventory is partial, unstable, substituted,
+or cannot be inspected exactly. Restore local Docker access and reconcile the
+named container conflict; do not remove or rename containers by guesswork.
+
+The preview's required-space number is a conservative image-acquisition bound.
+Docker Engine/Desktop does not expose one portable remaining capacity value for
+its image store or VM disk, so Qubicl labels available capacity unknown rather
+than claiming host filesystem free space is usable by Docker.
+
+After confirmation, all targets are acquired and inspected before mutation.
+If a later gateway or computer step fails, the completed prefix is not rolled
+back and the transaction journal remains. Fix the exact Docker/image/health
+error and rerun the directed lifecycle command so Qubicl can roll forward from
+immutable container/image bindings. Never delete `transaction.yaml`. A status
+or cleanup/upgrade preview reads that journal without migrating, rewriting, or
+recovering it.
+
+Cleanup is similarly conservative. If `qubicl cleanup --orphans --images`
+preserves an image or volume for manual review, that is expected: images are
+shared across every state root using the Docker daemon, and volume names are
+mutable. Qubicl does not run a global prune or infer exclusive ownership from
+OCI labels. Inspect other installations and Docker references yourself before
+performing any separate manual removal.
+
 ## Docker Desktop still shows UUID-style Qubicl names
 
 The primary `~/.qubicl` installation should appear as one `qubicl` group containing exactly `gateway` plus one literal-name container per computer. Protocol-9 installations may temporarily show suffixed executor/session/web/egress/SSH sidecars until each computer is converted with `qubicl upgrade NAME`; the rolling conversion preserves its ID, token, settings, and durable `/home`, then removes its verified legacy containers, workspace network, and display volume. Docker Desktop's project list uses Compose service labels while its details view shows container names; both should use operator-facing names rather than UUID services. If an unrelated Docker container already owns `gateway` or a selected computer name, Qubicl refuses to replace it; rename or remove that unrelated container explicitly before retrying.

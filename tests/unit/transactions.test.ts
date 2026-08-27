@@ -5,9 +5,10 @@ import { join } from 'node:path';
 import test from 'node:test';
 import YAML from 'yaml';
 import { VIEWER_AUTHENTICATION_HEADER_V1, presetDefaults, type ComputerConfig, type TransactionCheckpoint } from '../../packages/core/dist/index.js';
-import { auditState, initializeState, loadState, newSecret, readMetadata, saveMetadata, saveState, statePaths, withStateLock } from '../../packages/cli/dist/state.js';
+import { lifecycleUpdateStatus } from '../../packages/cli/dist/lifecycle-command.js';
+import { auditState, initializeState, loadState, newSecret, readMetadata, saveMetadata, saveState, statePaths, withStateLock, type LoadedState } from '../../packages/cli/dist/state.js';
 import { recordRuntimeImageContracts } from '../../packages/cli/dist/runtime.js';
-import { createStateTransaction, executeStateTransaction, prepareStateTransaction, readPendingTransaction, recoverPendingTransaction, restoreReadyMarker, restoreStage, type TransactionRuntime } from '../../packages/cli/dist/transactions.js';
+import { createStateTransaction, executeStateTransaction, inspectPendingTransaction, prepareStateTransaction, readPendingTransaction, recoverPendingTransaction, restoreReadyMarker, restoreStage, type TransactionRuntime } from '../../packages/cli/dist/transactions.js';
 
 const checkpoints: TransactionCheckpoint[] = [
   'journal-written',
@@ -90,6 +91,29 @@ test('durable-only recovery leaves a committed journal for later Docker replay',
   await rm(fixture.paths.root, { recursive: true, force: true });
 });
 
+test('a transient strict gateway verification failure retains the journal for roll-forward retry', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-strict-gateway-recovery-'));
+  try {
+    const paths = statePaths(root);
+    const state = await initializeState(paths);
+    let failInspection = true;
+    const runtime: TransactionRuntime = {
+      ...fakeRuntime,
+      verifyGateway: async () => {
+        if (failInspection) throw new Error('transient managed-container inspect timeout');
+      },
+    };
+    const transaction = createStateTransaction('config', state, { runtime: { startGateway: true } });
+    await assert.rejects(executeStateTransaction(paths, transaction, { runtime }), /inspect timeout/);
+    assert.equal((await readPendingTransaction(paths))?.phase, 'state-committed');
+    failInspection = false;
+    await recoverPendingTransaction(paths, { runtime });
+    await assert.rejects(lstat(paths.journal), { code: 'ENOENT' });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('policy- and SSH-style transaction recovery reconciles viewer contracts before durable state or render mutation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'qubicl-contract-transaction-'));
   try {
@@ -159,7 +183,12 @@ test('an interrupted active-runtime replacement rolls forward without changing d
   let interrupted = false;
   const runtime: TransactionRuntime = {
     ...fakeRuntime,
-    remove: async (_state, id) => { assert.equal(id, existing.id); removals += 1; },
+    remove: async () => { throw new Error('replacement must not use mutable-name general removal'); },
+    removeReplacement: async (_state, replacement, binding) => {
+      assert.equal(replacement.id, existing.id);
+      assert.deepEqual(binding, [], 'old journals are routed through the fail-closed replacement helper');
+      removals += 1;
+    },
     start: async (_state, computer) => { assert.equal(computer.id, existing.id); starts += 1; },
   };
 
@@ -184,6 +213,53 @@ test('an interrupted active-runtime replacement rolls forward without changing d
   await rm(root, { recursive: true, force: true });
 });
 
+test('stopped gateway and computer replacement is journaled and recovers without starting either runtime', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-stopped-upgrade-'));
+  try {
+    const paths = statePaths(root);
+    const state = await initializeState(paths);
+    const existing = computer('00000000-0000-4000-8000-000000000124', 'stopped-upgrade');
+    state.config.computers.push(existing);
+    state.secrets.computers[existing.id] = newSecret();
+    await saveMetadata(paths, existing);
+    await saveState(state);
+    existing.image = { ...existing.image, requested: 'qubicl/workstation:stopped-new', resolved: 'qubicl/workstation:stopped-new' };
+    const transaction = createStateTransaction('upgrade', state, {
+      runtime: { replaceGatewayStopped: true, replaceStoppedIds: [existing.id] },
+    });
+    let gatewayReplacements = 0;
+    let computerReplacements = 0;
+    let interrupted = false;
+    const runtime: TransactionRuntime = {
+      ...fakeRuntime,
+      startGateway: async () => { throw new Error('stopped upgrade must not start gateway'); },
+      start: async () => { throw new Error('stopped upgrade must not start computer'); },
+      replaceStoppedGateway: async () => { gatewayReplacements += 1; },
+      replaceStopped: async (_state, replacement) => {
+        assert.equal(replacement.id, existing.id);
+        computerReplacements += 1;
+      },
+    };
+
+    await assert.rejects(executeStateTransaction(paths, transaction, {
+      runtime,
+      checkpoint: (checkpoint) => {
+        if (!interrupted && checkpoint === 'runtime-removed') {
+          interrupted = true;
+          throw new Error('interrupt:stopped-runtime-replaced');
+        }
+      },
+    }), /interrupt:stopped-runtime-replaced/);
+    await recoverPendingTransaction(paths, { runtime });
+    assert.equal(gatewayReplacements, 2);
+    assert.equal(computerReplacements, 2);
+    assert.equal((await loadState(paths)).config.computers[0]?.image.resolved, 'qubicl/workstation:stopped-new');
+    await assert.rejects(lstat(paths.journal), { code: 'ENOENT' });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('gateway capability verification and existing-network reconnection precede computer replacement', async () => {
   const root = await mkdtemp(join(tmpdir(), 'qubicl-gateway-sequence-'));
   try {
@@ -204,7 +280,11 @@ test('gateway capability verification and existing-network reconnection precede 
       startGateway: async () => { calls.push('gateway:start'); },
       verifyGateway: async () => { calls.push('gateway:verify'); },
       reconnect: async (_state, value) => { calls.push(`reconnect:${value.id}`); },
-      remove: async (_state, id) => { calls.push(`remove:${id}`); },
+      remove: async () => { throw new Error('replacement must not use mutable-name general removal'); },
+      removeReplacement: async (_state, value, binding) => {
+        assert.deepEqual(binding, [], 'old journals are routed through the fail-closed replacement helper');
+        calls.push(`remove:${value.id}`);
+      },
       start: async (_state, value) => { calls.push(`start:${value.id}`); },
     };
     await executeStateTransaction(paths, createStateTransaction('upgrade', state, {
@@ -280,15 +360,34 @@ test('a pending setup journal reconnects an existing running computer without st
   transaction.runtime = {
     ensureImages: false,
     startGateway: true,
+    replaceGatewayRunning: false,
+    replaceGatewayStopped: false,
+    gatewayRuntimeBinding: [],
     reconnectIds: [],
     replaceIds: [],
+    replaceStoppedIds: [],
+    computerRuntimeBindings: {},
     // Journals written before reconnectIds existed stored this in startIds.
     startIds: [existingId],
     removeIds: [],
     verifyTokenIds: [],
   };
-  const legacyDocument = structuredClone(transaction) as unknown as { runtime: { reconnectIds?: string[] } };
+  const legacyDocument = structuredClone(transaction) as unknown as {
+    runtime: {
+      reconnectIds?: string[];
+      replaceGatewayRunning?: boolean;
+      replaceGatewayStopped?: boolean;
+      gatewayRuntimeBinding?: unknown[];
+      replaceStoppedIds?: string[];
+      computerRuntimeBindings?: Record<string, unknown[]>;
+    };
+  };
   delete legacyDocument.runtime.reconnectIds;
+  delete legacyDocument.runtime.replaceGatewayRunning;
+  delete legacyDocument.runtime.replaceGatewayStopped;
+  delete legacyDocument.runtime.gatewayRuntimeBinding;
+  delete legacyDocument.runtime.replaceStoppedIds;
+  delete legacyDocument.runtime.computerRuntimeBindings;
   await writeFile(fixture.paths.journal, YAML.stringify(legacyDocument), { mode: 0o600 });
   const reconnected: string[] = [];
   const started: string[] = [];
@@ -343,28 +442,7 @@ test('state lock release preserves a replacement lock it does not own', async ()
 
 test('a pending version-1 lifecycle journal is backed up, upgraded, and recovered', async () => {
   const fixture = await transactionFixture();
-  const legacy = {
-    version: 1,
-    id: fixture.transaction.id,
-    operation: fixture.transaction.operation,
-    createdAt: fixture.transaction.createdAt,
-    phase: fixture.transaction.phase,
-    config: {
-      version: 1,
-      gatewayPort: fixture.transaction.config.gateway.port,
-      nextName: fixture.transaction.config.nextName,
-      defaults: {
-        image: fixture.transaction.config.defaults.image.requested,
-        cpus: fixture.transaction.config.defaults.cpus,
-        memory: fixture.transaction.config.defaults.memory,
-      },
-      computers: fixture.transaction.config.computers.map(legacyComputer),
-    },
-    secrets: { version: 1, computers: fixture.transaction.secrets.computers },
-    active: fixture.transaction.active.map((entry) => ({ source: entry.source, metadata: legacyComputer(entry.metadata) })),
-    trash: fixture.transaction.trash.map((entry) => ({ metadata: { ...legacyComputer(entry.metadata), deletedAt: entry.metadata.deletedAt } })),
-    runtime: fixture.transaction.runtime,
-  };
+  const legacy = legacyTransaction(fixture);
   const contents = YAML.stringify(legacy);
   await writeFile(fixture.paths.journal, contents, { mode: 0o600 });
 
@@ -383,6 +461,33 @@ test('a pending version-1 lifecycle journal is backed up, upgraded, and recovere
   const recovered = await loadState(fixture.paths);
   assert.equal(recovered.config.version, 3);
   assert.equal(recovered.config.installationId, fixture.transaction.id);
+  await assert.rejects(lstat(fixture.paths.journal), { code: 'ENOENT' });
+  await rm(fixture.paths.root, { recursive: true, force: true });
+});
+
+test('read-only status inspection neither migrates a legacy journal nor resurrects one removed by recovery', async () => {
+  const fixture = await transactionFixture();
+  const contents = YAML.stringify(legacyTransaction(fixture));
+  await writeFile(fixture.paths.journal, contents, { mode: 0o600 });
+  const backupsBefore = (await readdir(fixture.paths.backups)).toSorted();
+  const state = {
+    paths: fixture.paths,
+    config: fixture.transaction.config,
+    secrets: fixture.transaction.secrets,
+  } as LoadedState;
+
+  const status = await lifecycleUpdateStatus(state, 'linux/amd64');
+  assert.equal(status.recoveryRequired, true);
+  assert.equal((await inspectPendingTransaction(fixture.paths))?.version, 3, 'legacy migration is parsed only in memory');
+  assert.equal(await readFile(fixture.paths.journal, 'utf8'), contents);
+  assert.deepEqual((await readdir(fixture.paths.backups)).toSorted(), backupsBefore);
+
+  const [racingStatus, recovered] = await Promise.all([
+    lifecycleUpdateStatus(state, 'linux/amd64'),
+    recoverPendingTransaction(fixture.paths, { runtime: fakeRuntime }),
+  ]);
+  assert.equal(typeof racingStatus.recoveryRequired, 'boolean');
+  assert.equal(recovered, true);
   await assert.rejects(lstat(fixture.paths.journal), { code: 'ENOENT' });
   await rm(fixture.paths.root, { recursive: true, force: true });
 });
@@ -440,15 +545,43 @@ function legacyComputer(computer: ComputerConfig): { id: string; name: string; i
   };
 }
 
+function legacyTransaction(fixture: Awaited<ReturnType<typeof transactionFixture>>): Record<string, unknown> {
+  return {
+    version: 1,
+    id: fixture.transaction.id,
+    operation: fixture.transaction.operation,
+    createdAt: fixture.transaction.createdAt,
+    phase: fixture.transaction.phase,
+    config: {
+      version: 1,
+      gatewayPort: fixture.transaction.config.gateway.port,
+      nextName: fixture.transaction.config.nextName,
+      defaults: {
+        image: fixture.transaction.config.defaults.image.requested,
+        cpus: fixture.transaction.config.defaults.cpus,
+        memory: fixture.transaction.config.defaults.memory,
+      },
+      computers: fixture.transaction.config.computers.map(legacyComputer),
+    },
+    secrets: { version: 1, computers: fixture.transaction.secrets.computers },
+    active: fixture.transaction.active.map((entry) => ({ source: entry.source, metadata: legacyComputer(entry.metadata) })),
+    trash: fixture.transaction.trash.map((entry) => ({ metadata: { ...legacyComputer(entry.metadata), deletedAt: entry.metadata.deletedAt } })),
+    runtime: fixture.transaction.runtime,
+  };
+}
+
 const fakeRuntime: TransactionRuntime = {
   reconcileContracts: async () => undefined,
   validate: async () => undefined,
   ensureImages: async () => undefined,
   startGateway: async () => undefined,
+  replaceStoppedGateway: async () => undefined,
   verifyGateway: async () => undefined,
   reconnect: async () => undefined,
   waitForRemoval: async () => undefined,
   remove: async () => undefined,
+  removeReplacement: async () => undefined,
+  replaceStopped: async () => undefined,
   start: async () => undefined,
   verifyToken: async () => undefined,
 };

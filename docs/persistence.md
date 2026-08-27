@@ -48,7 +48,16 @@ To intentionally move one existing computer to the latest image for its stored p
 qubicl upgrade research --offline
 ```
 
-Omit `--offline` to allow Qubicl to obtain the catalog image. The operation preserves the computer ID, name, token, CPU/memory allocation, network and SSH settings, environment, route, and durable `/home`. It replaces the pinned image capability contract and recreates the non-durable runtime. Custom computers reuse their requested image reference, or may be moved explicitly with `--image`; `--preset` intentionally changes the capability preset. Upgrade is transactionally recoverable after interruption.
+Omit `--offline` to allow Qubicl to obtain the catalog image. The operation preserves the computer ID, name, token, CPU/memory allocation, network and SSH settings, environment, route, durable `/home`, and whether its runtime was running, stopped, or absent. It replaces the pinned image capability contract and recreates a retained disposable runtime only when that runtime existed. Custom computers reuse their requested image reference, or may be moved explicitly with `--image`; `--preset` intentionally changes the capability preset. Upgrade is transactionally recoverable after interruption.
+
+To review every curated target together, run `qubicl status`, then `qubicl
+upgrade --all`. The latter previews and confirms the exact gateway/default/
+computer changes, acquires and inspects all deduplicated targets before the
+first mutation, then rolls forward gateway-first. Stored defaults change only
+future computers. Existing computer IDs, credentials, operator settings,
+resources, homes, and prior runtime state are preserved. Missing local content
+IDs in migrated curated state are repaired through the same explicit boundary;
+custom image identities are never advanced automatically.
 
 ## Protected host state
 
@@ -70,7 +79,7 @@ The confirmed operation works only in that home through a network-isolated one-s
 
 ## Interrupted work
 
-Setup, create, upgrade, rename, delete, restore, token rotation, configuration, and manifest application write `transaction.yaml` before crossing durable/runtime boundaries. The journal records the complete intended target. The next applicable command rolls it forward; `doctor` reports runtime work still waiting for Docker.
+Setup, create, upgrade, rename, delete, restore, token rotation, configuration, and manifest application write `transaction.yaml` before crossing durable/runtime boundaries. The journal records the complete intended target plus immutable runtime bindings where replacement is required. The next applicable mutating command rolls it forward; `status` and cleanup/upgrade previews inspect a pending journal without rewriting or recovering it, and `doctor` reports runtime work still waiting for Docker.
 
 State v1/v2 migration first writes an exact checksummed backup of config/secrets under `backups/`, then uses `state-migration.yaml` for resumability. Migration preserves IDs, names, tokens, internal keys, homes, trash, resources, port, and legacy image strings. It does not inspect Docker, recreate containers, or start anything. Newer unsupported formats fail closed.
 

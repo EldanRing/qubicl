@@ -86,6 +86,8 @@ Coding-oriented tools keep that lease and process architecture while bounding mo
 ├── trash/                       recoverable deleted computers
 └── runtime/
     ├── compose.yaml             generated, disposable
+    ├── preferences.json         private local-only operator preferences
+    ├── image-contracts.json     exact inspected runtime image evidence
     ├── legacy-runtime-migration.json temporary verified runtime-name migration journal
     ├── legacy-runtime-namespace.pending durable marker before legacy resource discovery
     └── routes.json              generated token hashes/routes
@@ -97,6 +99,7 @@ State records requested and resolved image references, local content ID, expecte
 
 - Setup default changes affect only computers created later.
 - `qubicl upgrade NAME` is the explicit image-replacement boundary: it preserves identity, credentials, operator settings, and durable `/home`, while transactionally replacing the pinned capability contract and disposable runtime.
+- `qubicl upgrade --all` reviews one immutable plan, acquires and inspects every deduplicated exact target before mutation, then rolls forward gateway-first while preserving each computer's prior running/stopped/absent state. Read-only status and preview paths never recover or rewrite a pending journal.
 - Immutable UUID, home, token, image, resources, and route survive rename and setup reruns.
 - Delete invalidates access and moves state to trash; restore retains ID/home and issues a new token; purge permanently destroys it.
 - State v1/v2 migrations make checksummed backups and never start containers.
