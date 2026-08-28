@@ -180,7 +180,9 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       build-essential \
       iproute2 \
-      libreoffice \
+      libreoffice-calc \
+      libreoffice-impress \
+      libreoffice-writer \
       netcat-openbsd \
  && rm -rf /var/lib/apt/lists/* \
  && install -d -m 0755 /etc/skel/.config/libreoffice/4/user

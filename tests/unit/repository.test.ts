@@ -285,6 +285,12 @@ test('web extraction dependencies are fully pinned, licensed, and included in im
 });
 
 test('workstation starts LibreOffice without the first-run tip prompt', async () => {
+  const dockerfile = await readFile(join(root, 'images/computer/Dockerfile'), 'utf8');
+  for (const application of ['calc', 'impress', 'writer']) {
+    assert.match(dockerfile, new RegExp(`^\\s+libreoffice-${application} \\\\$`, 'm'));
+  }
+  assert.doesNotMatch(dockerfile, /^\s+libreoffice \\$/m);
+
   const configuration = await readFile(join(root, 'images/computer/libreoffice-registrymodifications.xcu'), 'utf8');
   assert.match(configuration, /oor:name="ShowTipOfTheDay"[\s\S]*?<value>false<\/value>/);
 

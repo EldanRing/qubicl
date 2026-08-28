@@ -110,7 +110,7 @@ the selected computer cannot support are absent from discovery.
 | `file-system` | Shell, processes, Git, durable files, web research | — | 1 CPU / 512m |
 | `browser` | Everything above plus persistent Chromium, OCR, PDF inspection | ✓ | 2 CPU / 2g |
 | `computer` | Browser plus a lightweight XFCE desktop, editors, document tools, SSH | ✓ | 2 CPU / 3g |
-| `workstation` | Full development and office environment with LibreOffice | ✓ | 2 CPU / 4g |
+| `workstation` | Development and office environment with LibreOffice Writer, Calc, and Impress | ✓ | 2 CPU / 4g |
 
 Every preset includes native keyless `web_search`, local `web_extract`, and six
 verified Qubicl-native skill baselines with durable, agent-editable working

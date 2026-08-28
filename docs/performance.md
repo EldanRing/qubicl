@@ -47,3 +47,24 @@ expanded layer sharing and a bounded normalized package inventory derived from
 each platform's embedded SPDX attestation. Candidate verification regenerates the
 report, so package/layer optimization decisions can be reviewed against the
 same bytes that would be published.
+
+## v0.2 image audit
+
+The 2026-08-27 local audit built all five OCI archives for `linux/amd64` and
+`linux/arm64`, then changed only the workstation's LibreOffice package
+selection. Installing Writer, Calc, and Impress directly retains every office
+application Qubicl exposes while omitting the unused Base UI and drivers, Math,
+report builder, and Python-UNO integration.
+
+| Platform | OCI download content | Expanded layer content | SPDX package identities |
+| --- | ---: | ---: | ---: |
+| amd64 | 864,846,153 → 857,318,928 bytes (-0.87%) | 2,405,104,128 → 2,382,855,680 bytes (-0.93%) | 871 → 862 |
+| arm64 | 849,017,285 → 841,719,019 bytes (-0.86%) | 2,418,248,704 → 2,395,713,536 bytes (-0.93%) | 869 → 860 |
+
+The audit retained Chromium/X11/VNC, desktop tools, document inspection,
+development compilers, network diagnostics, and skill runtimes because each is
+part of a supported preset capability or acceptance workload. Bypassing Debian
+package dependencies for smaller incidental savings was rejected as a larger
+compatibility and maintenance risk. These measurements document the controlled
+source decision; the release candidate must regenerate the report from its own
+post-freeze bytes.

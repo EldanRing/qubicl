@@ -44,6 +44,10 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Changed
 
+- The workstation image now installs the supported LibreOffice Writer, Calc,
+  and Impress applications directly instead of the full suite meta-package,
+  removing unused Base, Math, report-builder, and Python-UNO packages from both
+  architectures.
 - Platform documentation now gives macOS Docker Desktop preflight and recovery
   steps plus a shorter WSL 2 install, doctor-report, pinned-launcher, and Windows
   browser-handoff path while retaining the WSL 1 and native-Windows boundaries.
