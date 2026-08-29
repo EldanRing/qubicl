@@ -1139,10 +1139,14 @@ try {
   assert.equal((computerInspect.HostConfig.SecurityOpt ?? []).some((option) => option.includes('unconfined')), false);
   assert.equal(computerInspect.HostConfig.RestartPolicy.Name, 'unless-stopped');
   assert.equal(JSON.stringify(computerInspect.Config.Env).includes(token), false);
-  assert.equal(computerInspect.HostConfig.Binds.length, 3);
+  assert.equal(computerInspect.HostConfig.Binds.length, 4);
   assert.equal(computerInspect.HostConfig.Binds.some((bind) => bind.endsWith('/home:rw')), true);
-  assert.equal(computerInspect.Mounts.length, 3);
+  assert.equal(computerInspect.HostConfig.Binds.some((bind) => bind.includes('/preview-access/')
+    && bind.endsWith(':/run/qubicl/preview-access:ro')), true);
+  assert.equal(computerInspect.Mounts.length, 4);
   assert.equal(computerInspect.Mounts.some(({ Type, Destination }) => Type === 'bind' && Destination === '/home'), true);
+  assert.equal(computerInspect.Mounts.some(({ Type, Destination, RW }) => Type === 'bind'
+    && Destination === '/run/qubicl/preview-access' && RW === false), true);
   assert.equal(computerInspect.HostConfig.NanoCpus, 2_000_000_000);
   assert.equal(computerInspect.HostConfig.Memory, 4 * 1024 * 1024 * 1024);
   assert.equal(computerInspect.HostConfig.PidsLimit, 1024);
