@@ -16,7 +16,7 @@ import {
   type ImageIdentity,
   type Preset,
 } from '@qubicl/core';
-import { assertConfiguredComputersSupportRemotePreviews, assertConfiguredGatewaySupportsExposure, assertGatewayHealthCompatibility, computerPreviewAccessFromLabels, computerViewerAuthentication, developmentImageMismatchError, ensureRuntimeImages, gatewayCompatibilityFromLabels, reconcileRuntimeImageContracts, retainedComputerStartAction, type RuntimeImageContractEvidenceAdapter, type RuntimeInspection } from '../../packages/cli/dist/docker.js';
+import { assertConfiguredComputersSupportRemotePreviews, assertConfiguredGatewaySupportsExposure, assertGatewayHealthCompatibility, computerPreviewAccessFromLabels, computerViewerAuthentication, developmentImageMismatchError, ensureRuntimeImages, gatewayCompatibilityFromLabels, reconcileRuntimeImageContracts, retainedComputerStartAction, type RuntimeImageContractEvidenceAdapter, type RuntimeImageContractReplacementPlan, type RuntimeInspection } from '../../packages/cli/dist/docker.js';
 import { buildGatewayExposureConfig } from '../../packages/cli/dist/gateway-access.js';
 import { LEGACY_VIEWER_AUTHENTICATION, PREVIEW_ACCESS_CONTAINER_DIRECTORY, PREVIEW_ACCESS_CONTAINER_PATH, PREVIEW_ACCESS_RUNTIME_DIRECTORY, computerContainerName, gatewayContainerName, readRuntimeImageContracts, recordRuntimeImageContracts } from '../../packages/cli/dist/runtime.js';
 import { initializeState, newSecret, statePaths } from '../../packages/cli/dist/state.js';
@@ -420,6 +420,90 @@ test('viewer contract reconciliation uses exact immutable image metadata when no
     await reconcileRuntimeImageContracts(state, adapter);
 
     assert.equal((await readRuntimeImageContracts(state)).images[contentId]?.viewerAuthentication, VIEWER_AUTHENTICATION_HEADER_V1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('planned lifecycle replacement derives target viewer contracts without trusting the retained old image', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-viewer-planned-replacement-'));
+  try {
+    const state = await initializeState(statePaths(root));
+    const configured = computer('00000000-0000-4000-8000-000000000415', 'planned-replacement');
+    const computerTarget = testContentId('2');
+    const gatewayTarget = testContentId('3');
+    const computerSource = testContentId('4');
+    const gatewaySource = testContentId('5');
+    configured.image.contentId = computerTarget;
+    state.config.gateway.image.contentId = gatewayTarget;
+    state.config.computers.push(configured);
+    state.secrets.computers[configured.id] = newSecret();
+
+    const computerName = computerContainerName(state, configured);
+    const gatewayName = gatewayContainerName(state.config.installationId, state.paths.root);
+    const retainedComputer = retainedViewerInspection(state, configured, computerSource);
+    retainedComputer.Id = 'a'.repeat(64);
+    retainedComputer.Name = `/${computerName}`;
+    const retainedGateway = retainedGatewayInspection(state, gatewaySource);
+    retainedGateway.Id = 'b'.repeat(64);
+    retainedGateway.Name = `/${gatewayName}`;
+    const adapter: RuntimeImageContractEvidenceAdapter = {
+      inspectContainer: async (name) => {
+        if (name === computerName) return structuredClone(retainedComputer);
+        if (name === gatewayName) return structuredClone(retainedGateway);
+        return undefined;
+      },
+      inspectImage: async (contentId) => contentId === gatewayTarget
+        ? {
+            id: contentId,
+            labels: {
+              'dev.qubicl.gateway-protocol-version': `${GATEWAY_PROTOCOL_VERSION}`,
+              'dev.qubicl.viewer-authentication': VIEWER_AUTHENTICATION_HEADER_V1,
+            },
+            env: [],
+          }
+        : {
+            id: contentId,
+            labels: { 'dev.qubicl.viewer-authentication': VIEWER_AUTHENTICATION_HEADER_V1 },
+            env: [`QUBICL_IMAGE_VIEWER_AUTHENTICATION=${VIEWER_AUTHENTICATION_HEADER_V1}`],
+          },
+    };
+    const replacements: RuntimeImageContractReplacementPlan = {
+      gatewaySource: [{
+        name: gatewayName,
+        id: retainedGateway.Id!,
+        status: 'running',
+        imageId: gatewaySource,
+        role: 'gateway',
+      }],
+      computerSources: {
+        [configured.id]: [{
+          name: computerName,
+          id: retainedComputer.Id!,
+          status: 'exited',
+          imageId: computerSource,
+          role: 'computer',
+        }],
+      },
+    };
+
+    const reviewedComputerSource = replacements.computerSources![configured.id]![0]!;
+    const wrongSource: RuntimeImageContractReplacementPlan = {
+      ...replacements,
+      computerSources: {
+        ...replacements.computerSources,
+        [configured.id]: [{ ...reviewedComputerSource, id: 'c'.repeat(64) }],
+      },
+    };
+    await assert.rejects(
+      reconcileRuntimeImageContracts(state, adapter, wrongSource),
+      /changed immutable identity or status/i,
+    );
+
+    await reconcileRuntimeImageContracts(state, adapter, replacements);
+    const contracts = await readRuntimeImageContracts(state);
+    assert.equal(contracts.images[computerTarget]?.viewerAuthentication, VIEWER_AUTHENTICATION_HEADER_V1);
+    assert.equal(contracts.images[gatewayTarget]?.gatewayProtocolVersion, GATEWAY_PROTOCOL_VERSION);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

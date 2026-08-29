@@ -76,6 +76,10 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Gateway and computer upgrades now reconstruct a target viewer contract from
+  the exact acquired image while requiring the retained old runtime to match
+  the transaction's immutable source binding, so v0.1-to-v0.2 roll-forward no
+  longer mistakes the expected old container for target-image drift.
 - Authenticated viewer containers now retain the validated `header-v1` mode
   through viewer startup instead of restarting on an unset shell variable.
 - Candidate publication now permits ordinary linear descendants of the exact

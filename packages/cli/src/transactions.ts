@@ -52,7 +52,7 @@ export interface TransactionPlan {
 }
 
 export interface TransactionRuntime {
-  reconcileContracts(state: LoadedState): Promise<void>;
+  reconcileContracts(state: LoadedState, transaction: StateTransaction): Promise<void>;
   validate(): Promise<void>;
   ensureImages(state: LoadedState): Promise<void>;
   startGateway(state: LoadedState, binding?: readonly RuntimeContainerBinding[], replace?: boolean): Promise<void>;
@@ -74,7 +74,20 @@ export interface TransactionOptions {
 }
 
 export const defaultTransactionRuntime: TransactionRuntime = {
-  reconcileContracts: reconcileRuntimeImageContracts,
+  reconcileContracts: (state, transaction) => {
+    const replacementIds = new Set([
+      ...transaction.runtime.replaceIds,
+      ...transaction.runtime.replaceStoppedIds,
+    ]);
+    return reconcileRuntimeImageContracts(state, undefined, {
+      ...(transaction.runtime.replaceGatewayRunning || transaction.runtime.replaceGatewayStopped
+        ? { gatewaySource: transaction.runtime.gatewayRuntimeBinding }
+        : {}),
+      computerSources: Object.fromEntries(
+        [...replacementIds].map((id) => [id, transaction.runtime.computerRuntimeBindings[id] ?? []]),
+      ),
+    });
+  },
   validate: async () => { await validateDocker(); },
   ensureImages: (state) => ensureSystemImages(state, true),
   startGateway: async (state, binding, replace) => {
@@ -176,7 +189,7 @@ export async function recoverPendingTransaction(paths: StatePaths, options: Tran
   // Rendering is the first point at which a missing cache used to become an
   // implicit legacy viewer. Reconcile from immutable image/container evidence
   // before any durable state or runtime document is changed during recovery.
-  await runtime.reconcileContracts(state);
+  await runtime.reconcileContracts(state, transaction);
 
   if (transaction.phase === 'prepared') {
     if (!(await realDirectoryExists(paths.computers)) || !(await realDirectoryExists(paths.trash))) {

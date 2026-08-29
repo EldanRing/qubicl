@@ -143,6 +143,11 @@ export interface RuntimeImageContractEvidenceAdapter {
   inspectImage(contentId: `sha256:${string}`): Promise<RuntimeImageContractImageInspection | undefined>;
 }
 
+export interface RuntimeImageContractReplacementPlan {
+  gatewaySource?: readonly RuntimeContainerBinding[];
+  computerSources?: Readonly<Record<string, readonly RuntimeContainerBinding[]>>;
+}
+
 export interface InspectedGatewayImage {
   identity: ImageIdentity;
   compatibility: RuntimeImageCompatibility;
@@ -1253,6 +1258,7 @@ async function recoverComputerImageContract(
   state: LoadedState,
   computer: ComputerConfig,
   adapter: RuntimeImageContractEvidenceAdapter,
+  replacementSource?: readonly RuntimeContainerBinding[],
 ): Promise<RuntimeImageContract> {
   const contentId = computer.image.contentId as `sha256:${string}`;
   const name = computerContainerName(state, computer);
@@ -1260,7 +1266,8 @@ async function recoverComputerImageContract(
   if (retained) {
     verifyManagedComputer(state, computer.id, retained, name);
     if (retained.Image !== contentId) {
-      throw new Error(`Retained computer ${computer.name} was created from ${retained.Image ?? 'an unknown image'}, not its configured content ID ${contentId}. Refusing to reconstruct its viewer contract.`);
+      assertPlannedContractSource(name, 'computer', retained, replacementSource, `computer ${computer.name}`);
+      return recoverComputerImageContractFromImage(computer, contentId, adapter);
     }
     return computerContractFromEvidence(
       computer,
@@ -1270,6 +1277,14 @@ async function recoverComputerImageContract(
     );
   }
 
+  return recoverComputerImageContractFromImage(computer, contentId, adapter);
+}
+
+async function recoverComputerImageContractFromImage(
+  computer: ComputerConfig,
+  contentId: `sha256:${string}`,
+  adapter: RuntimeImageContractEvidenceAdapter,
+): Promise<RuntimeImageContract> {
   const image = await adapter.inspectImage(contentId);
   if (!image) {
     throw new Error(`Viewer image ${computer.image.resolved} for ${computer.name} has no verified runtime image contract, retained container, or locally inspectable exact image ${contentId}. Restore or reacquire the exact image before changing or starting this runtime.`);
@@ -1294,6 +1309,7 @@ function gatewayContractFromEvidence(
 async function recoverGatewayImageContract(
   state: LoadedState,
   adapter: RuntimeImageContractEvidenceAdapter,
+  replacementSource?: readonly RuntimeContainerBinding[],
 ): Promise<RuntimeImageContract> {
   const configuredContentId = state.config.gateway.image.contentId;
   if (!configuredContentId) {
@@ -1305,11 +1321,20 @@ async function recoverGatewayImageContract(
   if (retained) {
     verifyManagedGateway(state, retained, name);
     if (retained.Image !== contentId) {
-      throw new Error(`Retained gateway was created from ${retained.Image ?? 'an unknown image'}, not its configured content ID ${contentId}. Refusing to reconstruct its viewer contract.`);
+      assertPlannedContractSource(name, 'gateway', retained, replacementSource, 'gateway');
+      return recoverGatewayImageContractFromImage(state, contentId, adapter);
     }
     return gatewayContractFromEvidence(contentId, state.config.gateway.image.resolved, retained.Config?.Labels ?? {});
   }
 
+  return recoverGatewayImageContractFromImage(state, contentId, adapter);
+}
+
+async function recoverGatewayImageContractFromImage(
+  state: LoadedState,
+  contentId: `sha256:${string}`,
+  adapter: RuntimeImageContractEvidenceAdapter,
+): Promise<RuntimeImageContract> {
   const image = await adapter.inspectImage(contentId);
   if (!image) {
     throw new Error(`Gateway image ${state.config.gateway.image.resolved} has no verified runtime image contract, retained container, or locally inspectable exact image ${contentId}. Restore or reacquire the exact gateway before changing any authenticated viewer runtime.`);
@@ -1318,6 +1343,29 @@ async function recoverGatewayImageContract(
     throw new Error(`Exact gateway image evidence drifted from configured content ID ${contentId} to ${image.id}. Refusing to reconstruct its viewer contract.`);
   }
   return gatewayContractFromEvidence(contentId, state.config.gateway.image.resolved, image.labels);
+}
+
+function assertPlannedContractSource(
+  name: string,
+  role: RuntimeContainerBinding['role'],
+  retained: RuntimeInspection,
+  replacementSource: readonly RuntimeContainerBinding[] | undefined,
+  subject: string,
+): void {
+  if (!replacementSource
+    || new Set(replacementSource.map((binding) => binding.id)).size !== replacementSource.length
+    || new Set(replacementSource.map((binding) => binding.name)).size !== replacementSource.length
+    || (role === 'gateway' && replacementSource.length !== 1)) {
+    throw new Error(`Retained ${subject} was created from ${retained.Image ?? 'an unknown image'}, not its configured content ID, and has no unique immutable planned replacement source. Refusing to reconstruct its viewer contract.`);
+  }
+  const matching = replacementSource.filter((binding) => binding.name === name && binding.role === role);
+  if (matching.length !== 1) {
+    throw new Error(`Retained ${subject} was created from ${retained.Image ?? 'an unknown image'}, not its configured content ID. Refusing to reconstruct its viewer contract without one immutable planned replacement source.`);
+  }
+  const observed = runtimeBinding(retained, name);
+  if (!sameRuntimeBinding(observed, matching[0]!)) {
+    throw new Error(`Retained ${subject} changed immutable identity or status before viewer-contract reconciliation.`);
+  }
 }
 
 export async function assertConfiguredGatewaySupportsExposure(
@@ -1394,6 +1442,7 @@ async function resolveConfiguredViewerContracts(
   overrides: ReadonlyMap<string, RuntimeImageContract>,
   gatewayOverride: RuntimeImageContract | undefined,
   adapter: RuntimeImageContractEvidenceAdapter,
+  replacements?: RuntimeImageContractReplacementPlan,
 ): Promise<ConfiguredViewerContracts> {
   const byComputerId = new Map<string, RuntimeImageContract>();
   const recovered: RuntimeImageContract[] = [];
@@ -1410,7 +1459,12 @@ async function resolveConfiguredViewerContracts(
       byComputerId.set(computer.id, cached);
       continue;
     }
-    const contract = await recoverComputerImageContract(state, computer, adapter);
+    const contract = await recoverComputerImageContract(
+      state,
+      computer,
+      adapter,
+      replacements?.computerSources?.[computer.id],
+    );
     byComputerId.set(computer.id, contract);
     recovered.push(contract);
   }
@@ -1421,7 +1475,9 @@ async function resolveConfiguredViewerContracts(
     const configuredGatewayId = state.config.gateway.image.contentId;
     const cachedGateway = configuredGatewayId ? cache.images[configuredGatewayId] : undefined;
     const gatewayContract = gatewayOverride
-      ?? (cachedGateway?.kind === 'gateway' ? cachedGateway : await recoverGatewayImageContract(state, adapter));
+      ?? (cachedGateway?.kind === 'gateway'
+        ? cachedGateway
+        : await recoverGatewayImageContract(state, adapter, replacements?.gatewaySource));
     if (gatewayContract.viewerAuthentication !== VIEWER_AUTHENTICATION_HEADER_V1
       || gatewayContract.gatewayProtocolVersion !== GATEWAY_PROTOCOL_VERSION) {
       throw new Error(`Gateway image ${state.config.gateway.image.resolved} cannot route authenticated viewers required by ${authenticatedNames.join(', ')}. Upgrade the gateway before changing any computer runtime.`);
@@ -1450,9 +1506,10 @@ function defaultRuntimeImageContractEvidenceAdapter(): RuntimeImageContractEvide
 export async function reconcileRuntimeImageContracts(
   state: LoadedState,
   adapter: RuntimeImageContractEvidenceAdapter = defaultRuntimeImageContractEvidenceAdapter(),
+  replacements?: RuntimeImageContractReplacementPlan,
 ): Promise<void> {
   const cache = await readRuntimeImageContracts(state);
-  const resolved = await resolveConfiguredViewerContracts(state, cache, new Map(), undefined, adapter);
+  const resolved = await resolveConfiguredViewerContracts(state, cache, new Map(), undefined, adapter, replacements);
   if (resolved.recovered.length) await recordRuntimeImageContracts(state, resolved.recovered);
 }
 
