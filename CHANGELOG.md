@@ -6,11 +6,12 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Added
 
-- Versioned client-conformance requirements and acceptance schema 4 now require
-  exact versions and post-freeze hashed evidence for Codex, Claude Code,
-  OpenCode, OpenClaw, Hermes Agent, Open WebUI, retained desktop/editor clients,
-  and the applicable MCP, OpenAPI, and Open Terminal surfaces. Schema-3 v0.1
-  evidence remains verifiable but cannot satisfy a v0.2 release.
+- Versioned client-conformance requirements and acceptance schema 4 now bind
+  exact installed versions and post-freeze hashed surface evidence. The signed
+  pre-1.0 `initial` profile requires Codex, Open WebUI, all four protocol probes,
+  and Linux x64; the `supported` profile retains the complete application and
+  platform matrix plus independent approval and review. Schema-3 v0.1 evidence
+  remains verifiable but cannot satisfy a v0.2 release.
 - A versioned platform support matrix now separates support policy from direct
   test evidence and binds schema-4 acceptance to exact Linux, macOS, and Windows
   through WSL 2 host facts without promoting best-effort platforms.
@@ -34,9 +35,10 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   listener active, and `gateway revoke` removes the external
   publication without changing computers or durable homes.
 - Versioned remote-access conformance requirements now prevent schema-4 v0.2
-  acceptance from passing without post-freeze native-Linux and Docker
-  Desktop/NAT evidence for the remote client surfaces, security boundaries,
-  lifecycle transitions, and local-loopback preservation.
+  acceptance from passing without post-freeze native-Linux evidence for the
+  remote client surfaces, security boundaries, lifecycle transitions, and
+  local-loopback preservation. The `supported` profile additionally requires
+  Apple Silicon and Windows/WSL 2 Docker Desktop/NAT evidence.
 - Every v0.2 image candidate now retains and publishes exact
   `oci-efficiency.json` evidence: per-platform compressed and expanded layer
   sharing plus bounded, normalized installed-package inventories derived from
@@ -72,6 +74,11 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Authenticated viewer containers now retain the validated `header-v1` mode
+  through viewer startup instead of restarting on an unset shell variable.
+- Candidate publication now permits ordinary linear descendants of the exact
+  reviewed public root while rejecting alternate roots, merge commits, a wrong
+  branch, a wrong origin, or a checkout detached from the signed candidate.
 - v0.2 publication can no longer inherit the v0.1 initial-tier acceptance
   exemption, and v0.2 candidate verification now requires schema-2 Trivy
   evidence bound to independently filtered platform views.
@@ -113,8 +120,14 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   Policy or lease changes and ambiguous runner responses fence work without
   replay; links, special files, pathname swaps, hidden-start failures, output
   substitution, excess archive concurrency, and disconnected transfers fail
-  closed. Native responses for HTML, HTM, JavaScript, TypeScript, and SVG files
-  are forced to download instead of rendering inline.
+  closed. The direct `/files/view` route keeps active files as downloads. Open
+  WebUI's path-based HTML and SVG previews instead receive a trusted wrapper
+  around a short-lived, directory-scoped Qubicl preview origin. Active markup
+  is parser-normalized into a static document; scripts, scripted requests,
+  embeds, forms, refresh/navigation primitives, and initially selected final
+  symlinks fail closed under an inert iframe and deny-by-default CSP. JavaScript
+  and TypeScript clicks display source, while passive same-directory styles,
+  images, fonts, and media still load normally.
 - Remote gateway exposure is absent by default and requires a reviewed bind
   address, distinct external port, matching certificate and private key,
   allowed client networks, exact HTTPS browser origins, and explicit consent

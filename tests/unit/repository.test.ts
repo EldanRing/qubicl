@@ -18,7 +18,10 @@ test('distributable bundles include project and dependency licenses', async () =
   const cliNotices = await readFile(join(root, 'packages/cli/dist/THIRD_PARTY_NOTICES.txt'), 'utf8');
   for (const dependency of ['@modelcontextprotocol/core@', 'yaml@', 'zod@']) assert.match(cliNotices, new RegExp(dependency.replace('@', '\\@')));
   assert.match(await readFile(join(root, 'packages/cli/dist/assets/gateway/THIRD_PARTY_NOTICES.txt'), 'utf8'), /zod@/);
-  assert.match(await readFile(join(root, 'packages/cli/dist/assets/computer/THIRD_PARTY_NOTICES.txt'), 'utf8'), /@modelcontextprotocol\/server@/);
+  const computerNotices = await readFile(join(root, 'packages/cli/dist/assets/computer/THIRD_PARTY_NOTICES.txt'), 'utf8');
+  for (const dependency of ['@modelcontextprotocol/server@', 'entities@', 'parse5@']) {
+    assert.match(computerNotices, new RegExp(dependency.replace('@', '\\@')));
+  }
 });
 
 test('initial package publishing is explicit and guarded', async () => {
@@ -330,6 +333,7 @@ test('viewer images isolate raw VNC behind authenticated dedicated-user Unix rel
   assert.match(entrypoint, /install -d -m 0750 -o root -g qubicl-viewer \/run\/qubicl-viewer/);
   assert.match(entrypoint, /baked_viewer_authentication="\$\{QUBICL_IMAGE_VIEWER_AUTHENTICATION:-legacy\}"/);
   assert.match(entrypoint, /runtime_viewer_authentication="\$\{QUBICL_VIEWER_AUTHENTICATION:-\}"/);
+  assert.match(entrypoint, /header-v1\)\s+[\s\S]*?viewer_authentication=header-v1/);
   assert.match(entrypoint, /viewer_key_handoff="\$\{QUBICL_VIEWER_KEY:-\}"\s+unset QUBICL_VIEWER_AUTHENTICATION QUBICL_VIEWER_KEY/);
   assert.ok(entrypoint.indexOf('unset QUBICL_VIEWER_AUTHENTICATION QUBICL_VIEWER_KEY') < entrypoint.indexOf('exec node /opt/qubicl/control.mjs'));
   assert.match(entrypoint, /--auth-source=\/run\/qubicl-viewer\/key/);

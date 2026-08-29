@@ -4,7 +4,7 @@ Qubicl releases are built and published from maintainer-controlled local
 hardware. Nothing uses GitHub Actions, and publication never rebuilds a tested
 artifact.
 
-## The practical 0.1 policy
+## The practical pre-1.0 policy
 
 `0.1.x` is an initial pre-1.0 series. Linux x64, Apple Silicon macOS with Docker
 Desktop, and Windows 11 x64 through Ubuntu 24.04 on WSL 2 with Docker Desktop
@@ -13,7 +13,10 @@ ARM64, Intel macOS, Windows on ARM, and other WSL distributions are best-effort.
 Missing external client or best-effort hardware coverage does not block 0.1.
 That exception ends with the v0.1 series: every v0.2-or-later publication,
 including one built with the `initial` candidate tier, requires the signed
-schema-4 release-set acceptance bundle.
+schema-4 release-set acceptance bundle. The signed tier selects the acceptance
+profile: `initial` records the exact Linux x64 evidence required for an honest
+pre-1.0 release, while `supported` retains the complete cross-platform,
+real-client, reboot, and independent-review matrix.
 The versioned [platform support matrix](conformance/platform-support-v1.json)
 is the source of truth for these support and evidence classifications.
 
@@ -23,6 +26,8 @@ An initial candidate must still:
 - pass source, package, native, and Docker acceptance on the release host;
 - contain exact amd64/arm64 OCI archives, catalogs, SBOMs, provenance, checksums,
   and ten retained Trivy reports;
+- bind post-freeze Codex, Open WebUI, all four protocol probes, Linux x64
+  lifecycle, and native-Linux remote-access evidence in schema 4;
 - contain no scanner-detected secrets; and
 - reject every HIGH/CRITICAL finding for which the scanner reports an available
   fix unless an exact current review record covers it.
@@ -30,7 +35,8 @@ An initial candidate must still:
 Unfixed distribution findings are retained in `trivy-summary.json` and release
 evidence. They are not silently described as fixed or safe. The stricter
 `candidate:local` policy—independent review for every remaining HIGH/CRITICAL
-finding plus the full client/platform acceptance record—remains the 1.0 gate.
+finding plus the full client/platform acceptance record—remains the supported
+and 1.0 gate.
 
 ## Public source identity
 
@@ -50,9 +56,10 @@ new public root must use the maintained identity above and pass the same source
 and secret checks before it is pushed.
 
 `PUBLIC_HISTORY_POLICY.json` makes that boundary executable. The guarded
-publisher accepts only the single fresh public root commit on `main`, verifies
-that `origin` is the candidate source, and refuses any candidate connected to
-the private development ancestry.
+publisher requires a linear `main` history descended from the exact reviewed
+public root, verifies that `HEAD` and `origin` match the candidate, rejects
+merge-connected or alternate-root ancestry, and reruns the public-source
+privacy check before any publication action.
 
 ### npm identity and tags
 
@@ -210,15 +217,17 @@ Create one computer, connect one real client, open the viewer, and verify an
 upgrade while preserving the computer's home. If that smoke fails, do not move
 or advertise additional mutable tags; document and fix the release.
 
-## 1.0 is deliberately stricter
+## Supported and 1.0 releases are deliberately stricter
 
 The full cross-platform/reboot matrix, complete real-client evidence,
 independent security review, and individually reviewed remaining
-HIGH/CRITICAL findings are goals for a supported 1.0—not artificial blockers
-for publishing the honest pre-1.0 series.
+HIGH/CRITICAL findings are requirements for the `supported` tier and eventual
+1.0—not artificial blockers for publishing an honest pre-1.0 `initial` release.
 
-Supported releases additionally aggregate the complete Linux candidate and
-the Linux ARM64/macOS native candidates into one signed release set:
+Every v0.2 release uses release-set schema 2. An `initial` set contains the one
+complete Linux x64 candidate. A `supported` set additionally aggregates the
+Linux ARM64 and both macOS native candidates. Create and sign either tier from
+its exact candidate directory:
 
 ```sh
 npm run candidate:release-set -- release/candidates/VERSION-REVISION
@@ -232,39 +241,38 @@ node scripts/acceptance-evidence.mjs sign \
 
 The publisher requires all four extra paths through `--release-set`,
 `--release-set-signature`, `--acceptance`, and `--acceptance-signature` for a
-supported release or any v0.2-or-later publication. The
-versioned acceptance schema hashes every referenced report, records concrete
-tool/platform versions and UTC timestamps, requires upgrade, crash-safe backup,
-restart, reboot, full-topology performance, multi-computer, and sustained-use
-results, and separates owner, reviewer, and approver identities. The Windows
-row additionally requires exact Windows/WSL/kernel/distribution/Docker Desktop
-versions plus Linux-filesystem, DrvFS rejection, Windows localhost, Windows
-stdio, viewer handoff, WSL shutdown, and Windows host reboot evidence.
+supported release or any v0.2-or-later publication. The versioned acceptance
+schema hashes every referenced report and records concrete tool/platform
+versions and UTC timestamps. The signed release-set tier and the acceptance
+`profile` must match exactly; a supported candidate cannot use the initial
+profile.
 
 For v0.2 and later release sets, acceptance schema 4 is mandatory; schema-3
 evidence remains readable only for v0.1. Schema 4 hash-binds the reviewed
 `client-conformance-v1.json` requirements and requires exact installed versions
-plus post-freeze evidence for every applicable client/protocol surface. It keeps
-Codex, Claude Code, OpenCode, OpenClaw, Hermes Agent, and Open WebUI application
-runs distinct from MCP stdio/HTTP, OpenAPI, and Open Terminal protocol probes,
-while retaining Claude Desktop, Cursor, and VS Code coverage. Adding this gate
-does not produce the evidence: complete real-client runs must still be performed
-against the frozen candidate before acceptance is signed.
+plus post-freeze evidence for every applicable surface in each required row.
+The initial profile requires Codex, Open WebUI, MCP stdio, MCP HTTP, OpenAPI,
+and Open Terminal. The supported profile requires all nine named applications
+and all four protocol probes. Adding this gate does not produce the evidence:
+the required real-client runs must still be performed against the frozen
+candidate before acceptance is signed.
 
-Schema 4 also hash-binds `platform-support-v1.json`. Its five acceptance rows
-must match the reviewed OS, architecture, execution mode, Linux-container
-runtime, exact platform/runtime versions, and required restart/reboot checks.
-The Windows row is constrained to the directly tested Windows 11 x64 and Ubuntu
-24.04 WSL 2 shape; other current WSL 2 distributions and Windows on ARM remain
-best-effort. macOS rows require Docker Desktop restart evidence. Native Windows
-and WSL 1 remain unsupported. The matrix records policy—it does not claim that
-new physical-host runs occurred—so every schema-4 row still needs post-freeze,
-hash-bound evidence from the frozen candidate before signing.
+Schema 4 also hash-binds `platform-support-v1.json`. The initial profile
+requires the exact Linux x64 host/runtime versions plus minimum-version and
+restart results. It requires upgrade, crash-safe backup, restart,
+full-topology performance, multi-computer, and remote-gateway workflows. The
+supported profile requires all five platform rows, every reviewed restart and
+reboot check, sustained dogfooding, and independent owner/reviewer/approver
+identities. Its Windows row remains constrained to Windows 11 x64 and Ubuntu
+24.04 WSL 2; macOS rows require Docker Desktop restart evidence. Native Windows
+and WSL 1 remain unsupported. Every row actually required by the selected
+profile needs post-freeze, hash-bound evidence from the frozen candidate.
 
 Remote gateway support adds a third immutable contract:
-`remote-access-v1.json`. Schema 4 requires one post-freeze row on native Linux
-x64, Apple Silicon Docker Desktop, and Windows 11 x64 through WSL 2/Docker
-Desktop. Each row records non-loopback source and container-observed address
+`remote-access-v1.json`. The initial profile requires the native Linux x64
+direct-network row. The supported profile additionally requires Apple Silicon
+Docker Desktop and Windows 11 x64 through WSL 2/Docker Desktop. Each row records
+non-loopback source and container-observed address
 families plus an exact same/different comparison for direct or NAT-translated
 behavior, exact client/browser versions, TLS identity,
 and passing results for remote MCP HTTP, OpenAPI, Open Terminal, viewer static

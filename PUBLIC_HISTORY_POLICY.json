@@ -1,6 +1,6 @@
 {
-  "schemaVersion": 1,
-  "policy": "fresh-root",
+  "schemaVersion": 2,
+  "policy": "trusted-root-linear",
   "branch": "main",
-  "maximumReachableCommits": 1
+  "trustedRootCommit": "960bfafcc5e114f8c518e4a931b5172b7277292c"
 }

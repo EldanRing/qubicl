@@ -98,6 +98,7 @@ export interface BoundedReadResult {
   info: Stats;
   identity: FileIdentity;
   namedIdentity: FileIdentity;
+  resolvedPath: string;
 }
 
 export interface BoundedArchiveEntryIdentity {
@@ -281,6 +282,7 @@ export class BoundedFileSystem {
           info: opened.info,
           identity: opened.identity,
           namedIdentity: opened.namedIdentity,
+          resolvedPath: join(this.root, ...opened.resolvedParts),
         };
       } finally {
         await opened.handle.close();

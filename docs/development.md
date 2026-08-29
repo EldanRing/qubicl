@@ -49,10 +49,10 @@ These are large local Docker runs. Start one and let that exact process finish; 
 The versioned
 [remote-access requirements](../conformance/remote-access-v1.json) are an
 additional schema-4 release gate, not an automatic test runner. After candidate
-bytes are frozen, retain exact, post-freeze evidence for all three required
-profiles: native Linux x64, Apple Silicon through Docker Desktop, and Windows
-11 x64 through WSL 2/Docker Desktop. Use an actual external client path, not a
-second loopback process.
+bytes are frozen, the pre-1.0 `initial` profile requires exact post-freeze
+native Linux x64 evidence. The `supported` profile additionally requires Apple
+Silicon through Docker Desktop and Windows 11 x64 through WSL 2/Docker Desktop.
+Use an actual external client path, not a second loopback process.
 
 Each profile records the source-client and container-observed address families,
 attests that both paths are non-loopback, and records whether the addresses were
@@ -117,7 +117,18 @@ scanner-reported available fixes, while retaining genuinely unfixed
 HIGH/CRITICAL findings as visible `preview-only` tracking data. It cannot pass
 the supported-release acceptance validator.
 
-For the strict supported-release policy:
+For a stable pre-1.0 candidate using the focused signed `initial` acceptance
+profile:
+
+```sh
+npm run candidate:release
+```
+
+Its schema-2 release set contains the complete Linux x64 candidate. Publication
+still requires signed schema-4 Codex, Open WebUI, protocol, Linux lifecycle, and
+native-Linux remote-access evidence from the frozen bytes.
+
+For the strict full-matrix supported-release policy:
 
 ```sh
 npm run candidate:local

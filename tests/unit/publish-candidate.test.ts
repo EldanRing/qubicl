@@ -92,7 +92,11 @@ test('v0.2 publication retains candidate-bound image-efficiency evidence', async
     indexDigest: `sha256:${name[0]!.repeat(64)}`,
   });
   const releaseEvidence = {
-    set: { path: '/release/release-set.json', directory: '/release', document: { members: [] } },
+    set: {
+      path: '/release/release-set.json',
+      directory: '/release',
+      document: { schemaVersion: 2, releaseTier: 'initial', members: [] },
+    },
     releaseSetSignature: '/evidence/release-set-signature.json',
     acceptance: '/evidence/acceptance.json',
     acceptanceSignature: '/evidence/acceptance-signature.json',
@@ -112,6 +116,10 @@ test('v0.2 publication retains candidate-bound image-efficiency evidence', async
   };
   assert.throws(() => buildPublishPlan({ ...candidate, imageEfficiency: undefined }, catalog, '/candidate', releaseEvidence),
     /requires exact OCI efficiency evidence/);
+  assert.throws(() => buildPublishPlan(candidate, catalog, '/candidate', {
+    ...releaseEvidence,
+    set: { ...releaseEvidence.set, document: { ...releaseEvidence.set.document, releaseTier: 'supported' } },
+  }), /match the candidate release tier/);
   const plan = buildPublishPlan(candidate, catalog, '/candidate', releaseEvidence);
   assert.ok(plan.releaseAssets.includes('/candidate/oci-efficiency.json'));
   assert.ok(plan.releaseAssets.includes('/release/release-set.json'));
@@ -139,15 +147,34 @@ test('existing GitHub release metadata rejects stale or surplus assets', async (
   assert.throws(() => assertReleaseMetadata({ ...release, assets: [...release.assets, { name: 'surprise.bin' }] }, expected), /extra assets/);
 });
 
-test('publisher rejects ancestry connected to the private development history', async () => {
+test('publisher accepts linear descendants of the trusted public root and rejects detached or merged ancestry', async () => {
   const { assertPublicHistoryFacts } = await import(moduleUrl);
   const revision = 'a'.repeat(40);
+  const trustedRootCommit = 'b'.repeat(40);
   const candidate = { revision, source: 'https://github.com/example/qubicl' };
-  const policy = { branch: 'main', maximumReachableCommits: 1 };
+  const policy = { branch: 'main', trustedRootCommit };
   assert.doesNotThrow(() => assertPublicHistoryFacts({
-    branch: 'main', commitCount: 1, roots: [revision], origin: 'https://github.com/example/qubicl.git',
+    branch: 'main', head: revision, commitCount: 19, roots: [trustedRootCommit], mergeCommits: [],
+    origin: 'https://github.com/example/qubicl.git',
   }, candidate, policy));
   assert.throws(() => assertPublicHistoryFacts({
-    branch: 'main', commitCount: 31, roots: ['b'.repeat(40)], origin: 'https://github.com/example/qubicl.git',
-  }, candidate, policy), /private development (?:history|repository)/);
+    branch: 'main', head: revision, commitCount: 31, roots: ['c'.repeat(40)], mergeCommits: [],
+    origin: 'https://github.com/example/qubicl.git',
+  }, candidate, policy), /trusted public root/);
+  assert.throws(() => assertPublicHistoryFacts({
+    branch: 'main', head: revision, commitCount: 20, roots: [trustedRootCommit], mergeCommits: ['c'.repeat(40)],
+    origin: 'https://github.com/example/qubicl.git',
+  }, candidate, policy), /without merge commits/);
+  assert.throws(() => assertPublicHistoryFacts({
+    branch: 'main', head: 'c'.repeat(40), commitCount: 19, roots: [trustedRootCommit], mergeCommits: [],
+    origin: 'https://github.com/example/qubicl.git',
+  }, candidate, policy), /candidate revision/);
+  assert.throws(() => assertPublicHistoryFacts({
+    branch: 'release', head: revision, commitCount: 19, roots: [trustedRootCommit], mergeCommits: [],
+    origin: 'https://github.com/example/qubicl.git',
+  }, candidate, policy), /run from main/);
+  assert.throws(() => assertPublicHistoryFacts({
+    branch: 'main', head: revision, commitCount: 19, roots: [trustedRootCommit], mergeCommits: [],
+    origin: 'https://github.com/other/qubicl.git',
+  }, candidate, policy), /origin/);
 });

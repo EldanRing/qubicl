@@ -32,6 +32,23 @@ const LEGACY_CLIENTS = ['codex', 'claude-code', 'claude-desktop', 'cursor', 'vsc
 const LEGACY_PLATFORMS = ['linux-x64', 'linux-arm64', 'macos-intel', 'macos-apple-silicon', 'windows-wsl2-x64'];
 const WORKFLOWS = ['upgrade', 'backupRestoreInterruption', 'restart', 'physicalReboot', 'fullTopologyPerformance', 'multipleComputers', 'sustainedDogfooding'];
 const REMOTE_ACCESS_WORKFLOW = 'remoteGateway';
+const ACCEPTANCE_PROFILES = {
+  initial: {
+    clients: ['codex', 'open-webui'],
+    protocols: ['mcp-stdio', 'mcp-http', 'openapi', 'open-terminal'],
+    platforms: ['linux-x64'],
+    platformChecks: { 'linux-x64': ['minimumVersionsPassed', 'restartPassed'] },
+    remoteProfiles: ['linux-x64-direct'],
+    workflows: ['upgrade', 'backupRestoreInterruption', 'restart', 'fullTopologyPerformance', 'multipleComputers', REMOTE_ACCESS_WORKFLOW],
+    independentApproval: false,
+    independentReviews: false,
+  },
+  supported: {
+    workflows: [...WORKFLOWS, REMOTE_ACCESS_WORKFLOW],
+    independentApproval: true,
+    independentReviews: true,
+  },
+};
 
 export async function validateAcceptanceEvidence(evidence, context) {
   const { releaseSet, releaseSetSha256, evidenceDirectory, signatureFingerprint, now = new Date().toISOString() } = context;
@@ -39,11 +56,19 @@ export async function validateAcceptanceEvidence(evidence, context) {
   if (requiresClientConformance(releaseSet.version)) {
     assert(evidence.schemaVersion === 4, 'Acceptance schemaVersion 4 is required for v0.2 and later releases.');
   }
+  const profile = evidence.schemaVersion === 4 ? acceptanceProfile(evidence, releaseSet) : undefined;
   assert(evidence.releaseSet?.sha256 === releaseSetSha256, 'Acceptance evidence targets another release set.');
   assert(evidence.releaseSet?.signatureFingerprint === signatureFingerprint, 'Acceptance evidence names another release-set signature key.');
   assert(evidence.releaseSet?.version === releaseSet.version && evidence.releaseSet?.revision === releaseSet.revision, 'Acceptance evidence targets another version or revision.');
+  if (profile) {
+    assert(evidence.releaseSet?.releaseTier === releaseSet.releaseTier,
+      'Acceptance evidence targets another release tier.');
+  }
   assert(identity(evidence.owner), 'Acceptance evidence requires an owner identity.');
-  assert(identity(evidence.approvedBy) && different(evidence.owner, evidence.approvedBy), 'Final approver must be identified and distinct from the owner.');
+  assert(identity(evidence.approvedBy), 'Final approver must be identified.');
+  if (!profile || profile.independentApproval) {
+    assert(different(evidence.owner, evidence.approvedBy), 'Final approver must be distinct from the owner for this acceptance profile.');
+  }
   validateTimestamp(evidence.approvedAt, releaseSet.createdAt, now, 'approval');
 
   let conformance;
@@ -56,7 +81,7 @@ export async function validateAcceptanceEvidence(evidence, context) {
     const requirements = await verifyConformanceRequirements(evidence, evidenceDirectory);
     conformance = await validateClientConformance(evidence, requirements, (result, label) => (
       validateResult(result, label, evidenceDirectory, releaseSet.createdAt, now)
-    ));
+    ), { clients: profile.clients, protocols: profile.protocols });
   }
   let platformSummary;
   if (evidence.schemaVersion === 3) {
@@ -77,28 +102,45 @@ export async function validateAcceptanceEvidence(evidence, context) {
     const requirements = await verifyPlatformSupportRequirements(evidence, evidenceDirectory);
     platformSummary = await validatePlatformConformance(evidence, requirements, (result, label) => (
       validateResult(result, label, evidenceDirectory, releaseSet.createdAt, now)
-    ));
+    ), { platforms: profile.platforms, requiredChecks: profile.platformChecks });
   }
   let remoteSummary = {};
   if (evidence.schemaVersion === 4) {
     const requirements = await verifyRemoteAccessRequirements(evidence, evidenceDirectory);
     remoteSummary = await validateRemoteAccessConformance(evidence, requirements, (result, label) => (
       validateResult(result, label, evidenceDirectory, releaseSet.createdAt, now)
-    ));
+    ), { profiles: profile.remoteProfiles });
   }
   assert(evidence.workflows && typeof evidence.workflows === 'object', 'Acceptance workflows are required.');
-  const workflows = evidence.schemaVersion === 4 ? [...WORKFLOWS, REMOTE_ACCESS_WORKFLOW] : WORKFLOWS;
+  const workflows = evidence.schemaVersion === 4 ? profile.workflows : WORKFLOWS;
   for (const id of workflows) await validateResult(evidence.workflows[id], `workflow ${id}`, evidenceDirectory, releaseSet.createdAt, now);
 
   for (const [name, review] of [['security', evidence.securityReview], ['vulnerability', evidence.vulnerabilityReview], ['privacy', evidence.privacyReview]]) {
-    await validateReview(review, `${name} review`, evidence, evidenceDirectory, releaseSet.createdAt, now);
+    await validateReview(review, `${name} review`, evidence, evidenceDirectory, releaseSet.createdAt, now, profile?.independentReviews ?? true);
   }
   const securityTopics = ['processBoundary', 'internalAuthentication', 'browserSurface', 'filesystemRaces', 'networkReconciliation', 'releaseIntegrity'];
   if (evidence.schemaVersion === 4) securityTopics.push('remoteExposure');
   for (const topic of securityTopics) {
     assert(evidence.securityReview.topics?.[topic] === true, `Security review lacks ${topic}.`);
   }
-  return { schemaVersion: evidence.schemaVersion, ...conformance, ...platformSummary, ...remoteSummary, workflows: workflows.length };
+  return {
+    schemaVersion: evidence.schemaVersion,
+    ...(profile ? { profile: evidence.profile } : {}),
+    ...conformance,
+    ...platformSummary,
+    ...remoteSummary,
+    workflows: workflows.length,
+  };
+}
+
+function acceptanceProfile(evidence, releaseSet) {
+  assert(releaseSet.schemaVersion === 2,
+    'v0.2 and later acceptance requires release-set schemaVersion 2 with an explicit release tier.');
+  assert(['initial', 'supported'].includes(releaseSet.releaseTier),
+    'Acceptance release set has an unsupported release tier.');
+  assert(evidence.profile === releaseSet.releaseTier,
+    'Acceptance profile must exactly match the signed release-set tier.');
+  return ACCEPTANCE_PROFILES[evidence.profile];
 }
 
 export function acceptanceEvidenceFiles(evidence, directory) {
@@ -164,10 +206,13 @@ async function validateResult(result, label, directory, notBefore, now) {
   await validateEvidenceFile(result.evidence, directory, label);
 }
 
-async function validateReview(review, label, evidence, directory, notBefore, now) {
+async function validateReview(review, label, evidence, directory, notBefore, now, independent) {
   assert(review?.passed === true, `${label} did not pass.`);
   assert(identity(review.reviewedBy), `${label} requires a reviewer identity.`);
-  assert(different(review.reviewedBy, evidence.owner) && different(review.reviewedBy, evidence.approvedBy), `${label} reviewer must differ from the owner and final approver.`);
+  if (independent) {
+    assert(different(review.reviewedBy, evidence.owner) && different(review.reviewedBy, evidence.approvedBy),
+      `${label} reviewer must differ from the owner and final approver for this acceptance profile.`);
+  }
   validateTimestamp(review.reviewedAt, notBefore, now, label);
   await validateEvidenceFile(review.evidence, directory, label);
 }

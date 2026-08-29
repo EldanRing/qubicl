@@ -30,8 +30,9 @@ test('Open Terminal compatibility provides native files through a transparent fe
   const previews = new PreviewManager(
     { listPorts: async () => [{ port: previewPort, address: 'loopback', protocol: 'tcp', pid: process.pid, process: 'test-server' }] },
     '127.0.0.1',
-    '/computers/test/previews',
+    'http://preview-test.localhost/computers/test/previews',
     'http://gateway/computers/test/previews',
+    'https://preview-test.example.test/computers/test/previews',
   );
   const browserPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+XZRjCAAAAABJRU5ErkJggg==', 'base64');
   const browser = {
@@ -55,7 +56,9 @@ test('Open Terminal compatibility provides native files through a transparent fe
   const enabled = enabledToolNames(PRESET_DEFINITIONS.workstation.capabilities);
   const compatibility = new OpenTerminalCompatibility(executor, enabled, { home });
   const server = createServer(async (request, response) => {
-    const handled = await compatibility.handle(request, response, new URL(request.url ?? '/', 'http://test.local'));
+    const requestUrl = new URL(request.url ?? '/', 'http://test.local');
+    if (executor.previews.handle(request, response, requestUrl)) return;
+    const handled = await compatibility.handle(request, response, requestUrl);
     if (!handled) {
       response.writeHead(404);
       response.end();
@@ -236,19 +239,96 @@ test('Open Terminal compatibility provides native files through a transparent fe
   const served = await fetch(`${base}/files/serve/${join(home, 'documents', 'note.txt').slice(1)}`);
   assert.equal(served.status, 200);
   assert.match(served.headers.get('content-type') ?? '', /^text\/plain/);
+  assert.match(served.headers.get('content-disposition') ?? '', /^inline;/);
   assert.equal(await served.text(), 'native file browser works\n');
 
-  for (const [name, content, contentType] of [
-    ['active.html', '<script>window.top.location="https://example.invalid"</script>', /^text\/html/],
-    ['active.js', 'window.top.location="https://example.invalid"', /^(?:text|application)\/javascript/],
-    ['active.svg', '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', /^image\/svg\+xml/],
+  await writeFile(join(home, 'documents', 'preview.css'), 'body { color: rgb(1, 2, 3); }\n');
+  await writeFile(join(home, 'documents', 'preview.js'), 'document.body.dataset.relativeScript = "loaded";\n');
+  let isolatedHtmlUrl = '';
+  let isolatedSvgUrl = '';
+  for (const [name, content, contentType, mode] of [
+    ['active.html', '<meta http-equiv="refresh" content="0;url=https://example.invalid"><link rel="stylesheet" href="preview.css"><a href="https://example.invalid">link</a><form action="https://example.invalid"><button>submit</button></form><script src="preview.js"></script><script>fetch("research-notes.md").then((response) => response.text()).then((value) => location = `https://example.invalid/${value}`)</script>', /^text\/html/, 'isolated'],
+    ['active.js', 'window.top.location="https://example.invalid"', /^(?:text|application)\/javascript/, 'source'],
+    ['active.svg', '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script><a href="https://example.invalid"><text>label</text></a><animate attributeName="href" to="https://example.invalid"><circle cx="2" cy="2" r="1" /></svg>', /^image\/svg\+xml/, 'isolated'],
   ] as const) {
     const activePath = join(home, 'documents', name);
     await writeFile(activePath, content);
     const activeResponse = await fetch(`${base}/files/view?path=${encodeURIComponent(activePath)}`);
     assert.match(activeResponse.headers.get('content-disposition') ?? '', /^attachment;/, name);
     assert.match(activeResponse.headers.get('content-type') ?? '', contentType, name);
+    const inlineResponse = await fetch(`${base}/files/serve/${activePath.slice(1)}`);
+    assert.equal(inlineResponse.status, 200, name);
+    assert.match(inlineResponse.headers.get('content-disposition') ?? '', /^inline;/, name);
+    const inlineBody = await inlineResponse.text();
+    if (mode === 'source') {
+      assert.match(inlineResponse.headers.get('content-type') ?? '', /^text\/plain/, name);
+      assert.equal(inlineBody, content, name);
+    } else {
+      assert.match(inlineResponse.headers.get('content-type') ?? '', /^text\/html/, name);
+      assert.match(inlineResponse.headers.get('content-security-policy') ?? '', /frame-src http:\/\/preview-test\.localhost/, name);
+      assert.match(inlineBody, /sandbox=""/, name);
+      assert.doesNotMatch(inlineBody, /allow-scripts|allow-same-origin|allow-downloads/u, name);
+      assert.doesNotMatch(inlineBody, /window\.top\.location|<svg xmlns=/u, name);
+      const source = inlineBody.match(/<iframe[^>]+src="([^"]+)"/u)?.[1]?.replaceAll('&amp;', '&');
+      assert.ok(source, `${name} wrapper must contain an isolated preview URL`);
+      if (name === 'active.html') isolatedHtmlUrl = source;
+      if (name === 'active.svg') isolatedSvgUrl = source;
+    }
   }
+  const isolated = new URL(isolatedHtmlUrl);
+  const isolatedPath = isolated.pathname.replace('/computers/test/previews/', '/_qubicl/previews/');
+  const isolatedResponse = await fetch(`http://127.0.0.1:${port}${isolatedPath}${isolated.search}`);
+  assert.equal(isolatedResponse.status, 200);
+  assert.match(isolatedResponse.headers.get('content-type') ?? '', /^text\/html/);
+  assert.match(isolatedResponse.headers.get('content-security-policy') ?? '', /(?:^|; )sandbox(?:;|$)/);
+  assert.match(isolatedResponse.headers.get('content-security-policy') ?? '', /connect-src 'none'/);
+  assert.match(isolatedResponse.headers.get('content-security-policy') ?? '', /script-src 'none'/);
+  assert.doesNotMatch(isolatedResponse.headers.get('content-security-policy') ?? '', /allow-scripts|allow-same-origin|allow-downloads/u);
+  const isolatedBody = await isolatedResponse.text();
+  assert.match(isolatedBody, /<link rel="stylesheet" href="preview\.css">/u);
+  assert.match(isolatedBody, />link<\/a>/u);
+  assert.match(isolatedBody, />submit<\/button><\/form>/u);
+  assert.doesNotMatch(isolatedBody, /<script|<meta|href="https:\/\/example\.invalid|action=/iu);
+  const previewCookie = isolatedResponse.headers.get('set-cookie')?.split(';', 1)[0];
+  assert.ok(previewCookie);
+  const relativeStylesheet = await fetch(new URL('preview.css', `http://127.0.0.1:${port}${isolatedPath}`).href, {
+    headers: { cookie: previewCookie },
+  });
+  assert.equal(relativeStylesheet.status, 200);
+  assert.match(relativeStylesheet.headers.get('content-type') ?? '', /^text\/css/);
+  assert.match(await relativeStylesheet.text(), /rgb\(1, 2, 3\)/u);
+  const isolatedSvg = new URL(isolatedSvgUrl);
+  const isolatedSvgPath = isolatedSvg.pathname.replace('/computers/test/previews/', '/_qubicl/previews/');
+  const svgResponse = await fetch(`http://127.0.0.1:${port}${isolatedSvgPath}${isolatedSvg.search}`);
+  assert.equal(svgResponse.status, 200);
+  assert.match(svgResponse.headers.get('content-type') ?? '', /^image\/svg\+xml/);
+  const staticSvg = await svgResponse.text();
+  assert.match(staticSvg, /<text>label<\/text>/u);
+  assert.doesNotMatch(staticSvg, /<script|<animate|href="https:\/\/example\.invalid/iu);
+  await writeFile(join(home, 'outside-preview.html'), '<p>outside selected directory</p>');
+  await symlink('../outside-preview.html', join(home, 'documents', 'outside-preview.html'));
+  const escapedScope = await fetch(new URL('outside-preview.html', `http://127.0.0.1:${port}${isolatedPath}`).href, {
+    headers: { cookie: previewCookie },
+  });
+  assert.equal(escapedScope.status, 403);
+  assert.match(await escapedScope.text(), /file_preview_scope/);
+  await rm(join(home, 'documents', 'outside-preview.html'));
+  await mkdir(join(home, 'private-preview'));
+  await writeFile(join(home, 'private-preview', 'target.html'), '<p>private target</p>');
+  await symlink('../private-preview/target.html', join(home, 'documents', 'linked-preview.html'));
+  const linkedPreview = await fetch(`${base}/files/serve/${join(home, 'documents', 'linked-preview.html').slice(1)}`);
+  assert.equal(linkedPreview.status, 400);
+  assert.match(await linkedPreview.text(), /file_preview_symlink/);
+  const linkedDownload = await fetch(`${base}/files/view?path=${encodeURIComponent(join(home, 'documents', 'linked-preview.html'))}`);
+  assert.equal(linkedDownload.status, 200);
+  assert.match(linkedDownload.headers.get('content-disposition') ?? '', /^attachment;/);
+  assert.equal(await linkedDownload.text(), '<p>private target</p>');
+  await rm(join(home, 'documents', 'linked-preview.html'));
+  const remoteWrapper = await fetch(`${base}/files/serve/${join(home, 'documents', 'active.html').slice(1)}`, {
+    headers: { 'x-qubicl-access-surface': 'external' },
+  });
+  assert.equal(remoteWrapper.status, 200);
+  assert.match(await remoteWrapper.text(), /https:\/\/preview-test\.example\.test\/computers\/test\/previews\//);
   const nativeImage = await fetch(`${base}/files/view?path=${encodeURIComponent(imagePath)}`);
   assert.match(nativeImage.headers.get('content-disposition') ?? '', /^inline;/);
   assert.equal(nativeImage.headers.get('content-type'), 'image/png');

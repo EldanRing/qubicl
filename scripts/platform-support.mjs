@@ -130,10 +130,10 @@ export function assertPlatformSupportRequirements(document) {
   return document;
 }
 
-export async function validatePlatformConformance(evidence, requirements, validateResult) {
+export async function validatePlatformConformance(evidence, requirements, validateResult, selection = {}) {
   assert(evidence?.platformConformance?.schemaVersion === 1,
     'Acceptance schema 4 requires platform conformance schemaVersion 1.');
-  const profiles = requirements.acceptancePlatforms;
+  const profiles = selectedPlatformProfiles(requirements.acceptancePlatforms, selection.platforms);
   const rows = evidence.platforms;
   assert(Array.isArray(rows) && rows.length === profiles.length,
     `Platform conformance requires exactly ${profiles.length} platform rows.`);
@@ -155,11 +155,25 @@ export async function validatePlatformConformance(evidence, requirements, valida
     for (const [field, prefix] of Object.entries(requirement.requiredPrefixes)) {
       assert(row[field].startsWith(prefix), `platform ${requirement.id} ${field} must identify ${prefix}.`);
     }
-    for (const field of requirement.requiredChecks) {
+    const requiredChecks = selection.requiredChecks?.[requirement.id] ?? requirement.requiredChecks;
+    for (const field of requiredChecks) {
+      assert(requirement.requiredChecks.includes(field),
+        `Acceptance profile names unsupported platform check ${field} for ${requirement.id}.`);
       assert(row[field] === true, `platform ${requirement.id} requires ${field}.`);
     }
   }
   return { platforms: profiles.length };
+}
+
+function selectedPlatformProfiles(profiles, selectedIds) {
+  if (selectedIds === undefined) return profiles;
+  assert(Array.isArray(selectedIds) && new Set(selectedIds).size === selectedIds.length,
+    'Acceptance profile has duplicate platform requirements.');
+  return selectedIds.map((id) => {
+    const matches = profiles.filter((profile) => profile.id === id);
+    assert(matches.length === 1, `Acceptance profile names unsupported platform ${id}.`);
+    return matches[0];
+  });
 }
 
 export function exactRecordedVersion(value) {

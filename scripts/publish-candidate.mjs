@@ -21,6 +21,11 @@ export function buildPublishPlan(candidate, catalog, candidateDirectory, release
   assert(candidate.modes?.binaryOnly === false, 'Publishing requires the npm artifact from a complete candidate.');
   const acceptanceRequired = candidate.releaseTier === 'supported' || requiresClientConformance(candidate.version);
   assert(!acceptanceRequired || releaseEvidence, 'Supported releases and v0.2 or later publication require a signed release set and signed acceptance evidence.');
+  if (releaseEvidence?.set?.document?.releaseTier !== undefined || requiresClientConformance(candidate.version)) {
+    assert(releaseEvidence?.set?.document?.schemaVersion === 2
+      && releaseEvidence.set.document.releaseTier === candidate.releaseTier,
+    'Signed release evidence must match the candidate release tier.');
+  }
   if (requiresClientConformance(candidate.version)) {
     assert(candidate.imageEfficiency?.name === OCI_EFFICIENCY_REPORT_NAME
       && /^[a-f0-9]{64}$/u.test(candidate.imageEfficiency.sha256 ?? ''),
@@ -97,6 +102,10 @@ digests, creates vVERSION and an immutable GitHub release, then moves latest.`);
     for (const [option, value] of [['--release-set', options.releaseSet], ['--release-set-signature', options.releaseSetSignature], ['--acceptance', options.acceptance], ['--acceptance-signature', options.acceptanceSignature]]) assert(value, `${option} is required for supported releases and v0.2 or later publication.`);
     const verified = await verifyAcceptanceBundle(options.releaseSet, options.acceptance, options.publicKey, options.releaseSetSignature, options.acceptanceSignature);
     assert(verified.set.document.version === candidate.version && verified.set.document.revision === candidate.revision, 'Release evidence targets another candidate.');
+    if (requiresClientConformance(candidate.version)) {
+      assert(verified.set.document.schemaVersion === 2 && verified.set.document.releaseTier === candidate.releaseTier,
+        'Release evidence targets another candidate tier.');
+    }
     const complete = verified.set.document.members.find(({ complete }) => complete);
     assert(complete?.target === candidate.host.target, 'The published candidate is not the release set complete candidate.');
     assert(complete.candidateJsonSha256 === await sha256(candidateDirectory, 'candidate.json'), 'The release set does not bind the published candidate.json.');
@@ -199,20 +208,26 @@ async function assertCheckout(candidate) {
 
 async function assertPublicHistory(candidate) {
   const policy = JSON.parse(await readFile(resolve(root, 'PUBLIC_HISTORY_POLICY.json'), 'utf8'));
-  assert(policy.schemaVersion === 1 && policy.policy === 'fresh-root' && policy.branch === 'main'
-    && policy.maximumReachableCommits === 1, 'Unsupported or weakened public-history policy.');
+  assert(policy.schemaVersion === 2 && policy.policy === 'trusted-root-linear' && policy.branch === 'main'
+    && /^[a-f0-9]{40}$/u.test(policy.trustedRootCommit), 'Unsupported or weakened public-history policy.');
   const branch = await capture('git', ['branch', '--show-current']);
+  const head = await capture('git', ['rev-parse', 'HEAD']);
   const commitCount = Number(await capture('git', ['rev-list', '--count', 'HEAD']));
   const roots = (await capture('git', ['rev-list', '--max-parents=0', 'HEAD'])).split('\n').filter(Boolean);
+  const mergeCommits = (await capture('git', ['rev-list', '--merges', 'HEAD'])).split('\n').filter(Boolean);
   const origin = await capture('git', ['remote', 'get-url', 'origin']);
-  assertPublicHistoryFacts({ branch, commitCount, roots, origin }, candidate, policy);
+  assertPublicHistoryFacts({ branch, head, commitCount, roots, mergeCommits, origin }, candidate, policy);
   await run(process.execPath, ['scripts/public-source.mjs', 'check']);
 }
 
 export function assertPublicHistoryFacts(facts, candidate, policy) {
   assert(facts.branch === policy.branch, `Publication must run from ${policy.branch}.`);
-  assert(facts.commitCount === policy.maximumReachableCommits, 'Publication refuses history connected to the private development repository.');
-  assert(facts.roots.length === 1 && facts.roots[0] === candidate.revision, 'The candidate must be the fresh public root commit.');
+  assert(facts.head === candidate.revision, 'The public-history checkout does not match the candidate revision.');
+  assert(Number.isSafeInteger(facts.commitCount) && facts.commitCount >= 1, 'The public history has an invalid reachable commit count.');
+  assert(facts.roots.length === 1 && facts.roots[0] === policy.trustedRootCommit,
+    'Publication refuses history not descended solely from the trusted public root.');
+  assert(Array.isArray(facts.mergeCommits) && facts.mergeCommits.length === 0,
+    'Publication requires linear public history without merge commits.');
   assert(normalizeGitHubUrl(facts.origin) === normalizeGitHubUrl(candidate.source), 'The public origin does not match the candidate source repository.');
 }
 

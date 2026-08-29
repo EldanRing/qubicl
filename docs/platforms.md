@@ -37,9 +37,10 @@ by default. Optional direct TLS exposure has focused source/loopback tests, but
 peer-IP behavior behind Docker Desktop/NAT must be validated on the actual host
 before relying on a CIDR allowlist. The separate versioned
 [remote-access requirements](../conformance/remote-access-v1.json) require
-post-freeze native-Linux, Apple Silicon Docker Desktop, and Windows WSL 2/Docker
-Desktop evidence before a v0.2 remote-support claim; those rows do not promote
-any best-effort platform by themselves.
+post-freeze native-Linux evidence for a pre-1.0 initial release. A supported
+remote-access claim additionally requires Apple Silicon Docker Desktop and
+Windows WSL 2/Docker Desktop evidence; those rows do not promote any
+best-effort platform by themselves.
 
 ## macOS with Docker Desktop
 

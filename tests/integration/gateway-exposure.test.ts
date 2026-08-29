@@ -142,6 +142,7 @@ test('external gateway is TLS-only, origin-bound, token-isolated, bounded, and s
       connection: 'keep-alive, x-smuggled',
       'x-smuggled': 'must-not-reach-backend',
       'x-qubicl-internal-key': 'spoofed',
+      'x-qubicl-access-surface': 'local',
     },
   });
   assert.equal(proxied.status, 200);
@@ -155,6 +156,7 @@ test('external gateway is TLS-only, origin-bound, token-isolated, bounded, and s
   assert.equal(headers['x-smuggled'], undefined);
   assert.equal(headers.authorization, undefined);
   assert.notEqual(headers['x-qubicl-internal-key'], 'spoofed');
+  assert.equal(headers['x-qubicl-access-surface'], 'external');
 
   assert.equal((await externalRequest(tls, externalPort, `${base}/operator/human-control/release`, {
     method: 'POST',

@@ -11,17 +11,24 @@ export const RELEASE_TARGETS = ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwi
 
 export async function createReleaseSet(directory, { root = repositoryRoot } = {}) {
   const setDirectory = resolve(directory);
+  const completeCandidate = await verifyCandidateDirectory(join(setDirectory, 'linux-x64'), { root });
+  assert(['initial', 'supported'].includes(completeCandidate.candidate.releaseTier),
+    'Release sets can be created only for initial or supported candidates.');
+  const targets = completeCandidate.candidate.releaseTier === 'initial' ? ['linux-x64'] : RELEASE_TARGETS;
   const members = [];
   let common;
-  for (const target of RELEASE_TARGETS) {
+  for (const target of targets) {
     const candidateDirectory = join(setDirectory, target);
-    const { candidate } = await verifyCandidateDirectory(candidateDirectory, { root });
+    const { candidate } = target === 'linux-x64'
+      ? completeCandidate
+      : await verifyCandidateDirectory(candidateDirectory, { root });
     assert(candidate.host.target === target, `${target} candidate declares host target ${candidate.host.target}.`);
     const identity = {
       version: candidate.version,
       revision: candidate.revision,
       source: candidate.source,
       imageCatalogSha256: candidate.imageCatalog.sha256,
+      releaseTier: candidate.releaseTier,
     };
     common ??= identity;
     assert(JSON.stringify(identity) === JSON.stringify(common), `${target} candidate does not share the release identity and catalog.`);
@@ -40,7 +47,7 @@ export async function createReleaseSet(directory, { root = repositoryRoot } = {}
   }
   assert(members.filter(({ complete }) => complete).length === 1, 'A release set requires exactly one complete scanned exact-artifact candidate.');
   const document = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     createdAt: new Date().toISOString(),
     ...common,
     completeTarget: members.find(({ complete }) => complete).target,
@@ -63,6 +70,10 @@ export async function verifyReleaseSet(path, { root = repositoryRoot } = {}) {
     assert(candidate.version === document.version && candidate.revision === document.revision
       && candidate.source === document.source && candidate.imageCatalog.sha256 === document.imageCatalogSha256,
     `${member.target} candidate does not match the release-set identity.`);
+    if (document.schemaVersion === 2) {
+      assert(candidate.releaseTier === document.releaseTier,
+        `${member.target} candidate does not match the release-set tier.`);
+    }
     assert(await sha256(join(candidateDirectory, 'candidate.json')) === member.candidateJsonSha256, `${member.target} candidate.json hash does not match.`);
     assert(await sha256(join(candidateDirectory, 'SHA256SUMS')) === member.checksumsSha256, `${member.target} SHA256SUMS hash does not match.`);
     for (const field of ['nativeArchive', 'nativeSbom']) {
@@ -77,13 +88,22 @@ export async function verifyReleaseSet(path, { root = repositoryRoot } = {}) {
 }
 
 export function assertReleaseSetShape(document) {
-  assert(document?.schemaVersion === 1, 'release-set.json schemaVersion must be 1.');
+  assert([1, 2].includes(document?.schemaVersion), 'release-set.json schemaVersion must be 1 or 2.');
   assert(iso(document.createdAt), 'release-set.json requires an ISO createdAt timestamp.');
   for (const field of ['version', 'revision', 'source']) assert(nonempty(document[field]), `release-set.json requires ${field}.`);
   assert(hash(document.imageCatalogSha256), 'release-set.json requires an image-catalog SHA-256.');
-  assert(RELEASE_TARGETS.includes(document.completeTarget), 'release-set.json has an invalid complete target.');
-  assert(Array.isArray(document.members) && document.members.length === RELEASE_TARGETS.length, 'release-set.json requires exactly four native members.');
-  assert(JSON.stringify(document.members.map(({ target }) => target).sort()) === JSON.stringify([...RELEASE_TARGETS].sort()), 'release-set.json has missing or duplicate targets.');
+  if (document.schemaVersion === 2) {
+    assert(['initial', 'supported'].includes(document.releaseTier),
+      'release-set.json schemaVersion 2 requires an initial or supported release tier.');
+  }
+  const targets = document.schemaVersion === 2 && document.releaseTier === 'initial'
+    ? ['linux-x64']
+    : RELEASE_TARGETS;
+  assert(targets.includes(document.completeTarget), 'release-set.json has an invalid complete target.');
+  assert(Array.isArray(document.members) && document.members.length === targets.length,
+    `release-set.json requires exactly ${targets.length} native member${targets.length === 1 ? '' : 's'} for its release tier.`);
+  assert(JSON.stringify(document.members.map(({ target }) => target).sort()) === JSON.stringify([...targets].sort()),
+    'release-set.json has missing or duplicate targets for its release tier.');
   for (const member of document.members) {
     assert(member.directory === member.target && basename(member.directory) === member.directory, `Unsafe release-set directory for ${member.target}.`);
     assert(hash(member.candidateJsonSha256) && hash(member.checksumsSha256), `${member.target} lacks candidate hashes.`);

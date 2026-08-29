@@ -85,14 +85,15 @@ export function assertRemoteAccessRequirements(document) {
   return document;
 }
 
-export async function validateRemoteAccessConformance(evidence, requirements, validateResult) {
+export async function validateRemoteAccessConformance(evidence, requirements, validateResult, selection = {}) {
   assert(evidence?.remoteAccessConformance?.schemaVersion === 1,
     'Acceptance schema 4 requires remote-access conformance schemaVersion 1.');
+  const profiles = selectedRemoteProfiles(requirements.profiles, selection.profiles);
   const rows = evidence.remoteAccess;
-  assert(Array.isArray(rows) && rows.length === requirements.profiles.length,
-    `Remote-access conformance requires exactly ${requirements.profiles.length} profile rows.`);
+  assert(Array.isArray(rows) && rows.length === profiles.length,
+    `Remote-access conformance requires exactly ${profiles.length} profile rows.`);
   let surfaces = 0;
-  for (const requirement of requirements.profiles) {
+  for (const requirement of profiles) {
     const matches = rows.filter((row) => row?.id === requirement.id);
     assert(matches.length === 1, `Expected exactly one remote-access row for ${requirement.id}.`);
     const row = matches[0];
@@ -151,7 +152,18 @@ export async function validateRemoteAccessConformance(evidence, requirements, va
       surfaces += 1;
     }
   }
-  return { remoteProfiles: requirements.profiles.length, remoteSurfaces: surfaces };
+  return { remoteProfiles: profiles.length, remoteSurfaces: surfaces };
+}
+
+function selectedRemoteProfiles(profiles, selectedIds) {
+  if (selectedIds === undefined) return profiles;
+  assert(Array.isArray(selectedIds) && new Set(selectedIds).size === selectedIds.length,
+    'Acceptance profile has duplicate remote-access requirements.');
+  return selectedIds.map((id) => {
+    const matches = profiles.filter((profile) => profile.id === id);
+    assert(matches.length === 1, `Acceptance profile names unsupported remote-access profile ${id}.`);
+    return matches[0];
+  });
 }
 
 export function remoteAccessEvidenceReferences(evidence) {

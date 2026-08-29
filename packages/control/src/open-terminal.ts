@@ -14,7 +14,7 @@ import { QubiclError } from './errors.js';
 import type { ToolExecutor } from './executor.js';
 import { mapFileSystemError, type FileErrorContext } from './file-errors.js';
 import type { LeaseProof } from './lease.js';
-import { BoundedPathError, type BoundedFileSystem } from './bounded-files.js';
+import { BoundedPathError, type BoundedFileSystem, type FileIdentity } from './bounded-files.js';
 import { OPEN_TERMINAL_ARCHIVE_LIMITS, type OpenTerminalArchive } from './open-terminal-archive.js';
 
 const PREFIX = '/open-terminal';
@@ -33,6 +33,7 @@ const MAX_CONTENT_SEARCH_FILES = 500;
 const MAX_CONTENT_SEARCH_BYTES = 25_000_000;
 const MAX_COMPATIBILITY_PATH_BYTES = 4_096;
 const MAX_ARCHIVE_PATH_BYTES = 64 * 1024;
+const FILE_PREVIEW_SECONDS = 5 * 60;
 const PROXY_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 
 interface SessionCwd {
@@ -333,23 +334,64 @@ export class OpenTerminalCompatibility {
     }
     if (request.method === 'GET' && (path === '/files/view' || path.startsWith(FILE_SERVE_PREFIX))) {
       this.requireTools('read_file');
+      const servedInline = path.startsWith(FILE_SERVE_PREFIX);
       const requested = path === '/files/view'
         ? requiredQuery(url, 'path')
         : servedFilePath(path);
-      const target = await this.resolvePath(requested, request, true, { operation: 'read', path: requested });
-      const data = await this.withLease(async () => {
+      const target = await this.resolvePath(
+        requested,
+        request,
+        true,
+        { operation: 'read', path: requested },
+        { followFinal: !servedInline },
+      );
+      const result = await this.withLease(async (proof) => {
         try {
           const read = await this.executor.files.readFile(target, MAX_UPLOAD_BYTES + 1);
           const info = read.info;
           if (!info.isFile()) throw new QubiclError('not_a_file', `${target} is not a regular file.`, 400);
           if (info.size > MAX_UPLOAD_BYTES || read.data.length > MAX_UPLOAD_BYTES) throw new QubiclError('file_too_large', `${target} exceeds the ${MAX_UPLOAD_BYTES}-byte download limit.`, 413);
-          return read.data;
+          let preview;
+          if (servedInline && requiresIsolatedPreview(target)) {
+            if (!sameFileIdentity(read.identity, read.namedIdentity)) {
+              throw new QubiclError('file_preview_symlink', 'Active previews cannot be opened through a symbolic link.', 400);
+            }
+            preview = await this.executor.previews.publishFile(target, FILE_PREVIEW_SECONDS, this.executor.files);
+          }
+          try {
+            this.executor.leases.verify(proof, true);
+          } catch (error) {
+            if (preview) this.executor.previews.unpublish(preview.id);
+            throw error;
+          }
+          return { data: read.data, preview };
         } catch (error) {
           if (error instanceof QubiclError) throw error;
           throw mapFileSystemError(error, { operation: 'read', path: target });
         }
       });
-      sendBytes(response, 200, data, mimeType(target), target);
+      if (result.preview) {
+        try {
+          const surface = requestSurface(request);
+          const previewUrl = surface === 'external' ? result.preview.remoteUrl : result.preview.url;
+          if (!previewUrl) {
+            throw new QubiclError('remote_preview_unavailable', 'Remote isolated file preview access is not configured for this computer.', 409);
+          }
+          sendIsolatedPreviewWrapper(response, target, previewUrl);
+        } catch (error) {
+          this.executor.previews.unpublish(result.preview.id);
+          throw error;
+        }
+        return;
+      }
+      sendBytes(
+        response,
+        200,
+        result.data,
+        servedInline && requiresSourcePreview(target) ? 'text/plain; charset=utf-8' : mimeType(target),
+        target,
+        servedInline ? 'inline' : undefined,
+      );
       return;
     }
     if (request.method === 'POST' && path === '/files/upload') {
@@ -617,12 +659,13 @@ export class OpenTerminalCompatibility {
     request: IncomingMessage,
     mustExist: boolean,
     context: FileErrorContext,
+    options: { followFinal?: boolean } = {},
   ): Promise<string> {
     const candidate = resolve(isAbsolute(value) ? value : resolve(this.cwdFor(request), value));
     try {
       const bounded = this.executor.files.absolutePath(candidate);
       if (mustExist) {
-        const followFinal = context.operation !== 'delete' && context.operation !== 'move';
+        const followFinal = options.followFinal ?? (context.operation !== 'delete' && context.operation !== 'move');
         return await this.executor.files.canonicalPath(bounded, followFinal);
       }
       await this.executor.files.assertDestination(bounded);
@@ -648,6 +691,10 @@ export class OpenTerminalCompatibility {
     }
   }
 
+}
+
+function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.ctimeNs === right.ctimeNs && left.size === right.size;
 }
 
 function objectInput(value: unknown): Record<string, unknown> {
@@ -900,18 +947,55 @@ function sendJson(response: ServerResponse, status: number, value: unknown): voi
   response.end(body);
 }
 
-function sendBytes(response: ServerResponse, status: number, value: Buffer, contentType: string, path: string): void {
+function sendBytes(
+  response: ServerResponse,
+  status: number,
+  value: Buffer,
+  contentType: string,
+  path: string,
+  disposition?: 'attachment' | 'inline',
+): void {
   if (response.headersSent) return;
   const filename = path.split('/').pop() ?? 'file';
   response.writeHead(status, {
     'content-type': contentType,
     'content-length': value.length,
-    'content-disposition': `${requiresAttachment(path) ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(filename)}`,
+    'content-disposition': `${disposition ?? (requiresAttachment(path) ? 'attachment' : 'inline')}; filename*=UTF-8''${encodeURIComponent(filename)}`,
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
   });
   response.end(value);
+}
+
+function sendIsolatedPreviewWrapper(response: ServerResponse, path: string, previewUrl: string): void {
+  if (response.headersSent) return;
+  const parsed = new URL(previewUrl);
+  const filename = basename(path);
+  const wrapperPolicy = [
+    "default-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "img-src data:",
+    "style-src 'unsafe-inline'",
+    `frame-src ${parsed.origin}`,
+  ].join('; ');
+  const body = Buffer.from(`<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="${escapeHtml(wrapperPolicy)}">
+<title>${escapeHtml(filename)}</title><style>html,body,iframe{box-sizing:border-box;width:100%;height:100%;margin:0;border:0;background:#fff}body{overflow:hidden}</style></head>
+<body><iframe title="${escapeHtml(filename)}" src="${escapeHtml(previewUrl)}" sandbox="" referrerpolicy="no-referrer"></iframe></body></html>`, 'utf8');
+  response.writeHead(200, {
+    'content-type': 'text/html; charset=utf-8',
+    'content-length': body.length,
+    'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(filename)}`,
+    'cache-control': 'no-store',
+    'content-security-policy': wrapperPolicy,
+    'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=(), clipboard-read=(), clipboard-write=()',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+  });
+  response.end(body);
 }
 
 async function sendArchive(response: ServerResponse, archive: OpenTerminalArchive, signal?: AbortSignal): Promise<void> {
@@ -974,6 +1058,25 @@ function archiveCancellation(request: IncomingMessage, response: ServerResponse)
 
 function requiresAttachment(path: string): boolean {
   return ['.html', '.htm', '.js', '.mjs', '.ts', '.svg'].includes(extname(path).toLowerCase());
+}
+
+function requiresIsolatedPreview(path: string): boolean {
+  return ['.html', '.htm', '.svg'].includes(extname(path).toLowerCase());
+}
+
+function requiresSourcePreview(path: string): boolean {
+  return ['.js', '.mjs', '.ts'].includes(extname(path).toLowerCase());
+}
+
+function requestSurface(request: IncomingMessage): 'local' | 'external' {
+  const value = request.headers['x-qubicl-access-surface'];
+  if (value === undefined || value === 'local') return 'local';
+  if (value === 'external') return 'external';
+  throw new QubiclError('invalid_access_surface', 'The gateway supplied an invalid access-surface marker.', 400);
+}
+
+function escapeHtml(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 }
 
 function sendToolImage(response: ServerResponse, value: unknown): void {

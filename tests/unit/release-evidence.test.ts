@@ -8,7 +8,7 @@ import test from 'node:test';
 
 const root = process.cwd();
 
-test('release sets require one exact candidate for every supported native target', async () => {
+test('release sets preserve v0.1 shape and enforce tier-specific native targets', async () => {
   const { assertReleaseSetShape } = await import(pathToFileURL(join(root, 'scripts', 'release-set.mjs')).href);
   const targets = ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64'];
   const document = {
@@ -27,7 +27,16 @@ test('release sets require one exact candidate for every supported native target
     })),
   };
   assert.doesNotThrow(() => assertReleaseSetShape(document));
-  assert.throws(() => assertReleaseSetShape({ ...document, members: document.members.slice(1) }), /exactly four/);
+  assert.doesNotThrow(() => assertReleaseSetShape({ ...document, schemaVersion: 2, releaseTier: 'supported' }));
+  assert.throws(() => assertReleaseSetShape({ ...document, schemaVersion: 2 }), /release tier/);
+  assert.doesNotThrow(() => assertReleaseSetShape({
+    ...document,
+    schemaVersion: 2,
+    releaseTier: 'initial',
+    members: [document.members[0]],
+  }));
+  assert.throws(() => assertReleaseSetShape({ ...document, schemaVersion: 2, releaseTier: 'initial' }), /exactly 1 native member/);
+  assert.throws(() => assertReleaseSetShape({ ...document, members: document.members.slice(1) }), /exactly 4 native members/);
   assert.throws(() => assertReleaseSetShape({ ...document, completeTarget: 'linux-arm64' }), /exactly one complete target/);
 });
 
@@ -197,11 +206,13 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
     });
     const evidence = {
       schemaVersion: 4,
+      profile: 'supported',
       releaseSet: {
         sha256: '1'.repeat(64),
         signatureFingerprint: 'SHA256:test',
         version: '0.2.0',
         revision: 'a'.repeat(40),
+        releaseTier: 'supported',
       },
       conformance: {
         schemaVersion: 1,
@@ -240,7 +251,13 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
       privacyReview: review('privacy-reviewer'),
     };
     const context = {
-      releaseSet: { createdAt: '2026-08-23T12:00:00.000Z', version: '0.2.0', revision: 'a'.repeat(40) },
+      releaseSet: {
+        schemaVersion: 2,
+        createdAt: '2026-08-23T12:00:00.000Z',
+        version: '0.2.0',
+        revision: 'a'.repeat(40),
+        releaseTier: 'supported',
+      },
       releaseSetSha256: '1'.repeat(64),
       evidenceDirectory: directory,
       signatureFingerprint: 'SHA256:test',
@@ -249,6 +266,7 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
     const summary = await acceptance.validateAcceptanceEvidence(evidence, context);
     assert.deepEqual(summary, {
       schemaVersion: 4,
+      profile: 'supported',
       clients: requirements.clients.length,
       protocols: requirements.protocols.length,
       surfaces: [...requirements.clients, ...requirements.protocols]
@@ -262,6 +280,45 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
       acceptance.acceptanceEvidenceFiles(evidence, directory).sort(),
       [requirementsPath, platformRequirementsPath, remoteRequirementsPath, reportPath].sort(),
     );
+
+    const initial = structuredClone(evidence);
+    initial.profile = 'initial';
+    initial.releaseSet.releaseTier = 'initial';
+    initial.approvedBy = initial.owner;
+    initial.clients = initial.clients.filter(({ id }) => ['codex', 'open-webui'].includes(id));
+    initial.platforms = initial.platforms.filter(({ id }) => id === 'linux-x64');
+    initial.platforms[0]!.physicalRebootPassed = false;
+    initial.remoteAccess = initial.remoteAccess.filter(({ id }: { id: string }) => id === 'linux-x64-direct');
+    initial.workflows = Object.fromEntries(Object.entries(initial.workflows).filter(([id]) => [
+      'upgrade',
+      'backupRestoreInterruption',
+      'restart',
+      'fullTopologyPerformance',
+      'multipleComputers',
+      'remoteGateway',
+    ].includes(id)));
+    initial.securityReview.reviewedBy = initial.owner;
+    initial.vulnerabilityReview.reviewedBy = initial.owner;
+    initial.privacyReview.reviewedBy = initial.owner;
+    const initialContext = {
+      ...context,
+      releaseSet: { ...context.releaseSet, releaseTier: 'initial' },
+    };
+    assert.deepEqual(await acceptance.validateAcceptanceEvidence(initial, initialContext), {
+      schemaVersion: 4,
+      profile: 'initial',
+      clients: 2,
+      protocols: requirements.protocols.length,
+      surfaces: [...requirements.clients.filter(({ id }: { id: string }) => ['codex', 'open-webui'].includes(id)), ...requirements.protocols]
+        .reduce((count: number, profile: { requiredSurfaces: string[] }) => count + profile.requiredSurfaces.length, 0),
+      platforms: 1,
+      remoteProfiles: 1,
+      remoteSurfaces: remoteRequirements.requiredSurfaces.length,
+      workflows: 6,
+    });
+    const mismatchedInitialTier = structuredClone(initial);
+    mismatchedInitialTier.releaseSet.releaseTier = 'supported';
+    await assert.rejects(acceptance.validateAcceptanceEvidence(mismatchedInitialTier, initialContext), /another release tier/);
 
     const missingClient = structuredClone(evidence);
     missingClient.clients = missingClient.clients.filter(({ id }) => id !== 'opencode');

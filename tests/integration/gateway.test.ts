@@ -221,7 +221,7 @@ test('gateway permits authenticated browser OpenAPI calls only from loopback HTT
 });
 
 test('gateway exposes the isolated Open Terminal compatibility namespace with bounded browser preflight', async (context) => {
-  const proxied: { method?: string; path?: string; session?: string }[] = [];
+  const proxied: { method?: string; path?: string; session?: string; surface?: string }[] = [];
   const backend = createServer((request, response) => {
     if (request.url !== '/_qubicl/gateway-epoch') {
       proxied.push({
@@ -230,6 +230,9 @@ test('gateway exposes the isolated Open Terminal compatibility namespace with bo
         ...(typeof request.headers['x-session-id'] !== 'string'
           ? {}
           : { session: request.headers['x-session-id'] }),
+        ...(typeof request.headers['x-qubicl-access-surface'] !== 'string'
+          ? {}
+          : { surface: request.headers['x-qubicl-access-surface'] }),
       });
     }
     response.writeHead(200, { 'content-type': 'application/json' });
@@ -298,11 +301,18 @@ test('gateway exposes the isolated Open Terminal compatibility namespace with bo
   assert.equal(rejected.status, 403);
 
   const config = await fetch(`${base}/api/config`, {
-    headers: { origin, authorization: 'Bearer token', 'x-session-id': 'chat-one' },
+    headers: {
+      origin,
+      authorization: 'Bearer token',
+      'x-session-id': 'chat-one',
+      'x-qubicl-access-surface': 'external',
+    },
   });
   assert.equal(config.status, 200);
   assert.equal(config.headers.get('access-control-allow-origin'), origin);
-  assert.deepEqual(proxied, [{ method: 'GET', path: '/open-terminal/api/config', session: 'chat-one' }]);
+  assert.deepEqual(proxied, [{
+    method: 'GET', path: '/open-terminal/api/config', session: 'chat-one', surface: 'local',
+  }]);
   assert.equal((await fetch(`${base}/api/config`)).status, 401);
 });
 

@@ -268,6 +268,7 @@ prepare_viewer_runtime() {
         echo "Qubicl viewer authentication does not match the baked image contract." >&2
         exit 78
       fi
+      viewer_authentication=header-v1
       viewer_key="${viewer_key_handoff:?protected viewer key is missing}"
       if [[ ! "$viewer_key" =~ ^[A-Za-z0-9_-]{43}$ ]]; then
         echo "Qubicl received malformed protected viewer authentication material." >&2

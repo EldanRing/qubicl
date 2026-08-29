@@ -560,6 +560,7 @@ export class Gateway {
     if (!view) {
       headers['x-qubicl-internal-key'] = route.internalKey;
       headers['x-qubicl-gateway-epoch'] = this.gatewayEpoch;
+      headers['x-qubicl-access-surface'] = surface.kind;
     } else if (route.viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1) {
       headers[VIEWER_KEY_HEADER] = deriveInternalServiceKey(route.internalKey, 'viewer');
     }

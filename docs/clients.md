@@ -117,8 +117,22 @@ Open WebUI should verify the server as **Terminal**. Its native file browser can
 
 Enabled `web_search`, `web_extract`, `skills_list`, `skill_view`, and `skill_manage` tools project through Open Terminal exactly like MCP and direct OpenAPI. Operator-disabled tools are absent from discovery and cached calls fail closed. DDGS search needs no API key; local extraction needs no scraping service. Browser rendering remains available only on browser-capable presets. Native file browsing supports Open WebUI's current `/files/serve/*` preview route as well as the earlier `/files/view` compatibility route; both remain confined to the computer's durable home and enforce the same download bound. It also provides bounded filename/content search, file-display metadata for chat-created artifacts, writable/size/modified directory metadata, and filesystem-backed chat uploads. Search skips hidden paths unless requested, limits pages to 100 results, scans at most 1 MiB per file, and applies aggregate file and byte budgets.
 
-Native HTML, HTM, JavaScript, TypeScript, and SVG responses are forced to
-download instead of rendering inline with the gateway's authenticated origin.
+Open WebUI's path-based `/files/serve/*` route keeps active documents seamless
+without trusting Open WebUI's iframe settings. For HTML, HTM, and SVG, Qubicl
+returns a trusted wrapper whose nested iframe uses a short-lived capability on
+the computer's isolated preview hostname. The inner response enforces its own
+sandbox, CSP, no-referrer policy, and permissions restrictions; it receives no
+computer bearer, viewer session, Open WebUI cookie, or operator route. Qubicl
+parses HTML and SVG into static markup: scripts, event handlers, embedded
+documents, form/navigation targets, refresh directives, and SVG href animation
+are removed. Directory-relative stylesheets, raster images, fonts, and media
+remain available, while browser fetches and external resources are blocked by
+the response policy. The initially selected active document must be a regular
+named file rather than a symbolic link, and later resource traversal outside
+its named parent directory fails closed. Changing Open WebUI's outer iframe to
+same-origin mode cannot remove the Qubicl-owned inner boundary. Direct
+JavaScript and TypeScript clicks display source text. `/files/view` keeps HTML,
+HTM, JavaScript, TypeScript, and SVG as explicit downloads.
 
 On `browser`, `computer`, and `workstation` presets, that tool list includes navigation, semantic page snapshots and element refs, screenshots, history/wait, persistent tab management, and screenshot-grounded browser computer actions. Prefer snapshot refs first; use viewport screenshots and coordinate actions only for visual controls without refs. The compatible API name `browser_reset` is displayed as **Reset tabs** and closes tabs without erasing cookies, site data, or the durable Chromium profile; full profile clearing is a separate host-only confirmed CLI action. The browser stays visible in Qubicl's viewer and survives human takeover, while agent tool access remains fenced until release. Semantic and coordinate browser point actions drive the persistent viewer-only green agent cursor immediately before dispatch; it clears with the agent lease or human takeover. Typed data, URLs, selectors, refs, and page content are never placed in that feed.
 
@@ -146,7 +160,7 @@ Run `qubicl doctor` for connection failures. Run `qubicl token rotate computer-n
 An adapter or reference-protocol test is not by itself evidence that a real
 client version works. For v0.2 and later release acceptance, the versioned
 [client conformance requirements](../conformance/client-conformance-v1.json)
-require separately identified application and protocol results.
+keep application and protocol results separately identified.
 
 Application evidence covers Codex, Claude Code, OpenCode, OpenClaw, Hermes
 Agent, and Open WebUI. Claude Desktop, Cursor, and VS Code remain in the matrix
@@ -155,7 +169,7 @@ are added. Standards-level evidence separately covers MCP stdio, MCP HTTP,
 OpenAPI, and Open Terminal rather than treating a protocol probe as a named
 application run.
 
-Every application or protocol row records an exact installed version, its
+Every required application or protocol row records an exact installed version, its
 transport, the required `workstation` preset, a tester identity, a UTC test
 time, and a SHA-256-bound local evidence file. It also records a passing result
 and hashed evidence for every applicable surface from this set: discovery, MCP
@@ -169,10 +183,14 @@ acceptance bundle carries an exact copy and SHA-256 of the reviewed requirements
 file, and its detached signature binds the final acceptance JSON. Qubicl does
 not download clients, inspect online version feeds, or manufacture these
 results. Maintainers must supply the real-client binaries/accounts and retain
-the actual post-freeze evidence before a v0.2 acceptance bundle can pass.
+the actual post-freeze evidence. A signed pre-1.0 `initial` v0.2 bundle requires
+Codex, Open WebUI, and all four protocol rows. A `supported` bundle requires the
+full nine-application matrix; omitted rows cannot be presented as supported
+coverage.
 
 Remote support is separately bound by the versioned
 [remote-access requirements](../conformance/remote-access-v1.json). Those rows
 exercise real remote MCP HTTP, OpenAPI, Open Terminal, viewer, and isolated
-preview traffic on the required native-Linux and Docker Desktop/NAT host paths;
-passing the local client matrix alone cannot satisfy that gate.
+preview traffic. The pre-1.0 `initial` profile requires the native-Linux path;
+the `supported` profile adds both Docker Desktop/NAT paths. Passing the local
+client matrix alone cannot satisfy either remote gate.

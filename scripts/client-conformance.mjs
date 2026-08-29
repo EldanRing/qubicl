@@ -60,15 +60,28 @@ export function assertClientConformanceRequirements(document) {
   return document;
 }
 
-export async function validateClientConformance(evidence, requirements, validateResult) {
+export async function validateClientConformance(evidence, requirements, validateResult, selection = {}) {
   assert(evidence?.conformance?.schemaVersion === 1, 'Acceptance schema 4 requires client conformance schemaVersion 1.');
-  const clientSurfaces = await validateRows(evidence.clients, requirements.clients, 'client', requirements.requiredPreset, validateResult);
-  const protocolSurfaces = await validateRows(evidence.protocols, requirements.protocols, 'protocol', requirements.requiredPreset, validateResult);
+  const clients = selectedProfiles(requirements.clients, selection.clients, 'client');
+  const protocols = selectedProfiles(requirements.protocols, selection.protocols, 'protocol');
+  const clientSurfaces = await validateRows(evidence.clients, clients, 'client', requirements.requiredPreset, validateResult);
+  const protocolSurfaces = await validateRows(evidence.protocols, protocols, 'protocol', requirements.requiredPreset, validateResult);
   return {
-    clients: requirements.clients.length,
-    protocols: requirements.protocols.length,
+    clients: clients.length,
+    protocols: protocols.length,
     surfaces: clientSurfaces + protocolSurfaces,
   };
+}
+
+function selectedProfiles(profiles, selectedIds, label) {
+  if (selectedIds === undefined) return profiles;
+  assert(Array.isArray(selectedIds) && new Set(selectedIds).size === selectedIds.length,
+    `Acceptance profile has duplicate ${label} requirements.`);
+  return selectedIds.map((id) => {
+    const matches = profiles.filter((profile) => profile.id === id);
+    assert(matches.length === 1, `Acceptance profile names unsupported ${label} ${id}.`);
+    return matches[0];
+  });
 }
 
 export function clientConformanceEvidenceReferences(evidence) {
