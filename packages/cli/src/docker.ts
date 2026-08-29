@@ -51,6 +51,9 @@ const PROBE_TIMEOUT_MS = 30_000;
 const PROBE_OUTPUT_LIMIT_BYTES = 1024 * 1024;
 const PROBE_CLEANUP_TIMEOUT_MS = 10_000;
 const PROBE_CLEANUP_OUTPUT_LIMIT_BYTES = 64 * 1024;
+const GATEWAY_HEALTH_ATTEMPTS = 3;
+const GATEWAY_HEALTH_TIMEOUT_MS = 5_000;
+const GATEWAY_HEALTH_RETRY_DELAY_MS = 250;
 const LEGACY_GATEWAY_CONTAINER = 'qubicl-gateway';
 const LEGACY_GATEWAY_NETWORK = 'qubicl-gateway';
 
@@ -1689,7 +1692,7 @@ export async function verifyGatewayCompatibility(
   const routes = RuntimeRoutesSchema.parse(JSON.parse(await readFile(state.paths.routes, 'utf8')));
   if (routes.routes.some(({ viewerAuthentication }) => viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1)
     || state.config.gateway.exposure) {
-    const response = await fetch(`http://127.0.0.1:${state.config.gateway.port}/health`, { signal: AbortSignal.timeout(5_000) });
+    const response = await fetchGatewayHealthWithRuntimeRecovery(state);
     if (!response.ok) throw new Error(`Gateway capability check failed with HTTP ${response.status}.`);
     const health = await response.json();
     if (routes.routes.some(({ viewerAuthentication }) => viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1)) {
@@ -1724,6 +1727,40 @@ export async function verifyGatewayCompatibility(
     }
     if (runtime.group === 'complete' && runtime.status === 'running') {
       await connectComputerToGateway(state, computer);
+    }
+  }
+}
+
+async function fetchGatewayHealth(port: number): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= GATEWAY_HEALTH_ATTEMPTS; attempt += 1) {
+    try {
+      return await fetch(`http://127.0.0.1:${port}/health`, {
+        signal: AbortSignal.timeout(GATEWAY_HEALTH_TIMEOUT_MS),
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt < GATEWAY_HEALTH_ATTEMPTS) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, GATEWAY_HEALTH_RETRY_DELAY_MS));
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function fetchGatewayHealthWithRuntimeRecovery(state: LoadedState): Promise<Response> {
+  try {
+    return await fetchGatewayHealth(state.config.gateway.port);
+  } catch (initialError) {
+    const name = gatewayContainerName(state.config.installationId, state.paths.root);
+    await docker(['restart', name]);
+    await waitForContainerHealthy(name, 'Gateway');
+    try {
+      return await fetchGatewayHealth(state.config.gateway.port);
+    } catch (recoveryError) {
+      throw new Error('Gateway loopback health remained unavailable after restarting the managed gateway once.', {
+        cause: recoveryError ?? initialError,
+      });
     }
   }
 }

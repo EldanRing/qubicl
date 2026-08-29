@@ -1,6 +1,6 @@
 {
   "name": "@qubicl/gateway",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "dist/main.js",
@@ -10,7 +10,7 @@
     "./routes": "./dist/routes.js"
   },
   "dependencies": {
-    "@qubicl/core": "0.1.1",
-    "@qubicl/control": "0.1.1"
+    "@qubicl/core": "0.2.0",
+    "@qubicl/control": "0.2.0"
   }
 }

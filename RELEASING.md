@@ -76,7 +76,7 @@ Prereleases belong on `dev` or `next`; `latest` must identify the stable
 release. The guarded publisher verifies the candidate under `next` and moves
 `latest` only after the npm, GHCR, Git tag, and GitHub Release checks succeed.
 
-## Build the exact 0.1 candidate
+## Build the exact candidate
 
 Prerequisites on the Linux x64 release host:
 
@@ -127,7 +127,7 @@ report from the retained bytes, and publication includes it as release evidence.
 The builder writes an ignored candidate beneath:
 
 ```text
-release/candidates/0.1.0-<revision>/linux-x64/
+release/candidates/0.2.0-<revision>/linux-x64/
 ```
 
 From the same clean reviewed revision, verify it without rebuilding or rerunning
@@ -172,7 +172,7 @@ The dry run verifies the full candidate and the exact checkout but performs no
 remote mutation. After explicit approval:
 
 ```sh
-QUBICL_RELEASE_APPROVAL=0.1.0 npm run release:publish -- \
+QUBICL_RELEASE_APPROVAL=0.2.0 npm run release:publish -- \
   --candidate /path/to/candidate \
   --public-key /secure/offline/qubicl-release.public.pem \
   --signature /path/to/candidate.signature.json --publish --yes
@@ -185,7 +185,7 @@ The guarded publisher:
 3. verifies that all five GHCR packages permit anonymous pulls;
 4. publishes the exact npm tarball under a temporary `next` tag and verifies its
    registry integrity;
-5. creates and pushes the annotated `v0.1.0` tag;
+5. creates and pushes the annotated tag for the candidate version;
 6. creates the GitHub release with the native archive, checksums, catalog,
    candidate manifest, SBOMs, and vulnerability summary; and
 7. only after those checks pass, moves the GHCR and npm `latest` tags.
@@ -208,7 +208,7 @@ never changes repository or package visibility.
 From a clean user environment:
 
 ```sh
-npm install -g qubicl-cli@0.1.0
+npm install -g qubicl-cli@0.2.0
 qubicl setup
 qubicl doctor
 ```

@@ -43,6 +43,7 @@ const stringOptions = new Set([
   'default-preset',
   'default-cpus',
   'default-memory',
+  'update-notifications',
   'preset',
   'create',
   'passphrase-file',

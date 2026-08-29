@@ -16,9 +16,10 @@ test('argument parsing rejects ambiguous and unknown options', () => {
 });
 
 test('argument parsing accepts configuration, connection, setup display, and JSON options', () => {
-  const parsed = parseArgs(['--gateway-port', '4321', '--default-cpus=3', '--transport', 'stdio', '--profile', 'files', '--result-mode', 'text', '--verbose', '--no-clear', '--json']);
+  const parsed = parseArgs(['--gateway-port', '4321', '--default-cpus=3', '--update-notifications', 'on', '--transport', 'stdio', '--profile', 'files', '--result-mode', 'text', '--verbose', '--no-clear', '--json']);
   assert.equal(parsed.options.get('gateway-port'), '4321');
   assert.equal(parsed.options.get('default-cpus'), '3');
+  assert.equal(parsed.options.get('update-notifications'), 'on');
   assert.equal(parsed.options.get('transport'), 'stdio');
   assert.equal(parsed.options.get('profile'), 'files');
   assert.equal(parsed.options.get('result-mode'), 'text');

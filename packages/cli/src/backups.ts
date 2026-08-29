@@ -30,6 +30,11 @@ interface BackupManifest {
 
 const MAGIC = Buffer.from('QUBICL1\0');
 const HEADER_BYTES = MAGIC.length + 16 + 12;
+const TRANSIENT_BROWSER_PROFILE_ARCHIVE_PATHS = [
+  './qubicl/.local/share/qubicl/browser-profile/SingletonCookie',
+  './qubicl/.local/share/qubicl/browser-profile/SingletonLock',
+  './qubicl/.local/share/qubicl/browser-profile/SingletonSocket',
+] as const;
 
 function required(value: string | undefined, what: string): string {
   if (!value) throw new Error(`Missing ${what}.`);
@@ -163,7 +168,15 @@ async function createBackup(state: LoadedState, computer: ComputerConfig, args: 
   const plain = join(directory, 'home.tar.gz');
   await mkdir(directory, { recursive: false, mode: 0o700 });
   try {
-    await run('tar', ['-czf', plain, '--numeric-owner', '-C', join(state.paths.computers, computer.id, 'home'), '.']);
+    await run('tar', [
+      '-czf',
+      plain,
+      '--numeric-owner',
+      ...TRANSIENT_BROWSER_PROFILE_ARCHIVE_PATHS.map((path) => `--exclude=${path}`),
+      '-C',
+      join(state.paths.computers, computer.id, 'home'),
+      '.',
+    ]);
     await chmod(plain, 0o600);
   } catch (error) {
     await rm(directory, { recursive: true, force: true });

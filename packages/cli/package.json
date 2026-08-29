@@ -1,6 +1,6 @@
 {
   "name": "qubicl-cli",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Local, observable computers for any compatible AI agent",
   "homepage": "https://github.com/EldanRing/qubicl#readme",
   "bugs": {
@@ -41,7 +41,7 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
-    "@qubicl/core": "0.1.1",
+    "@qubicl/core": "0.2.0",
     "tar": "7.5.22",
     "yaml": "^2.9.0"
   }

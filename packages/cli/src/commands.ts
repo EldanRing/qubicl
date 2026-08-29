@@ -991,19 +991,35 @@ async function renameComputer(oldName: string, newName: string): Promise<void> {
     const state = await loadState(paths);
     const computer = findComputer(state, oldName);
     await validateDocker();
-    const priorRuntime = await containerStatus(state, computer.id);
     if (state.config.computers.some(({ name, id }) => name === newName && id !== computer.id)) throw new Error(`Computer name ${newName} is already in use.`);
     const friendlyRuntime = isPrimaryRuntimeRoot(state.paths.root);
     if (friendlyRuntime && newName === 'gateway') throw new Error('Computer name gateway is reserved by the primary Qubicl runtime.');
+    const runtimeObservation = friendlyRuntime ? undefined : await managedComputerRuntimeObservation(state, computer);
+    if (runtimeObservation?.group === 'partial' || runtimeObservation?.group === 'inconsistent') {
+      throw new Error(`Computer ${computer.name} runtime is ${runtimeObservation.group}; rename requires a stable complete or absent runtime.`);
+    }
+    if (runtimeObservation?.group === 'complete'
+      && !['running', 'created', 'exited'].includes(runtimeObservation.status)) {
+      throw new Error(`Computer ${computer.name} runtime is ${runtimeObservation.status}; rename requires a stable running or stopped runtime.`);
+    }
     // Recover against the retained old-name container before the primary
     // namespace migration changes its lookup name.
     if (friendlyRuntime) await reconcileRuntimeImageContracts(state);
+    else if (runtimeObservation?.group === 'complete') await ensureRuntimeImages(state, [computer], true);
     computer.name = newName;
     if (friendlyRuntime) computer.runtimeName = newName;
     if (friendlyRuntime) await prepareRuntimeMigration(state);
-    const restart = priorRuntime.status === 'running' || priorRuntime.status === 'restarting';
+    const runningReplacement = runtimeObservation?.group === 'complete' && runtimeObservation.status === 'running';
+    const stoppedReplacement = runtimeObservation?.group === 'complete'
+      && (runtimeObservation.status === 'created' || runtimeObservation.status === 'exited');
     await executeStateTransaction(paths, createStateTransaction('rename', state, {
-      runtime: { startIds: !friendlyRuntime && restart ? [computer.id] : [] },
+      runtime: {
+        replaceIds: runningReplacement ? [computer.id] : [],
+        replaceStoppedIds: stoppedReplacement ? [computer.id] : [],
+        computerRuntimeBindings: runtimeObservation?.group === 'complete'
+          ? { [computer.id]: runtimeObservation.containers }
+          : {},
+      },
     }));
     if (friendlyRuntime) await migrateLegacyRuntime(state);
     console.log(`Renamed ${oldName} to ${newName}. ID, routes, token, and home are unchanged.`);

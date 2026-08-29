@@ -4,6 +4,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
+## 0.2.0 - 2026-08-29
+
 ### Added
 
 - Versioned client-conformance requirements and acceptance schema 4 now bind
@@ -88,6 +90,15 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 - Failed late-stage candidates can be preserved and resumed through verification
   only, without rebuilding, rescanning, or rerunning artifact acceptance; all
   candidate verification remains pinned to the clean reviewed revision.
+- Full-home backups now omit Chromium's transient singleton lock, cookie, and
+  socket links, so durable browser-profile backups remain verifiable without
+  weakening the archive boundary against absolute links.
+- Gateway compatibility checks now retry bounded transient loopback health
+  timeouts and restart the same managed gateway once when Docker Desktop leaves
+  its declared loopback publication unresponsive during network recreation.
+- Renaming a computer under a non-primary Qubicl state root now binds and
+  replaces the exact retained runtime instead of validating its old name
+  against the already-committed new configuration.
 
 ### Security
 

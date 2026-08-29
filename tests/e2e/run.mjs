@@ -825,7 +825,7 @@ try {
   await commandCli(['git', 'worktree', computer.name, 'e2e-worktree', '--repo', 'git-e2e']);
 
   const checkpoint = await commandCli(['backup', 'create', computer.name, '--quiesce']);
-  const checkpointId = checkpoint.stdout.match(/backup ([^;]+);/)?.[1];
+  const checkpointId = checkpoint.stdout.match(/^Created (?:quiesced|crash-consistent) backup ([^;\r\n]+);/m)?.[1];
   assert.equal(typeof checkpointId, 'string');
   await commandCli(['backup', 'verify', checkpointId]);
   await commandCli(['backup', 'restore', checkpointId, 'backup-restored']);
