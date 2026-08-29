@@ -147,6 +147,14 @@ duplicate compressed/expanded layer bytes and package identities across all
 five images on both platforms. Verification regenerates it rather than trusting
 editable summary data. The builder then generates exact digest/size catalog
 data and builds/tests the npm and native artifacts against those exact bytes.
+To reduce local candidate latency without overwhelming Docker, the five BuildKit
+image jobs and the three exact-artifact acceptance jobs run with a fixed limit
+of two. Artifact runs receive disjoint port ranges and unique temporary image
+tags. Already-started work is drained before a failure is handled, so preserved
+staging cannot keep changing in the background. Trivy scans, OCI-efficiency
+inspection, image loading, catalog generation, and final verification remain
+serial because their shared caches, memory use, or ordering make additional
+parallelism unsafe or immaterial.
 Output remains ignored under
 `release/candidates/`; there is no push, publish, tag, release, or visibility
 operation.

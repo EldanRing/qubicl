@@ -26,6 +26,12 @@ const cliProgram = process.env.QUBICL_E2E_CLI ?? process.execPath;
 const cliPrefixArgs = process.env.QUBICL_E2E_CLI ? [] : [sourceCli];
 const artifact = process.env.QUBICL_E2E_ARTIFACT ?? 'source';
 const env = { ...process.env, QUBICL_HOME: root };
+const portRangeStart = environmentPort('QUBICL_E2E_PORT_START', 32_000);
+const portRangeEnd = environmentPort('QUBICL_E2E_PORT_END', 40_000);
+assert(portRangeStart < portRangeEnd, 'QUBICL_E2E_PORT_START must be lower than QUBICL_E2E_PORT_END.');
+const imageNamespace = process.env.QUBICL_E2E_IMAGE_NAMESPACE ?? `qubicl/e2e-${artifact}-${process.pid}`;
+assert(/^qubicl\/e2e-[a-z0-9][a-z0-9._-]{0,80}$/u.test(imageNamespace),
+  'QUBICL_E2E_IMAGE_NAMESPACE must be a bounded lowercase Docker repository name.');
 let composePath;
 let installationId;
 const customImageTags = [];
@@ -918,7 +924,7 @@ try {
     ['computer', computerContract.image.requested],
   ]) {
     const directory = join(root, `custom-${preset}`);
-    const tag = `qubicl/e2e-custom-${preset}:dev`;
+    const tag = `${imageNamespace}-custom-${preset}:dev`;
     customImageTags.push(tag);
     await mkdir(directory);
     await writeFile(join(directory, 'Dockerfile'), `FROM ${baseImage}\nLABEL dev.qubicl.e2e="custom-${preset}"\n`);
@@ -936,8 +942,9 @@ try {
   const customImageDirectory = join(root, 'custom-image');
   await mkdir(customImageDirectory);
   await writeFile(join(customImageDirectory, 'Dockerfile'), `FROM ${computer.image.requested}\nLABEL dev.qubicl.e2e="custom"\n`);
-  await commandCli(['image', 'build', 'qubicl/e2e-custom:dev', customImageDirectory]);
-  customImageTags.push('qubicl/e2e-custom:dev');
+  const customImageTag = `${imageNamespace}-custom:dev`;
+  await commandCli(['image', 'build', customImageTag, customImageDirectory]);
+  customImageTags.push(customImageTag);
   const gatewayBefore = (await exec('docker', ['inspect', '--format', '{{.Id}} {{.State.StartedAt}}', gatewayRuntime()])).stdout.trim();
   const continuityTransport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } });
   const continuityClient = new Client({ name: 'qubicl-continuity', version: '1.0.0' }, { versionNegotiation: { mode: 'auto' } });
@@ -956,7 +963,7 @@ try {
     assert.equal(process.running, true, `${operation} interrupted the managed process`);
   };
 
-  await commandCli(['create', 'second', '--image', 'qubicl/e2e-custom:dev']);
+  await commandCli(['create', 'second', '--image', customImageTag]);
   await assertContinuity('create');
   let current = await loadState(root);
   const second = current.config.computers.find(({ name }) => name === 'second');
@@ -1238,8 +1245,18 @@ async function loadState(directory) {
 }
 
 async function freePort() {
-  for (let port = 32_000; port < 40_000; port += 1) if (await portAvailable(port)) return port;
-  throw new Error('No free local test port found.');
+  for (let port = portRangeStart; port < portRangeEnd; port += 1) if (await portAvailable(port)) return port;
+  throw new Error(`No free local test port found in ${portRangeStart}-${portRangeEnd - 1}.`);
+}
+
+function environmentPort(name, fallback) {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  assert(/^\d+$/u.test(value), `${name} must be a decimal port boundary.`);
+  const parsed = Number(value);
+  assert(Number.isSafeInteger(parsed) && parsed >= 1_024 && parsed <= 65_536,
+    `${name} must be between 1024 and 65536.`);
+  return parsed;
 }
 
 async function waitFor(check, timeoutMs) {

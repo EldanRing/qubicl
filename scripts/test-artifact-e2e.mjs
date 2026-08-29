@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { extractReleaseArchive, inspectReleaseArchive } from './artifact-evidence.mjs';
+import { artifactAcceptanceIsolation } from './candidate-concurrency.mjs';
 
 const root = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const mode = process.argv[2] ?? 'source';
@@ -16,7 +17,14 @@ const temporary = await mkdtemp(join(tmpdir(), `qubicl-${mode}-e2e-`));
 try {
   const cli = await prepareCli();
   if (process.env.QUBICL_E2E_SKIP_IMAGE_BUILD !== '1') await runCli(cli, ['image', 'build-system']);
-  const testEnvironment = { ...process.env, QUBICL_E2E_ARTIFACT: mode };
+  const isolation = artifactAcceptanceIsolation(mode, temporary);
+  const testEnvironment = {
+    ...process.env,
+    QUBICL_E2E_ARTIFACT: mode,
+    QUBICL_E2E_PORT_START: `${isolation.portStart}`,
+    QUBICL_E2E_PORT_END: `${isolation.portEnd}`,
+    QUBICL_E2E_IMAGE_NAMESPACE: isolation.imageNamespace,
+  };
   delete testEnvironment.QUBICL_E2E_CLI;
   if (cli.kind !== 'source') testEnvironment.QUBICL_E2E_CLI = cli.program;
   await run(process.execPath, [join(root, 'tests', 'e2e', 'run.mjs')], {

@@ -24,6 +24,7 @@ import {
   inspectOciEfficiencyArchives,
   serializeOciEfficiencyReport,
 } from './oci-efficiency.mjs';
+import { LOCAL_CANDIDATE_CONCURRENCY, runWithConcurrency } from './candidate-concurrency.mjs';
 import { inspectOciArchive } from './oci-evidence.mjs';
 import { createOciPlatformView } from './oci-platform-view.mjs';
 
@@ -126,7 +127,12 @@ try {
     // This first build creates only the image contexts. Final npm/native bytes are
     // built once after the exact OCI catalog exists.
     await run('npm', ['run', 'build'], { env: metadataEnvironment });
-    for (const spec of imageSpecs) await buildImageCandidate(spec);
+    console.log(`Building image candidates with at most ${LOCAL_CANDIDATE_CONCURRENCY} concurrent jobs.`);
+    await runWithConcurrency(imageSpecs, buildImageCandidate);
+    if (scanImages) {
+      console.log('Scanning image candidates serially against the shared local Trivy cache.');
+      for (const spec of imageSpecs) await scanImageCandidate(spec);
+    }
     if (requiresClientConformance(version)) {
       const archives = Object.fromEntries(imageSpecs.map(({ name }) => [name, join(staging, `qubicl-${name}.oci.tar`)]));
       const reportPath = join(staging, OCI_EFFICIENCY_REPORT_NAME);
@@ -252,9 +258,17 @@ try {
       ...finalEnvironment,
       QUBICL_E2E_SKIP_IMAGE_BUILD: '1',
     };
-    await run(process.execPath, ['scripts/test-artifact-e2e.mjs', 'source', '--no-build'], { env: acceptanceEnvironment });
-    await run(process.execPath, ['scripts/test-artifact-e2e.mjs', 'npm', '--archive', join(staging, npmArchive)], { env: acceptanceEnvironment });
-    await run(process.execPath, ['scripts/test-artifact-e2e.mjs', 'binary', '--archive', join(staging, binaryArchive)], { env: acceptanceEnvironment });
+    const acceptanceJobs = [
+      ['source', '--no-build'],
+      ['npm', '--archive', join(staging, npmArchive)],
+      ['binary', '--archive', join(staging, binaryArchive)],
+    ];
+    console.log(`Running exact artifact acceptance with at most ${LOCAL_CANDIDATE_CONCURRENCY} concurrent jobs.`);
+    await runWithConcurrency(acceptanceJobs, (args) => run(
+      process.execPath,
+      ['scripts/test-artifact-e2e.mjs', ...args],
+      { env: acceptanceEnvironment },
+    ));
   }
 
   await assertSourceSnapshot('candidate manifest generation');
@@ -329,86 +343,87 @@ async function buildImageCandidate(spec) {
   const inspectArgs = ['scripts/inspect-oci-candidate.mjs', archive, version, revision, source];
   if (spec.preset) inspectArgs.push(spec.preset, join(root, 'packages', 'cli', 'dist', 'assets', 'computer', 'manifests', `${spec.preset}.json`));
   await run(process.execPath, inspectArgs, { env: metadataEnvironment });
+}
 
-  if (scanImages) {
-    const scanSourceName = `.scan-${spec.name}.source.oci`;
-    const scanSource = join(staging, scanSourceName);
-    const measured = await inspectOciArchive(archive, { requireAttestations: true });
-    const archiveSha256 = await sha256(archive);
-    await mkdir(scanSource);
-    await run('tar', ['-xf', archive, '-C', scanSource], { env: metadataEnvironment });
-    try {
-      for (const [platform, platformName] of [['linux/amd64', 'linux-amd64'], ['linux/arm64', 'linux-arm64']]) {
-        const scanName = `.scan-${spec.name}-${platformName}.oci`;
-        const scanLayout = join(staging, scanName);
-        const reportName = `trivy-${spec.name}-${platformName}.json`;
-        const pendingReportName = `.${reportName}.${process.pid}.tmp`;
-        const pendingReport = join(staging, pendingReportName);
-        try {
-          const platformIdentity = measured.platforms[platform];
-          const platformView = await createOciPlatformView(scanSource, scanLayout, platform, {
-            indexDigest: measured.indexDigest,
-            manifestDigest: platformIdentity.digest,
-            configDigest: platformIdentity.configDigest,
-            layerDigests: platformIdentity.layerDigests,
-            diffIds: platformIdentity.diffIds,
-          });
-          await run('trivy', [
-            'image',
-            '--input', scanName,
-            '--scanners', 'vuln,secret',
-            '--format', 'json',
-            '--output', pendingReportName,
-          ], { cwd: staging, env: metadataEnvironment });
-          const document = JSON.parse(await readFile(pendingReport, 'utf8'));
-          assertTrivyReportPrivacy(document, scanName);
-          const reportSha256 = await sha256(pendingReport);
-          const binding = {
-            report: reportName,
-            reportSha256,
-            image: spec.name,
-            platform,
-            ociArchive: basename(archive),
-            ociArchiveSha256: archiveSha256,
-            indexDigest: measured.indexDigest,
-            manifestDigest: platformIdentity.digest,
-            configDigest: platformIdentity.configDigest,
-            layerDigests: platformIdentity.layerDigests,
-            diffIds: platformIdentity.diffIds,
-            platformView: { input: scanName, ...platformView },
-            reportIdentity: {
-              schemaVersion: document.SchemaVersion,
-              artifactType: document.ArtifactType,
-              imageId: document.Metadata?.ImageID,
-              diffIds: document.Metadata?.DiffIDs,
-              imageConfig: {
-                os: document.Metadata?.ImageConfig?.os,
-                architecture: document.Metadata?.ImageConfig?.architecture,
-                diffIds: document.Metadata?.ImageConfig?.rootfs?.diff_ids,
-              },
+async function scanImageCandidate(spec) {
+  const archive = join(staging, `qubicl-${spec.name}.oci.tar`);
+  const scanSourceName = `.scan-${spec.name}.source.oci`;
+  const scanSource = join(staging, scanSourceName);
+  const measured = await inspectOciArchive(archive, { requireAttestations: true });
+  const archiveSha256 = await sha256(archive);
+  await mkdir(scanSource);
+  await run('tar', ['-xf', archive, '-C', scanSource], { env: metadataEnvironment });
+  try {
+    for (const [platform, platformName] of [['linux/amd64', 'linux-amd64'], ['linux/arm64', 'linux-arm64']]) {
+      const scanName = `.scan-${spec.name}-${platformName}.oci`;
+      const scanLayout = join(staging, scanName);
+      const reportName = `trivy-${spec.name}-${platformName}.json`;
+      const pendingReportName = `.${reportName}.${process.pid}.tmp`;
+      const pendingReport = join(staging, pendingReportName);
+      try {
+        const platformIdentity = measured.platforms[platform];
+        const platformView = await createOciPlatformView(scanSource, scanLayout, platform, {
+          indexDigest: measured.indexDigest,
+          manifestDigest: platformIdentity.digest,
+          configDigest: platformIdentity.configDigest,
+          layerDigests: platformIdentity.layerDigests,
+          diffIds: platformIdentity.diffIds,
+        });
+        await run('trivy', [
+          'image',
+          '--input', scanName,
+          '--scanners', 'vuln,secret',
+          '--format', 'json',
+          '--output', pendingReportName,
+        ], { cwd: staging, env: metadataEnvironment });
+        const document = JSON.parse(await readFile(pendingReport, 'utf8'));
+        assertTrivyReportPrivacy(document, scanName);
+        const reportSha256 = await sha256(pendingReport);
+        const binding = {
+          report: reportName,
+          reportSha256,
+          image: spec.name,
+          platform,
+          ociArchive: basename(archive),
+          ociArchiveSha256: archiveSha256,
+          indexDigest: measured.indexDigest,
+          manifestDigest: platformIdentity.digest,
+          configDigest: platformIdentity.configDigest,
+          layerDigests: platformIdentity.layerDigests,
+          diffIds: platformIdentity.diffIds,
+          platformView: { input: scanName, ...platformView },
+          reportIdentity: {
+            schemaVersion: document.SchemaVersion,
+            artifactType: document.ArtifactType,
+            imageId: document.Metadata?.ImageID,
+            diffIds: document.Metadata?.DiffIDs,
+            imageConfig: {
+              os: document.Metadata?.ImageConfig?.os,
+              architecture: document.Metadata?.ImageConfig?.architecture,
+              diffIds: document.Metadata?.ImageConfig?.rootfs?.diff_ids,
             },
-            options: { scanners: ['vuln', 'secret'], input: scanName },
-          };
-          assertTrivyScanBinding(binding, document, {
-            reportName,
-            reportSha256,
-            archiveName: basename(archive),
-            archiveSha256,
-            image: spec.name,
-            platform,
-            measured,
-            bindingSchemaVersion: 2,
-          });
-          await rename(pendingReport, join(staging, reportName));
-          scanBindings.push(binding);
-        } finally {
-          await rm(scanLayout, { recursive: true, force: true });
-          await rm(pendingReport, { force: true });
-        }
+          },
+          options: { scanners: ['vuln', 'secret'], input: scanName },
+        };
+        assertTrivyScanBinding(binding, document, {
+          reportName,
+          reportSha256,
+          archiveName: basename(archive),
+          archiveSha256,
+          image: spec.name,
+          platform,
+          measured,
+          bindingSchemaVersion: 2,
+        });
+        await rename(pendingReport, join(staging, reportName));
+        scanBindings.push(binding);
+      } finally {
+        await rm(scanLayout, { recursive: true, force: true });
+        await rm(pendingReport, { force: true });
       }
-    } finally {
-      await rm(scanSource, { recursive: true, force: true });
     }
+  } finally {
+    await rm(scanSource, { recursive: true, force: true });
   }
 }
 
