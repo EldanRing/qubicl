@@ -119,20 +119,37 @@ Enabled `web_search`, `web_extract`, `skills_list`, `skill_view`, and `skill_man
 
 Open WebUI's path-based `/files/serve/*` route keeps active documents seamless
 without trusting Open WebUI's iframe settings. For HTML, HTM, and SVG, Qubicl
-returns a trusted wrapper whose nested iframe uses a short-lived capability on
-the computer's isolated preview hostname. The inner response enforces its own
-sandbox, CSP, no-referrer policy, and permissions restrictions; it receives no
-computer bearer, viewer session, Open WebUI cookie, or operator route. Qubicl
-parses HTML and SVG into static markup: scripts, event handlers, embedded
-documents, form/navigation targets, refresh directives, and SVG href animation
-are removed. Directory-relative stylesheets, raster images, fonts, and media
-remain available, while browser fetches and external resources are blocked by
-the response policy. The initially selected active document must be a regular
-named file rather than a symbolic link, and later resource traversal outside
-its named parent directory fails closed. Changing Open WebUI's outer iframe to
-same-origin mode cannot remove the Qubicl-owned inner boundary. Direct
-JavaScript and TypeScript clicks display source text. `/files/view` keeps HTML,
-HTM, JavaScript, TypeScript, and SVG as explicit downloads.
+returns a self-contained static document through Open WebUI's existing file
+proxy, so a browser reaching Open WebUI over a LAN address, VPN, or reverse
+proxy does not need direct access to Qubicl's loopback-only `.localhost`
+preview hostname. The response enforces its own sandbox, CSP, no-referrer
+policy, and permissions restrictions. Qubicl parses HTML and SVG into static
+markup: scripts, event handlers, embedded documents, form/navigation targets,
+refresh directives, and SVG href animation are removed. Bounded
+directory-relative stylesheets, raster images, and media are embedded as
+passive data; browser fetches and external resources are blocked by the
+response policy. The initially selected active document must be a regular
+named file rather than a symbolic link, and asset traversal outside its named
+parent directory fails closed. Changing Open WebUI's outer iframe to
+same-origin mode cannot remove the response-enforced sandbox. Direct JavaScript
+and TypeScript clicks display source text. `/files/view` keeps HTML, HTM,
+JavaScript, TypeScript, and SVG as explicit downloads.
+
+When HTML contains scripts or event handlers, the safe document adds a
+Qubicl-owned **Run interactive preview** action. Nothing executes until the
+Open WebUI user selects that action. Qubicl embeds the exact selected-file
+snapshot in an inert form inside the already authenticated response; the
+five-minute button activates it in place instead of navigating back through
+Open WebUI, and no Open WebUI or computer credential is placed in the document.
+The interactive document remains sandboxed without same-origin access, forms,
+embedded frames, popups, downloads, or top navigation, and sends no referrer.
+It does permit scripts and external browser requests so trusted self-contained
+applications such as WebGL simulations can run. That traffic uses the
+operator's browser network, not the Qubicl computer's egress policy, and the
+confirmation states this boundary explicitly. Relative active subresources are
+not fetched through Open WebUI's authenticated proxy; package them into the
+document or use externally CORS-enabled resources. Keep the static view for
+files you do not trust.
 
 On `browser`, `computer`, and `workstation` presets, that tool list includes navigation, semantic page snapshots and element refs, screenshots, history/wait, persistent tab management, and screenshot-grounded browser computer actions. Prefer snapshot refs first; use viewport screenshots and coordinate actions only for visual controls without refs. The compatible API name `browser_reset` is displayed as **Reset tabs** and closes tabs without erasing cookies, site data, or the durable Chromium profile; full profile clearing is a separate host-only confirmed CLI action. The browser stays visible in Qubicl's viewer and survives human takeover, while agent tool access remains fenced until release. Semantic and coordinate browser point actions drive the persistent viewer-only green agent cursor immediately before dispatch; it clears with the agent lease or human takeover. Typed data, URLs, selectors, refs, and page content are never placed in that feed.
 

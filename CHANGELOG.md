@@ -136,13 +136,22 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   replay; links, special files, pathname swaps, hidden-start failures, output
   substitution, excess archive concurrency, and disconnected transfers fail
   closed. The direct `/files/view` route keeps active files as downloads. Open
-  WebUI's path-based HTML and SVG previews instead receive a trusted wrapper
-  around a short-lived, directory-scoped Qubicl preview origin. Active markup
-  is parser-normalized into a static document; scripts, scripted requests,
-  embeds, forms, refresh/navigation primitives, and initially selected final
-  symlinks fail closed under an inert iframe and deny-by-default CSP. JavaScript
-  and TypeScript clicks display source, while passive same-directory styles,
-  images, fonts, and media still load normally.
+  WebUI's path-based HTML and SVG previews instead receive a self-contained,
+  parser-normalized static document through its existing file-proxy route, so
+  browsers do not need direct access to a Qubicl `.localhost` preview host.
+  Scripts, scripted requests, embeds, forms, refresh/navigation primitives,
+  outside-directory asset traversal, and initially selected final symlinks fail
+  closed under a response-enforced sandbox and deny-by-default CSP. JavaScript
+  and TypeScript clicks display source, while bounded same-directory styles,
+  raster images, and media are embedded in the static response. Scripted HTML
+  exposes a separate, explicit **Run interactive preview** action for the exact
+  file snapshot already returned through Open WebUI's authenticated proxy. The
+  action remains available for five minutes and activates in place, without a
+  second navigation or browser-visible credential. Its sandbox permits scripts
+  but not same-origin access, forms, frames, popups, downloads, or top
+  navigation; the confirmation warns that trusted code can contact external
+  services using the operator browser outside the computer's Qubicl network
+  policy.
 - Remote gateway exposure is absent by default and requires a reviewed bind
   address, distinct external port, matching certificate and private key,
   allowed client networks, exact HTTPS browser origins, and explicit consent

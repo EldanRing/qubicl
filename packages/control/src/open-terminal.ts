@@ -1,6 +1,6 @@
 import { createReadStream, fstatSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
-import { basename, extname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   buildOpenTerminalOpenApi,
@@ -16,6 +16,12 @@ import { mapFileSystemError, type FileErrorContext } from './file-errors.js';
 import type { LeaseProof } from './lease.js';
 import { BoundedPathError, type BoundedFileSystem, type FileIdentity } from './bounded-files.js';
 import { OPEN_TERMINAL_ARCHIVE_LIMITS, type OpenTerminalArchive } from './open-terminal-archive.js';
+import {
+  INTERACTIVE_CONSENT_FILE_PREVIEW_CSP,
+  STATIC_FILE_PREVIEW_CSP,
+  hasExecutablePreviewContent,
+  staticFilePreviewBundle,
+} from './static-file-preview.js';
 
 const PREFIX = '/open-terminal';
 const FILE_SERVE_PREFIX = '/files/serve/';
@@ -33,7 +39,8 @@ const MAX_CONTENT_SEARCH_FILES = 500;
 const MAX_CONTENT_SEARCH_BYTES = 25_000_000;
 const MAX_COMPATIBILITY_PATH_BYTES = 4_096;
 const MAX_ARCHIVE_PATH_BYTES = 64 * 1024;
-const FILE_PREVIEW_SECONDS = 5 * 60;
+const MAX_STATIC_PREVIEW_ASSETS = 128;
+const MAX_STATIC_PREVIEW_ASSET_BYTES = 12_000_000;
 const PROXY_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 
 interface SessionCwd {
@@ -351,37 +358,34 @@ export class OpenTerminalCompatibility {
           const info = read.info;
           if (!info.isFile()) throw new QubiclError('not_a_file', `${target} is not a regular file.`, 400);
           if (info.size > MAX_UPLOAD_BYTES || read.data.length > MAX_UPLOAD_BYTES) throw new QubiclError('file_too_large', `${target} exceeds the ${MAX_UPLOAD_BYTES}-byte download limit.`, 413);
-          let preview;
+          let staticPreview;
+          let interactive = false;
           if (servedInline && requiresIsolatedPreview(target)) {
             if (!sameFileIdentity(read.identity, read.namedIdentity)) {
               throw new QubiclError('file_preview_symlink', 'Active previews cannot be opened through a symbolic link.', 400);
             }
-            preview = await this.executor.previews.publishFile(target, FILE_PREVIEW_SECONDS, this.executor.files);
+            if (hasExecutablePreviewContent(target, read.data)) {
+              interactive = true;
+            }
+            staticPreview = await buildStaticPreview(
+              target,
+              read.data,
+              this.executor.files,
+              interactive ? read.data : undefined,
+            );
+            if (staticPreview.length > MAX_UPLOAD_BYTES) {
+              throw new QubiclError('file_preview_too_large', `The self-contained static preview exceeds ${MAX_UPLOAD_BYTES} bytes.`, 413);
+            }
           }
-          try {
-            this.executor.leases.verify(proof, true);
-          } catch (error) {
-            if (preview) this.executor.previews.unpublish(preview.id);
-            throw error;
-          }
-          return { data: read.data, preview };
+          this.executor.leases.verify(proof, true);
+          return { data: read.data, staticPreview, interactive };
         } catch (error) {
           if (error instanceof QubiclError) throw error;
           throw mapFileSystemError(error, { operation: 'read', path: target });
         }
       });
-      if (result.preview) {
-        try {
-          const surface = requestSurface(request);
-          const previewUrl = surface === 'external' ? result.preview.remoteUrl : result.preview.url;
-          if (!previewUrl) {
-            throw new QubiclError('remote_preview_unavailable', 'Remote isolated file preview access is not configured for this computer.', 409);
-          }
-          sendIsolatedPreviewWrapper(response, target, previewUrl);
-        } catch (error) {
-          this.executor.previews.unpublish(result.preview.id);
-          throw error;
-        }
+      if (result.staticPreview) {
+        sendStaticPreview(response, target, result.staticPreview, result.interactive);
         return;
       }
       sendBytes(
@@ -968,29 +972,15 @@ function sendBytes(
   response.end(value);
 }
 
-function sendIsolatedPreviewWrapper(response: ServerResponse, path: string, previewUrl: string): void {
+function sendStaticPreview(response: ServerResponse, path: string, body: Buffer, interactive: boolean): void {
   if (response.headersSent) return;
-  const parsed = new URL(previewUrl);
   const filename = basename(path);
-  const wrapperPolicy = [
-    "default-src 'none'",
-    "base-uri 'none'",
-    "form-action 'none'",
-    "img-src data:",
-    "style-src 'unsafe-inline'",
-    `frame-src ${parsed.origin}`,
-  ].join('; ');
-  const body = Buffer.from(`<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="${escapeHtml(wrapperPolicy)}">
-<title>${escapeHtml(filename)}</title><style>html,body,iframe{box-sizing:border-box;width:100%;height:100%;margin:0;border:0;background:#fff}body{overflow:hidden}</style></head>
-<body><iframe title="${escapeHtml(filename)}" src="${escapeHtml(previewUrl)}" sandbox="" referrerpolicy="no-referrer"></iframe></body></html>`, 'utf8');
   response.writeHead(200, {
-    'content-type': 'text/html; charset=utf-8',
+    'content-type': mimeType(path),
     'content-length': body.length,
     'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(filename)}`,
     'cache-control': 'no-store',
-    'content-security-policy': wrapperPolicy,
+    'content-security-policy': interactive ? INTERACTIVE_CONSENT_FILE_PREVIEW_CSP : STATIC_FILE_PREVIEW_CSP,
     'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=(), clipboard-read=(), clipboard-write=()',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
@@ -1068,15 +1058,36 @@ function requiresSourcePreview(path: string): boolean {
   return ['.js', '.mjs', '.ts'].includes(extname(path).toLowerCase());
 }
 
-function requestSurface(request: IncomingMessage): 'local' | 'external' {
-  const value = request.headers['x-qubicl-access-surface'];
-  if (value === undefined || value === 'local') return 'local';
-  if (value === 'external') return 'external';
-  throw new QubiclError('invalid_access_surface', 'The gateway supplied an invalid access-surface marker.', 400);
+async function buildStaticPreview(
+  path: string,
+  data: Buffer,
+  files: BoundedFileSystem,
+  interactiveSource?: Buffer,
+): Promise<Buffer> {
+  const root = dirname(path);
+  let assets = 0;
+  let assetBytes = 0;
+  return staticFilePreviewBundle(path, data, async (relativePath) => {
+    if (assets >= MAX_STATIC_PREVIEW_ASSETS) return undefined;
+    const candidate = resolve(root, relativePath);
+    if (!withinDirectory(root, candidate)) return undefined;
+    const remaining = MAX_STATIC_PREVIEW_ASSET_BYTES - assetBytes;
+    if (remaining <= 0) return undefined;
+    assets += 1;
+    try {
+      const read = await files.readFile(candidate, Math.min(remaining + 1, MAX_UPLOAD_BYTES + 1));
+      if (!read.info.isFile() || read.data.length > remaining || !withinDirectory(root, read.resolvedPath)) return undefined;
+      assetBytes += read.data.length;
+      return { data: read.data, mimeType: mimeType(candidate).split(';')[0]! };
+    } catch {
+      return undefined;
+    }
+  }, { ...(interactiveSource ? { interactiveSource } : {}) });
 }
 
-function escapeHtml(value: string): string {
-  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+function withinDirectory(root: string, path: string): boolean {
+  const fromRoot = relative(root, path);
+  return fromRoot === '' || (!isAbsolute(fromRoot) && fromRoot !== '..' && !fromRoot.startsWith(`..${sep}`));
 }
 
 function sendToolImage(response: ServerResponse, value: unknown): void {

@@ -243,11 +243,10 @@ test('Open Terminal compatibility provides native files through a transparent fe
   assert.equal(await served.text(), 'native file browser works\n');
 
   await writeFile(join(home, 'documents', 'preview.css'), 'body { color: rgb(1, 2, 3); }\n');
+  await writeFile(join(home, 'documents', 'preview.png'), browserPng);
   await writeFile(join(home, 'documents', 'preview.js'), 'document.body.dataset.relativeScript = "loaded";\n');
-  let isolatedHtmlUrl = '';
-  let isolatedSvgUrl = '';
   for (const [name, content, contentType, mode] of [
-    ['active.html', '<meta http-equiv="refresh" content="0;url=https://example.invalid"><link rel="stylesheet" href="preview.css"><a href="https://example.invalid">link</a><form action="https://example.invalid"><button>submit</button></form><script src="preview.js"></script><script>fetch("research-notes.md").then((response) => response.text()).then((value) => location = `https://example.invalid/${value}`)</script>', /^text\/html/, 'isolated'],
+    ['active.html', '<meta http-equiv="refresh" content="0;url=https://example.invalid"><link rel="stylesheet" href="preview.css"><img src="preview.png"><a href="https://example.invalid">link</a><form action="https://example.invalid"><button>submit</button></form><script src="preview.js"></script><script>fetch("research-notes.md").then((response) => response.text()).then((value) => location = `https://example.invalid/${value}`)</script>', /^text\/html/, 'isolated'],
     ['active.js', 'window.top.location="https://example.invalid"', /^(?:text|application)\/javascript/, 'source'],
     ['active.svg', '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script><a href="https://example.invalid"><text>label</text></a><animate attributeName="href" to="https://example.invalid"><circle cx="2" cy="2" r="1" /></svg>', /^image\/svg\+xml/, 'isolated'],
   ] as const) {
@@ -264,55 +263,48 @@ test('Open Terminal compatibility provides native files through a transparent fe
       assert.match(inlineResponse.headers.get('content-type') ?? '', /^text\/plain/, name);
       assert.equal(inlineBody, content, name);
     } else {
-      assert.match(inlineResponse.headers.get('content-type') ?? '', /^text\/html/, name);
-      assert.match(inlineResponse.headers.get('content-security-policy') ?? '', /frame-src http:\/\/preview-test\.localhost/, name);
-      assert.match(inlineBody, /sandbox=""/, name);
-      assert.doesNotMatch(inlineBody, /allow-scripts|allow-same-origin|allow-downloads/u, name);
-      assert.doesNotMatch(inlineBody, /window\.top\.location|<svg xmlns=/u, name);
-      const source = inlineBody.match(/<iframe[^>]+src="([^"]+)"/u)?.[1]?.replaceAll('&amp;', '&');
-      assert.ok(source, `${name} wrapper must contain an isolated preview URL`);
-      if (name === 'active.html') isolatedHtmlUrl = source;
-      if (name === 'active.svg') isolatedSvgUrl = source;
+      const policy = inlineResponse.headers.get('content-security-policy') ?? '';
+      assert.match(inlineResponse.headers.get('content-type') ?? '', contentType, name);
+      if (name === 'active.html') {
+        assert.match(policy, /(?:^|; )sandbox allow-scripts(?:;|$)/u);
+        assert.doesNotMatch(policy, /allow-same-origin|allow-forms|allow-popups|allow-downloads|allow-top-navigation/u);
+        assert.match(policy, /script-src [^;]*'unsafe-inline'[^;]*https:/u);
+        assert.match(policy, /connect-src [^;]*https:[^;]*wss:/u);
+        assert.match(policy, /form-action 'none'/u);
+        assert.match(inlineBody, /data-qubicl-interactive-preview="true"/u);
+        assert.match(inlineBody, /Trusted content only/u);
+        assert.match(inlineBody, /<button id="qubicl-run-interactive"[^>]*>Run interactive preview<\/button>/u);
+        assert.match(inlineBody, /title="Safe static file preview" sandbox=""/u);
+        assert.match(inlineBody, /setTimeout\(expire,300000\)/u);
+        assert.doesNotMatch(inlineBody, /href=|\/files\/interactive\/|\.localhost|preview-test/u);
+        const encoded = inlineBody.match(/id="qubicl-interactive-source" data-source="([A-Za-z0-9+/=]+)"/u)?.[1];
+        assert.ok(encoded, 'scripted HTML must embed its exact trusted snapshot without another authenticated navigation');
+        const trusted = Buffer.from(encoded, 'base64').toString('utf8');
+        assert.match(trusted, /Content-Security-Policy/u);
+        assert.match(trusted, /<script src="preview\.js"><\/script>/u);
+        assert.match(trusted, /fetch\("research-notes\.md"\)/u);
+      } else {
+        assert.match(policy, /(?:^|; )sandbox(?:;|$)/, name);
+        assert.match(policy, /connect-src 'none'/, name);
+        assert.match(policy, /script-src 'none'/, name);
+        assert.match(policy, /img-src data:/, name);
+        assert.doesNotMatch(policy, /'self'/, name);
+        assert.doesNotMatch(inlineBody, /<iframe|preview-test|\.localhost|allow-scripts|allow-same-origin|allow-downloads/u, name);
+        assert.doesNotMatch(inlineBody, /<script|<meta|href="https:\/\/example\.invalid|action=/iu, name);
+        assert.match(inlineBody, /<text>label<\/text>/u);
+        assert.doesNotMatch(inlineBody, /<animate|href="https:\/\/example\.invalid/iu);
+      }
     }
   }
-  const isolated = new URL(isolatedHtmlUrl);
-  const isolatedPath = isolated.pathname.replace('/computers/test/previews/', '/_qubicl/previews/');
-  const isolatedResponse = await fetch(`http://127.0.0.1:${port}${isolatedPath}${isolated.search}`);
-  assert.equal(isolatedResponse.status, 200);
-  assert.match(isolatedResponse.headers.get('content-type') ?? '', /^text\/html/);
-  assert.match(isolatedResponse.headers.get('content-security-policy') ?? '', /(?:^|; )sandbox(?:;|$)/);
-  assert.match(isolatedResponse.headers.get('content-security-policy') ?? '', /connect-src 'none'/);
-  assert.match(isolatedResponse.headers.get('content-security-policy') ?? '', /script-src 'none'/);
-  assert.doesNotMatch(isolatedResponse.headers.get('content-security-policy') ?? '', /allow-scripts|allow-same-origin|allow-downloads/u);
-  const isolatedBody = await isolatedResponse.text();
-  assert.match(isolatedBody, /<link rel="stylesheet" href="preview\.css">/u);
-  assert.match(isolatedBody, />link<\/a>/u);
-  assert.match(isolatedBody, />submit<\/button><\/form>/u);
-  assert.doesNotMatch(isolatedBody, /<script|<meta|href="https:\/\/example\.invalid|action=/iu);
-  const previewCookie = isolatedResponse.headers.get('set-cookie')?.split(';', 1)[0];
-  assert.ok(previewCookie);
-  const relativeStylesheet = await fetch(new URL('preview.css', `http://127.0.0.1:${port}${isolatedPath}`).href, {
-    headers: { cookie: previewCookie },
-  });
-  assert.equal(relativeStylesheet.status, 200);
-  assert.match(relativeStylesheet.headers.get('content-type') ?? '', /^text\/css/);
-  assert.match(await relativeStylesheet.text(), /rgb\(1, 2, 3\)/u);
-  const isolatedSvg = new URL(isolatedSvgUrl);
-  const isolatedSvgPath = isolatedSvg.pathname.replace('/computers/test/previews/', '/_qubicl/previews/');
-  const svgResponse = await fetch(`http://127.0.0.1:${port}${isolatedSvgPath}${isolatedSvg.search}`);
-  assert.equal(svgResponse.status, 200);
-  assert.match(svgResponse.headers.get('content-type') ?? '', /^image\/svg\+xml/);
-  const staticSvg = await svgResponse.text();
-  assert.match(staticSvg, /<text>label<\/text>/u);
-  assert.doesNotMatch(staticSvg, /<script|<animate|href="https:\/\/example\.invalid/iu);
-  await writeFile(join(home, 'outside-preview.html'), '<p>outside selected directory</p>');
-  await symlink('../outside-preview.html', join(home, 'documents', 'outside-preview.html'));
-  const escapedScope = await fetch(new URL('outside-preview.html', `http://127.0.0.1:${port}${isolatedPath}`).href, {
-    headers: { cookie: previewCookie },
-  });
-  assert.equal(escapedScope.status, 403);
-  assert.match(await escapedScope.text(), /file_preview_scope/);
-  await rm(join(home, 'documents', 'outside-preview.html'));
+  await writeFile(join(home, 'outside-preview.css'), 'body { color: secret-outside-scope; }');
+  await symlink('../outside-preview.css', join(home, 'documents', 'escaped.css'));
+  await writeFile(join(home, 'documents', 'asset-scope.html'), '<link rel="stylesheet" href="escaped.css"><p>safe document</p>');
+  const escapedScope = await fetch(`${base}/files/serve/${join(home, 'documents', 'asset-scope.html').slice(1)}`);
+  assert.equal(escapedScope.status, 200);
+  const escapedBody = await escapedScope.text();
+  assert.match(escapedBody, /<p>safe document<\/p>/u);
+  assert.doesNotMatch(escapedBody, /secret-outside-scope|<link/iu);
+  await rm(join(home, 'documents', 'escaped.css'));
   await mkdir(join(home, 'private-preview'));
   await writeFile(join(home, 'private-preview', 'target.html'), '<p>private target</p>');
   await symlink('../private-preview/target.html', join(home, 'documents', 'linked-preview.html'));
@@ -324,11 +316,12 @@ test('Open Terminal compatibility provides native files through a transparent fe
   assert.match(linkedDownload.headers.get('content-disposition') ?? '', /^attachment;/);
   assert.equal(await linkedDownload.text(), '<p>private target</p>');
   await rm(join(home, 'documents', 'linked-preview.html'));
-  const remoteWrapper = await fetch(`${base}/files/serve/${join(home, 'documents', 'active.html').slice(1)}`, {
+  const remoteCompatible = await fetch(`${base}/files/serve/${join(home, 'documents', 'active.html').slice(1)}`, {
     headers: { 'x-qubicl-access-surface': 'external' },
   });
-  assert.equal(remoteWrapper.status, 200);
-  assert.match(await remoteWrapper.text(), /https:\/\/preview-test\.example\.test\/computers\/test\/previews\//);
+  assert.equal(remoteCompatible.status, 200);
+  assert.match(remoteCompatible.headers.get('content-security-policy') ?? '', /(?:^|; )sandbox allow-scripts(?:;|$)/);
+  assert.doesNotMatch(await remoteCompatible.text(), /preview-test|\.localhost/iu);
   const nativeImage = await fetch(`${base}/files/view?path=${encodeURIComponent(imagePath)}`);
   assert.match(nativeImage.headers.get('content-disposition') ?? '', /^inline;/);
   assert.equal(nativeImage.headers.get('content-type'), 'image/png');
