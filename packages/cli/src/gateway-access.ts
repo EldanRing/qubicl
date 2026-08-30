@@ -424,8 +424,9 @@ export function gatewayExposureProbeHost(
   exposure: Pick<GatewayExposureConfig, 'bindAddress' | 'allowedNetworks'>,
   interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
 ): string | undefined {
-  if (exposure.bindAddress !== '0.0.0.0' && exposure.bindAddress !== '::') return exposure.bindAddress;
-  const family = exposure.bindAddress === '0.0.0.0' ? 'IPv4' : 'IPv6';
+  const bindVersion = isIP(exposure.bindAddress);
+  const family = bindVersion === 4 ? 'IPv4' : 'IPv6';
+  const blockListFamily = bindVersion === 4 ? 'ipv4' : 'ipv6';
   const blockList = new BlockList();
   for (const network of exposure.allowedNetworks) {
     const separator = network.lastIndexOf('/');
@@ -433,12 +434,15 @@ export function gatewayExposureProbeHost(
     const version = isIP(address);
     blockList.addSubnet(address, Number(network.slice(separator + 1)), version === 4 ? 'ipv4' : 'ipv6');
   }
+  if (exposure.bindAddress !== '0.0.0.0' && exposure.bindAddress !== '::') {
+    return blockList.check(exposure.bindAddress, blockListFamily) ? exposure.bindAddress : undefined;
+  }
   return Object.values(interfaces).flat()
     .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined)
     .filter((entry) => !entry.internal && entry.family === family)
     .map(({ address }) => address)
     .toSorted()
-    .find((address) => blockList.check(address, family === 'IPv4' ? 'ipv4' : 'ipv6'));
+    .find((address) => blockList.check(address, blockListFamily));
 }
 
 export async function materializeGatewayExposure(state: LoadedState): Promise<void> {

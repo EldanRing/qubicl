@@ -81,6 +81,12 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Stopped gateway replacement and legacy runtime migration now use a Docker
+  Compose command whose dependency-suppression flags are supported by the
+  documented Compose baseline, so configuring remote access while the gateway
+  is stopped can recover without starting it. Remote-access doctor checks also
+  report a manual external probe instead of a false TLS failure when a specific
+  host bind intentionally excludes the host itself from its client allowlist.
 - Gateway and computer upgrades now reconstruct a target viewer contract from
   the exact acquired image while requiring the retained old runtime to match
   the transaction's immutable source binding, so v0.1-to-v0.2 roll-forward no

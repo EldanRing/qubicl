@@ -25,7 +25,18 @@ import {
   serviceName,
 } from '../../packages/cli/dist/runtime.js';
 import { initializeState, statePaths } from '../../packages/cli/dist/state.js';
-import { migrateLegacyRuntime, prepareRuntimeMigration, type LegacyRuntimeMigrationAdapter, type RuntimeInspection } from '../../packages/cli/dist/docker.js';
+import {
+  migrateLegacyRuntime,
+  prepareRuntimeMigration,
+  stoppedServiceCreationArgs,
+  type LegacyRuntimeMigrationAdapter,
+  type RuntimeInspection,
+} from '../../packages/cli/dist/docker.js';
+
+test('stopped services use a Compose command that supports dependency suppression', () => {
+  assert.deepEqual(stoppedServiceCreationArgs('gateway', false), ['up', '--no-start', '--no-deps', 'gateway']);
+  assert.deepEqual(stoppedServiceCreationArgs('computer', true), ['create', 'computer']);
+});
 
 test('gateway runtime is hardened without arbitrary CPU or memory limits', async () => {
   const root = await mkdtemp(join(tmpdir(), 'qubicl-runtime-security-'));
@@ -319,7 +330,7 @@ test('protocol 9 computers remain renderable as split runtimes for rolling upgra
 test('legacy runtime migration verifies ownership and preserves gateway lifecycle state', async () => {
   for (const scenario of [
     { status: 'running', expectedCompose: ['up', '--detach', '--no-deps', 'gateway'], waits: 1 },
-    { status: 'exited', expectedCompose: ['create', '--no-deps', 'gateway'], waits: 0 },
+    { status: 'exited', expectedCompose: ['up', '--no-start', '--no-deps', 'gateway'], waits: 0 },
   ]) {
     const root = await mkdtemp(join(tmpdir(), `qubicl-runtime-migrate-${scenario.status}-`));
     try {

@@ -348,6 +348,25 @@ test('wildcard exposure probes an assigned non-loopback address inside the allow
   }, interfaces), undefined);
 });
 
+test('specific exposure requires the bound host address to be locally probeable through the allowlist', () => {
+  assert.equal(gatewayExposureProbeHost({
+    bindAddress: '192.168.1.20',
+    allowedNetworks: ['192.168.1.0/24'],
+  }), '192.168.1.20');
+  assert.equal(gatewayExposureProbeHost({
+    bindAddress: '192.168.1.20',
+    allowedNetworks: ['192.168.2.0/24'],
+  }), undefined);
+  assert.equal(gatewayExposureProbeHost({
+    bindAddress: '2001:db8::20',
+    allowedNetworks: ['2001:db8::/64'],
+  }), '2001:db8::20');
+  assert.equal(gatewayExposureProbeHost({
+    bindAddress: '2001:db8::20',
+    allowedNetworks: ['2001:db9::/64'],
+  }), undefined);
+});
+
 test('TLS input validation snapshots a matching bounded certificate without retaining source paths', async () => {
   const fixture = await writeGatewayTlsFixture();
   try {

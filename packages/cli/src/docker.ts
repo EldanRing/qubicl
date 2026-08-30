@@ -690,8 +690,14 @@ async function restoreService(state: LoadedState, service: string, name: string,
     if (desired === 'paused') await adapter.docker(['pause', name]);
     return;
   }
-  if (!existing) await adapter.compose(state, ['create', ...(includeDependencies ? [] : ['--no-deps']), service]);
+  if (!existing) await adapter.compose(state, stoppedServiceCreationArgs(service, includeDependencies));
   else if (existingStatus !== 'stopped') await adapter.compose(state, ['stop', service]);
+}
+
+export function stoppedServiceCreationArgs(service: string, includeDependencies: boolean): string[] {
+  return includeDependencies
+    ? ['create', service]
+    : ['up', '--no-start', '--no-deps', service];
 }
 
 async function inspectContainer(name: string): Promise<RuntimeInspection | undefined> {
@@ -2317,7 +2323,7 @@ export async function replaceStoppedGatewayRuntime(
     await docker(['rm', source.id]);
   }
   await assertGatewayPorts(state);
-  await compose(state, ['create', '--no-deps', 'gateway']);
+  await compose(state, stoppedServiceCreationArgs('gateway', false));
   const replacement = await strictLifecycleContainerInspection(name);
   if (!replacement) throw new Error('Stopped gateway replacement was not created.');
   verifyManagedGateway(state, replacement, name);
