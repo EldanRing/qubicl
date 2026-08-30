@@ -263,12 +263,12 @@ try {
       ['npm', '--archive', join(staging, npmArchive)],
       ['binary', '--archive', join(staging, binaryArchive)],
     ];
-    console.log(`Running exact artifact acceptance with at most ${LOCAL_CANDIDATE_CONCURRENCY} concurrent jobs.`);
-    await runWithConcurrency(acceptanceJobs, (args) => run(
-      process.execPath,
-      ['scripts/test-artifact-e2e.mjs', ...args],
-      { env: acceptanceEnvironment },
-    ));
+    console.log('Running exact artifact acceptance serially.');
+    for (const args of acceptanceJobs) {
+      await run(process.execPath, ['scripts/test-artifact-e2e.mjs', ...args], {
+        env: acceptanceEnvironment,
+      });
+    }
   }
 
   await assertSourceSnapshot('candidate manifest generation');

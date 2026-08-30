@@ -49,10 +49,10 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 ### Changed
 
 - Local multi-platform candidate builds now run at most two BuildKit image jobs
-  and two exact-artifact acceptance jobs concurrently. Acceptance runs use
-  disjoint ports and unique temporary image tags, while scans, OCI analysis,
-  and final verification remain serial and failed work is drained before
-  staging is preserved.
+  concurrently, while lifecycle-heavy exact-artifact acceptance remains serial
+  with disjoint ports and unique temporary image tags. Scans, OCI analysis, and
+  final verification also remain serial, and failed concurrent work is drained
+  before staging is preserved.
 - The workstation image now installs the supported LibreOffice Writer, Calc,
   and Impress applications directly instead of the full suite meta-package,
   removing unused Base, Math, report-builder, and Python-UNO packages from both

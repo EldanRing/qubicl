@@ -68,7 +68,7 @@ test('artifact acceptance receives disjoint ports and unique Docker image namesp
   assert.throws(() => artifactAcceptanceIsolation('unknown', '/tmp/unknown'), /source, npm, or binary/);
 });
 
-test('candidate assembly wires bounded builds and collision-safe artifact acceptance', async () => {
+test('candidate assembly wires bounded builds and isolated serial artifact acceptance', async () => {
   const [builder, harness, e2e] = await Promise.all([
     readFile(join(process.cwd(), 'scripts', 'build-local-candidates.mjs'), 'utf8'),
     readFile(join(process.cwd(), 'scripts', 'test-artifact-e2e.mjs'), 'utf8'),
@@ -77,7 +77,8 @@ test('candidate assembly wires bounded builds and collision-safe artifact accept
 
   assert.match(builder, /runWithConcurrency\(imageSpecs, buildImageCandidate\)/u);
   assert.match(builder, /for \(const spec of imageSpecs\) await scanImageCandidate\(spec\)/u);
-  assert.match(builder, /runWithConcurrency\(acceptanceJobs/u);
+  assert.match(builder, /for \(const args of acceptanceJobs\)/u);
+  assert.doesNotMatch(builder, /runWithConcurrency\(acceptanceJobs/u);
   assert.match(harness, /artifactAcceptanceIsolation\(mode, temporary\)/u);
   assert.match(e2e, /QUBICL_E2E_PORT_START/u);
   assert.match(e2e, /QUBICL_E2E_PORT_END/u);
