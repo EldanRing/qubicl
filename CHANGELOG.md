@@ -81,6 +81,11 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Runtime performance and reboot-acceptance harnesses now execute bounded,
+  current package workloads in the unified protocol-10 computer container
+  while retaining legacy split-topology coverage; the CLI RSS guard also has
+  measured v0.2 runtime headroom instead of a flaky v0.1 ceiling, and image
+  budgets use the selected catalog's verified download measurements.
 - Stopped gateway replacement and legacy runtime migration now use a Docker
   Compose command whose dependency-suppression flags are supported by the
   documented Compose baseline, so configuring remote access while the gateway

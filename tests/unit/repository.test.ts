@@ -362,5 +362,7 @@ test('performance checks are local and dependency-free', async () => {
   assert.doesNotMatch(harness, /https?:\/\/(?!127\.0\.0\.1(?::|\/))/);
   assert.match(harness, /Full-topology self-test/);
   assert.match(harness, /QUBICL_HOME/);
+  assert.match(harness, /QUBICL_IMAGE_CATALOG_PATH/);
+  assert.match(harness, /downloadBytes/);
   assert.doesNotMatch(harness, /npm\s+publish|docker\s+push|gh\s+release/);
 });

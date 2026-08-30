@@ -6,7 +6,7 @@ import process from 'node:process';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
-import { computerExecutorContainerName, computerResourceEnvelope, computerRuntimeContainerNames, computerSessionContainerName, gatewayContainerName } from '../packages/cli/dist/runtime.js';
+import { computerContainerName, computerExecutorContainerName, computerResourceEnvelope, computerRuntimeContainerNames, computerSessionContainerName, gatewayContainerName, usesUnifiedComputerRuntime } from '../packages/cli/dist/runtime.js';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const options = parseArgs(process.argv.slice(2));
@@ -17,15 +17,18 @@ const timeAvailable = await stat('/usr/bin/time').then(() => true, () => false);
 const revision = await command('git', ['rev-parse', 'HEAD']);
 const dirty = (await command('git', ['status', '--porcelain'])).stdout.trim().length > 0;
 const build = await timed('npm', ['run', 'build']);
-const { CURATED_PRESETS, IMAGE_CATALOG, PRESET_DEFINITIONS } = await import('../packages/core/dist/index.js');
+const { CURATED_PRESETS, IMAGE_CATALOG, ImageCatalogSchema, PRESET_DEFINITIONS } = await import('../packages/core/dist/index.js');
+const catalog = process.env.QUBICL_IMAGE_CATALOG_PATH
+  ? ImageCatalogSchema.parse(JSON.parse(await readFile(resolve(process.env.QUBICL_IMAGE_CATALOG_PATH), 'utf8')))
+  : IMAGE_CATALOG;
 const help = await repeated(process.execPath, [cli, 'help'], iterations);
 const version = await repeated(process.execPath, [cli, 'version'], iterations);
 const packed = await packageMeasurement();
 const images = {
-  gateway: await imageMeasurement(currentReference(IMAGE_CATALOG.gateway)),
+  gateway: await imageMeasurement(catalog.gateway),
   ...Object.fromEntries(await Promise.all(CURATED_PRESETS.map(async (preset) => [
     preset,
-    await imageMeasurement(currentReference(IMAGE_CATALOG.presets[preset].image)),
+    await imageMeasurement(catalog.presets[preset].image),
   ]))),
 };
 const runtime = options.runtime ? await runtimeMeasurements() : undefined;
@@ -40,6 +43,11 @@ const report = {
     architecture: process.arch,
     node: process.versions.node,
     npm: (await command('npm', ['--version'])).stdout.trim(),
+  },
+  catalog: {
+    releaseVersion: catalog.releaseVersion,
+    revision: catalog.revision,
+    development: catalog.development,
   },
   iterations,
   build: summarize([build]),
@@ -73,16 +81,26 @@ async function packageMeasurement() {
   };
 }
 
-async function imageMeasurement(reference) {
+async function imageMeasurement(catalogImage) {
+  const platform = `linux/${process.arch === 'x64' ? 'amd64' : process.arch}`;
+  const variant = catalogImage.platforms[platform];
+  const reference = currentReference(catalogImage);
   const result = await command('docker', ['image', 'inspect', reference, '--format', '{{json .}}'], true);
-  if (result.code !== 0) return { reference, available: false };
-  const image = JSON.parse(result.stdout);
+  if (result.code !== 0) return {
+    reference,
+    available: false,
+    downloadBytes: variant?.downloadBytes ?? null,
+    expandedBytes: variant?.expandedBytes ?? null,
+  };
+  const inspected = JSON.parse(result.stdout);
   return {
     reference,
     available: true,
-    platformContentBytes: image.Size,
-    operatingSystem: image.Os,
-    architecture: image.Architecture,
+    localPlatformBytes: inspected.Size,
+    downloadBytes: variant?.downloadBytes ?? null,
+    expandedBytes: variant?.expandedBytes ?? null,
+    operatingSystem: inspected.Os,
+    architecture: inspected.Architecture,
   };
 }
 
@@ -148,16 +166,18 @@ async function assertTopologyHealthy(gateway, state, computers) {
 async function runPresetWorkload(state, computer, preset) {
   const executor = computerExecutorContainerName(state, computer);
   const session = computerSessionContainerName(state, computer);
-  const container = ['browser', 'computer'].includes(preset) ? session : executor;
+  const container = usesUnifiedComputerRuntime(computer)
+    ? computerContainerName(state, computer)
+    : ['browser', 'computer'].includes(preset) ? session : executor;
   const common = 'set -e; test "$(id -un)" = qubicl; mkdir -p /home/qubicl/performance; cd /home/qubicl/performance';
   const workload = preset === 'file-system'
     ? `${common}; git init -q; git config user.email local@example.invalid; git config user.name Qubicl; printf before >sample; sed -i 's/^before$/after/' sample; test "$(cat sample)" = after; head -c 1048576 /dev/zero | tr '\\0' x >/tmp/one-megabyte; test "$(wc -c </tmp/one-megabyte)" -eq 1048576; seq 1 500 | xargs touch`
-    : preset === 'browser'
-      ? `${common}; export DISPLAY=:0; chromium --new-tab 'data:text/html,<title>Qubicl%20performance</title>' 'data:text/html,<h1>second</h1>' 'data:text/html,<h1>third</h1>' >/tmp/chromium-tabs.log 2>&1; sleep 2; scrot /home/qubicl/performance/browser.png; test -s browser.png; xdotool mousemove 80 80; printf clipboard | xclip -selection clipboard; test "$(xclip -selection clipboard -o)" = clipboard`
+      : preset === 'browser'
+      ? `${common}; export DISPLAY=:0; timeout --signal=TERM 10s chromium --new-tab 'data:text/html,<title>Qubicl%20performance</title>' 'data:text/html,<h1>second</h1>' 'data:text/html,<h1>third</h1>' >/tmp/chromium-tabs.log 2>&1 || test "$?" -eq 124; sleep 2; scrot /home/qubicl/performance/browser.png; test -s browser.png; xdotool mousemove 80 80; printf clipboard | xclip -selection clipboard; test "$(xclip -selection clipboard -o)" = clipboard`
       : preset === 'computer'
-        ? `${common}; export DISPLAY=:0; command -v thunar; command -v mousepad; command -v ristretto; command -v atril; printf desktop >desktop.txt; mousepad desktop.txt >/tmp/mousepad.log 2>&1 & sleep 2; xdotool search --onlyvisible --name 'desktop.txt' >/dev/null; pkill -x mousepad`
+        ? `${common}; export DISPLAY=:0; command -v thunar; command -v mousepad; command -v pdftotext; command -v tesseract; printf desktop >desktop.txt; mousepad desktop.txt >/tmp/mousepad.log 2>&1 & sleep 2; xdotool search --onlyvisible --name 'desktop.txt' >/dev/null; pkill -x mousepad`
         : `${common}; printf '#include <stdio.h>\nint main(void){puts("ok");}\n' >check.c; cc check.c -o check; test "$(./check)" = ok; python3 -c 'from pathlib import Path; Path("python-ok").write_text("ok")'; pip3 --version >/dev/null; printf office >office.txt; libreoffice --headless --convert-to pdf --outdir . office.txt >/tmp/libreoffice-performance.log 2>&1; test -s office.pdf`;
-  const result = await command('docker', ['exec', container, 'runuser', '-u', 'qubicl', '--', 'bash', '-ceu', workload], true);
+  const result = await command('docker', ['exec', container, 'timeout', '--signal=KILL', '120s', 'runuser', '-u', 'qubicl', '--', 'bash', '-ceu', workload], true);
   if (result.code !== 0) throw new Error(`${preset} recommendation workload failed: ${result.stderr.trim()}`);
 }
 
@@ -254,15 +274,18 @@ function evaluateBudgets(report) {
     // 125 ms leaves ordinary local scheduling jitter without masking regressions.
     budget('CLI help p95 milliseconds', report.cli.help.elapsedMs.p95, 125),
   ];
-  if (report.cli.help.maxRssKiB) checks.push(budget('CLI help max RSS KiB', report.cli.help.maxRssKiB.max, 96 * 1024));
-  if (report.images.gateway.available) checks.push(budget('gateway platform bytes', report.images.gateway.platformContentBytes, 65_000_000));
+  // The v0.2 Node-wrapped CLI measures about 97 MiB on the release host while
+  // the exact native artifact measures about 93 MiB. Keep modest runtime/ASLR
+  // headroom without allowing a materially larger dependency graph to land.
+  if (report.cli.help.maxRssKiB) checks.push(budget('CLI help max RSS KiB', report.cli.help.maxRssKiB.max, 104 * 1024));
+  if (report.images.gateway.downloadBytes !== null) checks.push(budget('gateway download bytes', report.images.gateway.downloadBytes, 65_000_000));
   // The universal local web service, source skill catalog, and common CLI utilities
   // are present in every image. Browser adds Chromium, OCR, and its smaller
   // document closure; computer adds XFCE, SSH, and the full document closure;
   // workstation adds LibreOffice and the compiler toolchain.
   const imageBudgets = { 'file-system': 205_000_000, browser: 625_000_000, computer: 675_000_000, workstation: 925_000_000 };
   for (const [preset, maximum] of Object.entries(imageBudgets)) {
-    if (report.images[preset].available) checks.push(budget(`${preset} platform bytes`, report.images[preset].platformContentBytes, maximum));
+    if (report.images[preset].downloadBytes !== null) checks.push(budget(`${preset} download bytes`, report.images[preset].downloadBytes, maximum));
     if (report.runtime?.[preset]) checks.push(budget(`${preset} startup milliseconds`, report.runtime[preset].startupMs, report.runtime[preset].startupBudgetMs));
   }
   return checks;
@@ -280,7 +303,10 @@ function printSummary(report, budgets) {
   console.log(`CLI version  p95 ${formatMs(report.cli.version.elapsedMs.p95)}; peak RSS ${formatRss(report.cli.version.maxRssKiB?.max)}`);
   console.log(`npm package  ${formatBytes(report.package.packedBytes)} packed; ${formatBytes(report.package.unpackedBytes)} unpacked; ${report.package.files.length} files`);
   for (const image of Object.values(report.images)) {
-    console.log(`${image.reference.padEnd(27)} ${image.available ? formatBytes(image.platformContentBytes) : 'not available locally'}`);
+    const measured = image.downloadBytes === null
+      ? 'download size unmeasured'
+      : `${formatBytes(image.downloadBytes)} download${image.expandedBytes === null ? '' : `; ${formatBytes(image.expandedBytes)} expanded`}`;
+    console.log(`${image.reference.padEnd(27)} ${measured}; ${image.available ? `${formatBytes(image.localPlatformBytes)} local` : 'not available locally'}`);
   }
   if (report.runtime) {
     for (const [preset, measurement] of Object.entries(report.runtime)) {

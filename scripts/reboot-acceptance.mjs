@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import YAML from 'yaml';
-import { computerContainerName, computerExecutorContainerName, computerRuntimeContainerNames, gatewayContainerName } from '../packages/cli/dist/runtime.js';
+import { computerContainerName, computerExecutorContainerName, computerRuntimeContainerNames, gatewayContainerName, usesUnifiedComputerRuntime } from '../packages/cli/dist/runtime.js';
 
 const execFile = promisify(execFileCallback);
 const action = process.argv[2];
@@ -44,10 +44,11 @@ function runDocker(args) {
 
 export function resolveRebootRuntimeNames(config, computer, stateRoot = root) {
   const state = { paths: { root: stateRoot }, config };
+  const control = computerContainerName(state, computer);
   return {
     gateway: gatewayContainerName(config.installationId, stateRoot),
-    control: computerContainerName(state, computer),
-    executor: computerExecutorContainerName(state, computer),
+    control,
+    executor: usesUnifiedComputerRuntime(computer) ? control : computerExecutorContainerName(state, computer),
     all: computerRuntimeContainerNames(state, computer),
   };
 }
