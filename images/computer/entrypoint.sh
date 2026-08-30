@@ -65,6 +65,66 @@ if [[ "$requested_profile" != "$baked_profile" ]]; then
   exit 78
 fi
 
+browser_home_ownership_error() {
+  local path="$1"
+  echo "Qubicl browser storage ownership does not match this host (${expected_owner}): ${path}" >&2
+  echo "Stop this computer, then run: qubicl repair ownership ${QUBICL_NAME:-<name>}" >&2
+  exit 78
+}
+
+prepare_browser_parent_directory() {
+  local path="$1" owner
+  if [[ -L "$path" ]] || { [[ -e "$path" ]] && [[ ! -d "$path" ]]; }; then
+    browser_home_ownership_error "$path"
+  fi
+  if [[ ! -e "$path" ]]; then
+    runuser -u qubicl -- install -d -m 0700 "$path"
+  fi
+  owner="$(stat -c '%u:%g' -- "$path")"
+  if [[ "$owner" == 0:0 && "$owner" != "$expected_owner" ]]; then
+    # v0.2 prerelease session supervisors could create this exact managed
+    # ancestry as root before dropping Chromium to the computer user. Repair
+    # only the directory entry itself; never recurse through durable data.
+    chown --no-dereference qubicl:qubicl "$path"
+  elif [[ "$owner" != "$expected_owner" ]]; then
+    browser_home_ownership_error "$path"
+  fi
+  runuser -u qubicl -- test -d "$path" -a -w "$path" -a -x "$path" || browser_home_ownership_error "$path"
+}
+
+prepare_browser_leaf_directory() {
+  local path="$1" owner
+  if [[ -L "$path" ]] || { [[ -e "$path" ]] && [[ ! -d "$path" ]]; }; then
+    browser_home_ownership_error "$path"
+  fi
+  if [[ ! -e "$path" ]]; then
+    runuser -u qubicl -- install -d -m 0700 "$path"
+  fi
+  owner="$(stat -c '%u:%g' -- "$path")"
+  if [[ "$owner" == 0:0 && "$owner" != "$expected_owner" ]]; then
+    if find "$path" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+      browser_home_ownership_error "$path"
+    fi
+    chown --no-dereference qubicl:qubicl "$path"
+  elif [[ "$owner" != "$expected_owner" ]]; then
+    browser_home_ownership_error "$path"
+  fi
+  runuser -u qubicl -- chmod 0700 "$path"
+  runuser -u qubicl -- test -d "$path" -a -w "$path" -a -x "$path" || browser_home_ownership_error "$path"
+}
+
+prepare_browser_home() {
+  prepare_browser_parent_directory /home/qubicl/.local
+  prepare_browser_parent_directory /home/qubicl/.local/share
+  prepare_browser_parent_directory /home/qubicl/.local/share/qubicl
+  prepare_browser_leaf_directory /home/qubicl/.local/share/qubicl/browser-profile
+  prepare_browser_leaf_directory /home/qubicl/Downloads
+}
+
+if [[ "$runtime_role" == session || "$runtime_role" == computer ]] && [[ "$baked_profile" != file-system ]]; then
+  prepare_browser_home
+fi
+
 unused_viewer_id() {
   local database="$1" reserved="$2" candidate
   for candidate in $(seq 60000 -1 59000); do

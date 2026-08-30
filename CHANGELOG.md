@@ -81,6 +81,11 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Browser-capable computers now create the durable Chromium profile and
+  Downloads directory as the unprivileged computer user. Startup narrowly
+  repairs empty root-owned directories left by prerelease session supervision
+  while refusing nonempty or unrelated ownership mismatches with the existing
+  explicit ownership-repair guidance.
 - Runtime performance and reboot-acceptance harnesses now execute bounded,
   current package workloads in the unified protocol-10 computer container
   while retaining legacy split-topology coverage; the CLI RSS guard also has

@@ -311,6 +311,18 @@ test('ordinary computer startup never recursively rewrites a durable home', asyn
   assert.match(commands, /ownership-repair\.json/);
 });
 
+test('browser storage is prepared for the unprivileged Chromium process without recursive ownership changes', async () => {
+  const entrypoint = await readFile(join(root, 'images/computer/entrypoint.sh'), 'utf8');
+  assert.match(entrypoint, /prepare_browser_home\(\)/);
+  assert.match(entrypoint, /prepare_browser_leaf_directory \/home\/qubicl\/\.local\/share\/qubicl\/browser-profile/);
+  assert.match(entrypoint, /prepare_browser_leaf_directory \/home\/qubicl\/Downloads/);
+  assert.match(entrypoint, /runuser -u qubicl -- install -d -m 0700 "\$path"/);
+  assert.match(entrypoint, /"\$owner" == 0:0[\s\S]*?find "\$path" -mindepth 1 -maxdepth 1 -print -quit[\s\S]*?chown --no-dereference qubicl:qubicl "\$path"/);
+  assert.match(entrypoint, /browser_home_ownership_error[\s\S]*?qubicl repair ownership/);
+  assert.ok(entrypoint.indexOf('prepare_browser_home\nfi') < entrypoint.indexOf('start_internal_session()'));
+  assert.doesNotMatch(entrypoint, /chown\s+-[^\n]*R|chown\s+--recursive/);
+});
+
 test('viewer images isolate raw VNC behind authenticated dedicated-user Unix relays', async () => {
   const dockerfile = await readFile(join(root, 'images/computer/Dockerfile'), 'utf8');
   const entrypoint = await readFile(join(root, 'images/computer/entrypoint.sh'), 'utf8');
