@@ -41,6 +41,14 @@ let defaultCapabilityProbe: Promise<void> | undefined;
 
 export type BoundedFileOperation = 'list' | 'inspect' | 'read' | 'write' | 'edit' | 'copy' | 'move' | 'delete';
 
+export interface BoundedListOptions {
+  prepareDirectory?: (prefix: string) => Promise<void>;
+  include?: (name: string, directory: boolean) => boolean;
+  maximumDepth?: number;
+  maximumVisited?: number;
+  skipUnreadable?: boolean;
+}
+
 export interface BoundedFileHookEvent {
   operation: BoundedFileOperation;
   stage: 'parent-resolved' | 'destination-checked' | 'before-quarantine-cleanup' | 'before-parent-sync';
@@ -399,7 +407,7 @@ export class BoundedFileSystem {
     });
   }
 
-  async list(value: string, recursive: boolean, cursor: number, maxEntries: number, maximumEntryBytes = Number.POSITIVE_INFINITY): Promise<BoundedListResult> {
+  async list(value: string, recursive: boolean, cursor: number, maxEntries: number, maximumEntryBytes = Number.POSITIVE_INFINITY, options: BoundedListOptions = {}): Promise<BoundedListResult> {
     const path = this.absolutePath(value);
     return this.withRoot(async (root) => {
       const opened = await this.openExisting(root, path, 'list', true);
@@ -409,10 +417,15 @@ export class BoundedFileSystem {
         let resultBytes = 0;
         let position = 0;
         let truncated = false;
-        const visit = async (directory: FileHandle, prefix: string): Promise<boolean> => {
+        let visited = 0;
+        const visit = async (directory: FileHandle, prefix: string, depth = 0): Promise<boolean> => {
+          await options.prepareDirectory?.(prefix);
           const entries = (await readdir(this.descriptorPath(directory), { withFileTypes: true }))
             .sort((left, right) => left.name.localeCompare(right.name));
           for (const entry of entries) {
+            if (++visited > (options.maximumVisited ?? Infinity)) { truncated = true; return true; }
+            const name = prefix ? join(prefix, entry.name) : entry.name;
+            if (options.include && !options.include(name, entry.isDirectory())) continue;
             const entryPath = this.childPath(directory, entry.name);
             let info: Stats;
             try { info = await lstat(entryPath); }
@@ -420,7 +433,6 @@ export class BoundedFileSystem {
               if (errnoCode(error) === 'ENOENT') continue;
               throw error;
             }
-            const name = prefix ? join(prefix, entry.name) : entry.name;
             const type = entryType(info);
             if (position >= cursor) {
               if (results.length >= maxEntries) {
@@ -438,14 +450,16 @@ export class BoundedFileSystem {
             }
             position += 1;
             if (recursive && info.isDirectory()) {
+              if (depth >= (options.maximumDepth ?? Infinity)) { truncated = true; continue; }
               let child: FileHandle;
               try { child = await open(entryPath, READ_DIRECTORY_FLAGS); }
               catch (error) {
                 if (['ENOENT', 'ELOOP', 'ENOTDIR'].includes(errnoCode(error) ?? '')) continue;
+                if (options.skipUnreadable && ['EACCES', 'EPERM'].includes(errnoCode(error) ?? '')) { truncated = true; continue; }
                 throw error;
               }
               try {
-                if (await visit(child, name)) return true;
+                if (await visit(child, name, depth + 1)) return true;
               } finally {
                 await child.close();
               }

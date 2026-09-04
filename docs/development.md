@@ -8,20 +8,42 @@ Install a supported Node/npm and local Docker Engine/Desktop with Compose, then:
 
 ```sh
 npm ci
-npm run build
-npm run test:unit
-npm run check
+npm run build:types
+# Run the compiled tests relevant to your change, for example:
+node --test dist-tests/unit/contracts.test.js
 ```
 
 The repository pins npm 10.9.3 through `packageManager`/`devEngines`. `.nvmrc` pins normal Node development; release validation separately covers minimum Node 22 and Node 24 targets.
 
-`npm run check` performs strict TypeScript, Oxlint, unit/integration tests with coverage floors, and a high-severity npm audit. `npm run performance` checks package/CLI/all-five-image size budgets; add `-- --runtime` for one controlled four-preset startup/workload/60-second-idle run.
+Use `npm run build` when bundled artifacts are needed. `npm run test:unit` runs all unit tests after type compilation. These commands are alternatives selected for the changed surface, not prerequisites to repeat before `npm run check`.
+
+`npm run check` performs strict TypeScript, Oxlint, unit/integration tests with coverage floors, and a high-severity npm audit. `npm run performance -- --no-build` reuses the existing bundle and records no build timing; use it only after verifying the bundle matches the source under measurement. The default `npm run performance` includes build timing and checks package/CLI/all-five-image size budgets; add `-- --runtime` for one controlled four-preset startup/workload/60-second-idle run.
 
 Run `npm run tokens:audit` to print exact compact tool-definition bytes for every preset and static profile. The command fails if the lease-transparent full `workstation` catalog reaches the 26,000-byte regression ceiling, including skills and native web research. Set `QUBICL_TOKEN_METRICS=1` on a control service or stdio bridge to log size-only per-tool result/catalog events to stderr without logging tool arguments or result content.
 
 The pinned Python closure for the local web service is in `images/computer/web-requirements.txt`, including Trafilatura and the readability-lxml fallback. The smaller permissive browser PDF/OCR closure is in `images/computer/browser-skills-requirements.txt`; the fuller permissive document closure shared by `computer` and `workstation` is independently locked in `images/computer/skills-requirements.txt`. License summaries and retained dependency license texts ship with the relevant image. AGPL/commercial-only PyMuPDF packages are intentionally excluded. OCI SBOM and vulnerability gates inspect these installed packages, including the web extractor closure.
 
 Qubicl's six native skill baselines live under `skills/core`; the pinned generated record is `skills/core-catalog.json`. After an intentional package or definition change, run `npm run skills:catalog:update`. Every normal build runs `scripts/verify-skill-catalog.mjs` and fails if files, frontmatter, compatible presets, required tools, security findings, or reviewed digests drift. [Skill provenance](../skills/PROVENANCE.md) records the upstream reference and adaptation boundary; the complete Hermes source tree is not vendored, copied into release images, or exposed as a selectable catalog.
+
+For a focused browser-reference regression with an installed Chromium or Chrome
+executable, run:
+
+```sh
+npm run build:types
+QUBICL_TEST_BROWSER_EXECUTABLE=/usr/bin/chromium node --test dist-tests/integration/browser-refs.test.js
+```
+
+This test uses a temporary headless browser with network requests blocked. It
+checks insertion, reordering, replacement, and navigation without connecting to
+an existing browser profile. It skips when the executable variable is absent.
+
+For the optional real Office conversion regression, set
+`QUBICL_TEST_OFFICE_PYTHON` to a local Python with `python-docx` and `python-pptx`,
+then run `node --test dist-tests/integration/office-preview-real.test.js` after
+`npm run build:types`. It requires LibreOffice and Poppler, creates temporary
+DOCX/PPTX fixtures, checks PDF text and page counts, and removes its files.
+The ordinary Office unit tests cover failures, limits, cancellation, and cleanup
+without requiring LibreOffice.
 
 ## Image and setup acceptance
 
@@ -31,7 +53,7 @@ Build all local development targets once:
 npm run images:build
 ```
 
-Run this after updating the source and before exercising `qubicl setup`. The command rebuilds the gateway and all four preset images from the current checkout, then validates each preset's exact capability contract. If setup reports that a local `:dev` manifest digest does not match the catalog, rerun `npm run images:build` from the repository root before retrying setup.
+Use this full image build for acceptance that needs all presets. Focused source or documentation changes do not automatically require rebuilding every image. The command rebuilds the gateway and all four preset images from the current checkout, then validates each preset's exact capability contract. If setup reports that a local `:dev` manifest digest does not match the catalog, rerun `npm run images:build` from the repository root before retrying setup.
 
 The artifact harness covers state v1/v2 migration and recovery, sole `setup` onboarding, no-start/no-empty-gateway behavior, all four capability/startup profiles, custom derivation from every baseline, offline behavior, secret-free output, MCP/OpenAPI parity, viewer takeover, lifecycle continuity, persistence, and isolation:
 
@@ -82,7 +104,7 @@ gitleaks version
 npm run scan:secrets
 ```
 
-The command scans reachable history and worktree with redacted findings. Before public cutover, also scan every retained remote branch/PR ref in a temporary bare clone; worktree checks cannot remove GitHub-owned PR refs. Run `npm audit signatures` and review Trivy reports in candidate output.
+The command scans reachable history and worktree with redacted findings. Before public cutover, also scan every retained remote branch/PR ref in a temporary bare clone; worktree checks cannot remove GitHub-owned PR refs. `npm run check:release` already runs `npm audit signatures`; reuse that result for the same dependency bytes and review Trivy reports in candidate output. Repeat external security checks when their advisories, trust data, or required freshness change.
 
 Dependency review is manual and local. The repository does not configure
 Dependabot or another bot to open routine public update pull requests. Review

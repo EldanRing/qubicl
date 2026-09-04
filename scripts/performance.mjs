@@ -16,7 +16,7 @@ const timeAvailable = await stat('/usr/bin/time').then(() => true, () => false);
 
 const revision = await command('git', ['rev-parse', 'HEAD']);
 const dirty = (await command('git', ['status', '--porcelain'])).stdout.trim().length > 0;
-const build = await timed('npm', ['run', 'build']);
+const build = options.noBuild ? undefined : await timed('npm', ['run', 'build']);
 const { CURATED_PRESETS, IMAGE_CATALOG, ImageCatalogSchema, PRESET_DEFINITIONS } = await import('../packages/core/dist/index.js');
 const catalog = process.env.QUBICL_IMAGE_CATALOG_PATH
   ? ImageCatalogSchema.parse(JSON.parse(await readFile(resolve(process.env.QUBICL_IMAGE_CATALOG_PATH), 'utf8')))
@@ -50,7 +50,7 @@ const report = {
     development: catalog.development,
   },
   iterations,
-  build: summarize([build]),
+  build: build ? summarize([build]) : null,
   cli: { help: summarize(help), version: summarize(version) },
   package: packed,
   images,
@@ -298,7 +298,7 @@ function budget(name, observed, maximum) {
 function printSummary(report, budgets) {
   console.log('Qubicl local performance report');
   console.log(`source       ${report.source.revision.slice(0, 12)}${report.source.dirty ? ' (dirty)' : ''}`);
-  console.log(`build        ${formatMs(report.build.elapsedMs.p95)}; peak RSS ${formatRss(report.build.maxRssKiB?.max)}`);
+  console.log(report.build ? `build        ${formatMs(report.build.elapsedMs.p95)}; peak RSS ${formatRss(report.build.maxRssKiB?.max)}` : 'build        reused existing artifacts; build timing not measured');
   console.log(`CLI help     p95 ${formatMs(report.cli.help.elapsedMs.p95)}; peak RSS ${formatRss(report.cli.help.maxRssKiB?.max)}`);
   console.log(`CLI version  p95 ${formatMs(report.cli.version.elapsedMs.p95)}; peak RSS ${formatRss(report.cli.version.maxRssKiB?.max)}`);
   console.log(`npm package  ${formatBytes(report.package.packedBytes)} packed; ${formatBytes(report.package.unpackedBytes)} unpacked; ${report.package.files.length} files`);
@@ -352,6 +352,7 @@ function parseArgs(args) {
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index];
     if (value === '--json') parsed.json = true;
+    else if (value === '--no-build') parsed.noBuild = true;
     else if (value === '--runtime') parsed.runtime = true;
     else if (value === '--output' || value === '--binary' || value === '--iterations') {
       const next = args[index + 1];
@@ -360,7 +361,7 @@ function parseArgs(args) {
       parsed[key] = key === 'iterations' ? Number(next) : next;
       index += 1;
     } else if (value === '--help') {
-      console.log('Usage: npm run performance -- [--runtime] [--json] [--output report.json] [--iterations 10] [--binary path]');
+      console.log('Usage: npm run performance -- [--no-build] [--runtime] [--json] [--output report.json] [--iterations 10] [--binary path]');
       process.exit(0);
     } else throw new Error(`Unknown option ${value}.`);
   }

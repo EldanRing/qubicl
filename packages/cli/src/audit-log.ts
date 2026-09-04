@@ -58,7 +58,7 @@ export async function auditCommand(args: ParsedArgs): Promise<void> {
     if (!flag(args, 'yes')) throw new Error('Audit pruning requires --yes.');
     const keep = numberOption(args, 'keep') ?? 1000;
     if (!Number.isInteger(keep) || keep < 0) throw new Error('--keep must be a non-negative integer.');
-    const retained = (await lines(path)).slice(-keep);
+    const retained = keep === 0 ? [] : (await lines(path)).slice(-keep);
     await truncate(path, 0); await appendFile(path, retained.length ? `${retained.join('\n')}\n` : '', { mode: 0o600 });
     console.log(`Retained ${retained.length} audit events for ${name}.`); return;
   }

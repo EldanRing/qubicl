@@ -5,9 +5,9 @@ description: Create a concrete, reviewable implementation or project plan withou
 
 # Plan
 
-Stay in planning mode for this turn. Inspect relevant context with read-only Qubicl tools, but do not edit project files, start deployments, publish, commit, or perform the proposed work.
+Plan the requested work without implementing it. Inspect relevant context with read-only Qubicl tools. Do not change implementation files, start deployments, publish, or commit as part of planning.
 
-Write a concise Markdown plan in the active workspace. Prefer `write_file` for a new plan and `edit_file` for an existing one. Use a user-provided destination; otherwise write under `.agents/plans/` with a descriptive kebab-case filename.
+Return a concise Markdown plan in the conversation. If the user requests a saved plan, writing that plan is the only planned file change: prefer `write_file` for a new plan and `edit_file` for an existing one. Use a user-provided destination; otherwise use `.agents/plans/` with a descriptive kebab-case filename. A request for read-only planning does not authorize creating a plan file.
 
 Include only useful sections:
 

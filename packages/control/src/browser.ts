@@ -6,7 +6,7 @@ import type {
   Browser,
   BrowserContext,
   BrowserType,
-  Locator,
+  ElementHandle,
   Page,
 } from 'playwright-core';
 import { MODEL_TEXT_BUDGET_BYTES } from '@qubicl/core';
@@ -106,8 +106,9 @@ export class BrowserManager {
   private contextPromise: Promise<BrowserContext> | undefined;
   private connectedBrowser: Browser | undefined;
   private activePage: Page | undefined;
-  private references = new Map<string, Locator>();
+  private references = new Map<string, ElementHandle<SVGElement | HTMLElement>>();
   private referenceGeneration = 0;
+  private referenceEpoch = 0;
   private operationQueue = Promise.resolve<unknown>(undefined);
 
   constructor(private readonly enabled: boolean, options: BrowserManagerOptions = {}) {
@@ -141,7 +142,7 @@ export class BrowserManager {
     return this.enqueue(async () => {
       const page = await this.getPage();
       await page.goto(safeHttpUrl(url), { waitUntil: 'domcontentloaded', timeout: 30_000 });
-      this.references.clear();
+      this.clearReferences();
       return pageState(page);
     });
   }
@@ -211,74 +212,94 @@ export class BrowserManager {
         '[role=menuitem]',
         '[role=option]',
       ].join(',');
+      this.clearReferences();
+      const epoch = this.referenceEpoch;
       const candidates = page.locator(selector);
       const count = Math.min(await candidates.count(), MAX_INTERACTIVE_ELEMENTS);
       const generation = ++this.referenceGeneration;
-      const candidatesWithDetails: Array<{ locator: Locator; details: { tag: string; role: string; name: string; type: string; disabled: boolean } }> = [];
-      for (let index = 0; index < count; index += 1) {
-        const locator = candidates.nth(index);
-        if (!await locator.isVisible().catch(() => false)) continue;
-        const details = await locator.evaluate((element) => {
-          const text = (element.textContent ?? '').trim().replace(/\s+/g, ' ');
-          const input = element as HTMLInputElement;
-          return {
-            tag: element.tagName.toLowerCase(),
-            role: element.getAttribute('role') ?? '',
-            name: element.getAttribute('aria-label')
-              ?? element.getAttribute('title')
-              ?? element.getAttribute('placeholder')
-              ?? text
-              ?? input.value
-              ?? '',
-            type: element.getAttribute('type') ?? '',
-            disabled: Boolean(input.disabled) || element.getAttribute('aria-disabled') === 'true',
+      const handles = new Set<ElementHandle<SVGElement | HTMLElement>>();
+      try {
+        const candidatesWithDetails: Array<{ locator: ElementHandle<SVGElement | HTMLElement>; details: { tag: string; role: string; name: string; type: string; disabled: boolean } }> = [];
+        // Bound concurrent protocol requests while preserving DOM candidate order.
+        for (let start = 0; start < count; start += 16) {
+          const batch = await Promise.all(Array.from({ length: Math.min(16, count - start) }, async (_, offset) => {
+            const index = start + offset;
+            // A model ref names this exact node, not a selector that can resolve to
+            // a different node after the page changes. Query without waiting for a
+            // vanished positional candidate to reappear.
+            const locator = await page.$(`${selector} >> nth=${index}`).catch(() => null);
+            if (!locator) return undefined;
+            handles.add(locator);
+            if (!await locator.isVisible().catch(() => false)) return undefined;
+            const details = await locator.evaluate((element) => {
+              const text = (element.textContent ?? '').trim().replace(/\s+/g, ' ');
+              const input = element as HTMLInputElement;
+              return {
+                tag: element.tagName.toLowerCase(),
+                role: element.getAttribute('role') ?? '',
+                name: element.getAttribute('aria-label')
+                  ?? element.getAttribute('title')
+                  ?? element.getAttribute('placeholder')
+                  ?? text
+                  ?? input.value
+                  ?? '',
+                type: element.getAttribute('type') ?? '',
+                disabled: Boolean(input.disabled) || element.getAttribute('aria-disabled') === 'true',
+              };
+            }).catch(() => undefined);
+            return details ? { locator, details } : undefined;
+          }));
+          for (const candidate of batch) if (candidate) candidatesWithDetails.push(candidate);
+        }
+        const aria = await page.locator('body').ariaSnapshot({ timeout: 5000 }).catch(() => '');
+        const scroll = await page.evaluate(() => ({ x: Math.round(window.scrollX), y: Math.round(window.scrollY) }))
+          .catch(() => ({ x: 0, y: 0 }));
+        const state = await pageState(page);
+        const boundedSnapshot = truncateUtf8Text(aria, Math.floor(MODEL_TEXT_BUDGET_BYTES / 2));
+        const base = {
+          url: truncateUtf8Text(state.url, 2048).text,
+          title: truncateUtf8Text(state.title, 512).text,
+          viewport: viewport(),
+          scroll,
+          generation,
+          snapshot: boundedSnapshot.text,
+        };
+        const references = new Map<string, ElementHandle<SVGElement | HTMLElement>>();
+        const refs: Record<string, unknown>[] = [];
+        for (const candidate of candidatesWithDetails) {
+          const ref = `g${generation}e${refs.length + 1}`;
+          const record = {
+            ref,
+            role: candidate.details.role || candidate.details.tag,
+            name: candidate.details.name.slice(0, 160),
+            ...(candidate.details.type ? { type: candidate.details.type } : {}),
+            ...(candidate.details.disabled ? { disabled: true } : {}),
           };
-        }).catch(() => undefined);
-        if (!details) continue;
-        candidatesWithDetails.push({ locator, details });
-      }
-      const aria = await page.locator('body').ariaSnapshot({ timeout: 5000 }).catch(() => '');
-      const scroll = await page.evaluate(() => ({ x: Math.round(window.scrollX), y: Math.round(window.scrollY) }))
-        .catch(() => ({ x: 0, y: 0 }));
-      const state = await pageState(page);
-      const boundedSnapshot = truncateUtf8Text(aria, Math.floor(MODEL_TEXT_BUDGET_BYTES / 2));
-      const base = {
-        url: truncateUtf8Text(state.url, 2048).text,
-        title: truncateUtf8Text(state.title, 512).text,
-        viewport: viewport(),
-        scroll,
-        generation,
-        snapshot: boundedSnapshot.text,
-      };
-      const references = new Map<string, Locator>();
-      const refs: Record<string, unknown>[] = [];
-      for (const candidate of candidatesWithDetails) {
-        const ref = `g${generation}e${refs.length + 1}`;
-        const record = {
-          ref,
-          role: candidate.details.role || candidate.details.tag,
-          name: candidate.details.name.slice(0, 160),
-          ...(candidate.details.type ? { type: candidate.details.type } : {}),
-          ...(candidate.details.disabled ? { disabled: true } : {}),
-        };
-        const prospective = {
+          const prospective = {
+            ...base,
+            refs: [...refs, record],
+            truncated: { snapshot: boundedSnapshot.truncated, refs: false },
+          };
+          if (Buffer.byteLength(JSON.stringify(prospective)) > MODEL_TEXT_BUDGET_BYTES) break;
+          refs.push(record);
+          references.set(ref, candidate.locator);
+        }
+        if (epoch !== this.referenceEpoch) {
+          throw new QubiclError('stale_browser_ref', 'The browser changed during the snapshot; call browser_snapshot again.', 409);
+        }
+        this.references = references;
+        for (const handle of references.values()) handles.delete(handle);
+        return {
           ...base,
-          refs: [...refs, record],
-          truncated: { snapshot: boundedSnapshot.truncated, refs: false },
+          refs,
+          truncated: {
+            snapshot: boundedSnapshot.truncated,
+            refs: refs.length < candidatesWithDetails.length,
+          },
         };
-        if (Buffer.byteLength(JSON.stringify(prospective)) > MODEL_TEXT_BUDGET_BYTES) break;
-        refs.push(record);
-        references.set(ref, candidate.locator);
+      } finally {
+        await Promise.all([...handles].map((handle) => handle.dispose().catch(() => undefined)));
       }
-      this.references = references;
-      return {
-        ...base,
-        refs,
-        truncated: {
-          snapshot: boundedSnapshot.truncated,
-          refs: refs.length < candidatesWithDetails.length,
-        },
-      };
     });
   }
 
@@ -297,7 +318,7 @@ export class BrowserManager {
   clickWithViewerPointer(ref: string, button: 'left' | 'right', generation?: number): Promise<BrowserViewerResult<PageState>> {
     return this.enqueue(async () => {
       const page = await this.getPage();
-      const locator = this.referencedLocator(ref);
+      const locator = await this.referencedElement(ref);
       // Playwright clicks scroll refs into view. Do that explicitly before
       // sampling the box so the viewer receipt describes the actual target.
       await locator.scrollIntoViewIfNeeded({ timeout: 15_000 });
@@ -318,7 +339,6 @@ export class BrowserManager {
         if (publication) await this.finishViewerPointer(publication, generation!, 'cancel');
         throw error;
       }
-      await page.waitForTimeout(300);
       await this.enforceTabLimit(await this.getContext(), this.activePage);
       return { result: await pageState(page), pointerActions: pointer && !publication ? [pointer] : [] };
     });
@@ -326,7 +346,7 @@ export class BrowserManager {
 
   type(ref: string, text: string, submit: boolean, clear: boolean): Promise<PageState> {
     return this.act(async (page) => {
-      const locator = this.referencedLocator(ref);
+      const locator = await this.referencedElement(ref);
       if (clear) await locator.fill('').catch(() => undefined);
       await locator.fill(text).catch(async () => {
         await locator.click();
@@ -339,7 +359,7 @@ export class BrowserManager {
 
   select(ref: string, value: string): Promise<PageState> {
     return this.act(async (page) => {
-      const locator = this.referencedLocator(ref);
+      const locator = await this.referencedElement(ref);
       await locator.selectOption({ label: value }).catch(() => locator.selectOption(value));
       return page;
     });
@@ -347,7 +367,7 @@ export class BrowserManager {
 
   press(key: string, ref?: string): Promise<PageState> {
     return this.act(async (page) => {
-      if (ref) await this.referencedLocator(ref).press(key);
+      if (ref) await (await this.referencedElement(ref)).press(key);
       else await page.keyboard.press(key);
       return page;
     });
@@ -365,7 +385,7 @@ export class BrowserManager {
       if (action === 'back') await page.goBack({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null);
       if (action === 'forward') await page.goForward({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null);
       if (action === 'reload') await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
-      this.references.clear();
+      this.clearReferences();
       return page;
     });
   }
@@ -414,7 +434,7 @@ export class BrowserManager {
       this.pageLastActive.delete(page);
       if (!context.pages().length) this.setActivePage(await context.newPage());
       else if (wasActive) this.setActivePage(context.pages().at(-1));
-      this.references.clear();
+      this.clearReferences();
       return { tabs: await this.listTabs() };
     });
   }
@@ -514,7 +534,7 @@ export class BrowserManager {
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     const context = this.contextPromise ? await this.contextPromise.catch(() => undefined) : undefined;
     this.contextPromise = undefined;
-    this.references.clear();
+    this.clearReferences();
     this.activePage = undefined;
     this.pageLastActive.clear();
     if (context) await context.close().catch(() => undefined);
@@ -542,7 +562,7 @@ export class BrowserManager {
     }
   }
 
-  private act(operation: (page: Page) => Promise<Page>, settleMilliseconds = 300): Promise<PageState> {
+  private act(operation: (page: Page) => Promise<Page>, settleMilliseconds = 0): Promise<PageState> {
     return this.enqueue(async () => {
       const page = await operation(await this.getPage());
       if (settleMilliseconds) await page.waitForTimeout(settleMilliseconds);
@@ -551,10 +571,20 @@ export class BrowserManager {
     });
   }
 
-  private referencedLocator(ref: string): Locator {
-    const locator = this.references.get(ref);
-    if (!locator) throw new QubiclError('stale_browser_ref', 'Unknown or stale browser element ref; call browser_snapshot again.', 409);
-    return locator;
+  private clearReferences(): void {
+    this.referenceEpoch += 1;
+    for (const handle of this.references.values()) void handle.dispose().catch(() => undefined);
+    this.references.clear();
+  }
+
+  private async referencedElement(ref: string): Promise<ElementHandle<SVGElement | HTMLElement>> {
+    const handle = this.references.get(ref);
+    if (!handle || !await handle.evaluate((element) => element.isConnected).catch(() => false)) {
+      this.references.delete(ref);
+      if (handle) await handle.dispose().catch(() => undefined);
+      throw new QubiclError('stale_browser_ref', 'Unknown or stale browser element ref; call browser_snapshot again.', 409);
+    }
+    return handle;
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -656,7 +686,7 @@ export class BrowserManager {
     this.touchPage(page);
     await page.setViewportSize({ width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT }).catch(() => undefined);
     page.on('framenavigated', (frame) => {
-      if (frame === page.mainFrame() && page === this.activePage) this.references.clear();
+      if (frame === page.mainFrame() && page === this.activePage) this.clearReferences();
     });
     page.once('close', () => {
       this.pageLastActive.delete(page);
@@ -685,7 +715,7 @@ export class BrowserManager {
     if (this.activePage && this.activePage !== page && !this.activePage.isClosed()) this.touchPage(this.activePage, now);
     this.activePage = page;
     this.touchPage(page, now);
-    this.references.clear();
+    this.clearReferences();
   }
 
   private touchPage(page: Page, now = this.now()): void {
@@ -730,7 +760,7 @@ export class BrowserManager {
     void this.contextPromise?.then((current) => {
       if (current === context) this.contextPromise = undefined;
     }).catch(() => undefined);
-    this.references.clear();
+    this.clearReferences();
     this.activePage = undefined;
     this.pageLastActive.clear();
   }

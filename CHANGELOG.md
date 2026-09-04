@@ -4,6 +4,42 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
+## 0.2.1 - 2026-09-04
+
+### Fixed
+
+- Browser snapshot references retain the original DOM element when nearby
+  controls are inserted or reordered. Removed or replaced targets are rejected
+  instead of redirecting agent input to a different element.
+- Open Terminal content search enforces its aggregate byte and attempted-file
+  budgets even for oversized or unreadable files, and reports incomplete
+  content searches as truncated while retaining filename matches.
+- Open WebUI's native editor reads complete UTF-8 files up to 20 MB and rejects
+  larger files instead of exposing a prefix that could overwrite the original.
+  Model reads also report truncated single lines correctly.
+- Open WebUI command and edit tools now use its folder/refresh operation names;
+  relative file paths and default command directories follow each chat's folder.
+  MCP and generic OpenAPI names and parameters remain compatible.
+- Search prunes hidden and Git-ignored directories before descent, returns partial
+  results at traversal limits, and reuses bounded content-search pages.
+- `audit prune --keep 0` now retains zero events.
+- Planning guidance no longer mandates a file write during read-only planning;
+  model guidance distinguishes enabled skills from untrusted external content.
+
+### Added
+
+- Workstation DOCX/PPTX PDF previews with bounded conversion, temporary profiles,
+  cancellation on disconnect or takeover, and unchanged original downloads.
+
+### Changed
+
+- Browser snapshot metadata checks overlap up to 16 requests; semantic browser
+  actions no longer impose a fixed 300 ms delay after Playwright completes.
+- Directory metadata reads have bounded concurrency. Performance measurements can
+  reuse a verified existing bundle with `--no-build` and omit build timing.
+- Client documentation explicitly describes shared computers across chats,
+  supported preview paths, app-cookie limits, and the isolated WebSocket route.
+
 ## 0.2.0 - 2026-08-29
 
 ### Added

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import type { BrowserType, Locator, Page } from 'playwright-core';
+import type { BrowserType, ElementHandle, Locator, Page } from 'playwright-core';
 import { BrowserManager, browserViewportToDisplayPoint } from '@qubicl/control/browser';
 import type { ViewerPointerUpdate } from '@qubicl/control/viewer-actions';
 
@@ -107,6 +107,55 @@ test('browser manager provides the Terminal1 semantic, tab, and screenshot-groun
 
   await assert.rejects(manager.navigate('file:///etc/passwd'), /HTTP or HTTPS/);
   await assert.rejects(manager.navigate('https://user:secret@example.test/'), /embedded credentials/);
+});
+
+
+test('snapshot refs retain node identity across insertion and reordering and reject replacements', async (context) => {
+  const fake = new FakeBrowserRuntime();
+  const manager = new BrowserManager(true, { browserType: fake.browserType, headless: true });
+  context.after(() => manager.shutdown());
+  const original = fake.locators[0]!;
+  await manager.snapshot();
+  const inserted = new FakeLocator(2);
+  fake.locators.unshift(inserted);
+  await manager.click('g1e1', 'left');
+  fake.locators.reverse();
+  await manager.type('g1e1', 'original only', false, false);
+  await manager.press('Enter', 'g1e1');
+  assert.equal(original.clicks, 1);
+  assert.deepEqual(original.fills, ['original only']);
+  assert.deepEqual(original.presses, ['Enter']);
+  assert.equal(inserted.clicks, 0);
+  assert.deepEqual(inserted.fills, []);
+
+  original.connected = false;
+  fake.locators.splice(fake.locators.indexOf(original), 1, new FakeLocator(0));
+  for (const action of [
+    () => manager.click('g1e1', 'left'),
+    () => manager.type('g1e1', 'must not type', false, false),
+    () => manager.select('g1e1', 'must not select'),
+    () => manager.press('Enter', 'g1e1'),
+  ]) await assert.rejects(action(), { code: 'stale_browser_ref' });
+  assert.equal(original.disposals, 1);
+});
+
+test('snapshot handles are released on truncation, refresh, navigation, and shutdown', async () => {
+  const fake = new FakeBrowserRuntime(200, 'x'.repeat(80_000));
+  fake.locators[0]!.visible = false;
+  const manager = new BrowserManager(true, { browserType: fake.browserType, headless: true });
+  try {
+    const snapshot = await manager.snapshot() as { refs: Array<{ ref: string }> };
+    assert.equal(fake.locators.filter((node) => node.disposals === 0).length, snapshot.refs.length);
+    await manager.snapshot();
+    assert.ok(fake.locators.every((node) => node.disposals >= 1));
+    await manager.navigate('https://example.test/next');
+    assert.ok(fake.locators.every((node) => node.disposals === 2));
+    await assert.rejects(manager.click(snapshot.refs[0]!.ref, 'left'), { code: 'stale_browser_ref' });
+    await manager.snapshot();
+  } finally {
+    await manager.shutdown();
+  }
+  assert.ok(fake.locators.every((node) => node.disposals === 3));
 });
 
 test('browser viewport coordinates map through window chrome and display scale', () => {
@@ -213,19 +262,27 @@ class FakeLocator {
   readonly fills: string[] = [];
   readonly presses: string[] = [];
   readonly selections: unknown[] = [];
+  connected = true;
+  visible = true;
+  clicks = 0;
+  disposals = 0;
 
   constructor(private readonly index: number) {}
 
-  async isVisible(): Promise<boolean> { return true; }
-  async evaluate(): Promise<{ tag: string; role: string; name: string; type: string; disabled: boolean }> {
+  async isVisible(): Promise<boolean> { return this.visible; }
+  async dispose(): Promise<void> { this.disposals += 1; }
+  async evaluate<T>(callback: (element: HTMLElement) => T): Promise<T> {
     const name = this.index === 0 ? 'First control' : this.index === 1 ? 'Second control' : `Control ${this.index} ${'x'.repeat(240)}`;
-    return { tag: 'button', role: 'button', name, type: '', disabled: false };
+    return callback({
+      tagName: 'BUTTON', textContent: name, isConnected: this.connected,
+      getAttribute: (attribute: string) => attribute === 'role' ? 'button' : null,
+    } as unknown as HTMLElement);
   }
   async boundingBox(): Promise<{ x: number; y: number; width: number; height: number }> {
     return { x: 10 + this.index, y: 20, width: 100, height: 30 };
   }
   async scrollIntoViewIfNeeded(): Promise<void> {}
-  async click(): Promise<void> {}
+  async click(): Promise<void> { this.clicks += 1; }
   async fill(value: string): Promise<void> { this.fills.push(value); }
   async press(value: string): Promise<void> { this.presses.push(value); }
   async selectOption(value: unknown): Promise<void> { this.selections.push(value); }
@@ -284,13 +341,24 @@ class FakePage {
     this.onClose(this);
     for (const listener of this.listeners.get('close') ?? []) listener();
   }
+  async $(selector: string): Promise<ElementHandle<SVGElement | HTMLElement> | null> {
+    const index = Number(selector.split(' >> nth=')[1]);
+    return this.runtime.locators[index] as unknown as ElementHandle<SVGElement | HTMLElement> ?? null;
+  }
   locator(selector: string): Locator {
     if (selector === 'body') {
       return { ariaSnapshot: async () => this.runtime.aria } as unknown as Locator;
     }
     return {
       count: async () => this.runtime.locators.length,
-      nth: (index: number) => this.runtime.locators[index] as unknown as Locator,
+      // Locators resolve the current node on every use, unlike element handles.
+      nth: (index: number) => new Proxy({}, {
+        get: (_target, property) => {
+          const current = this.runtime.locators[index]!;
+          const member = Reflect.get(current, property) as unknown;
+          return typeof member === 'function' ? member.bind(current) : member;
+        },
+      }) as Locator,
     } as unknown as Locator;
   }
   async evaluate(_callback: unknown, argument?: { pointX?: number; pointY?: number; minimumMs?: number; maximumCharacters?: number; qubiclViewerMetrics?: boolean }): Promise<unknown> {
@@ -383,3 +451,25 @@ class FakeBrowserRuntime {
     },
   } as unknown as BrowserType;
 }
+
+test('snapshot inspection overlaps protocol waits with at most sixteen candidates in flight', async (context) => {
+  const fake = new FakeBrowserRuntime();
+  fake.locators.splice(0, fake.locators.length, ...Array.from({ length: 80 }, (_, index) => new FakeLocator(index)));
+  let active = 0;
+  let peak = 0;
+  for (const locator of fake.locators) context.mock.method(locator, 'isVisible', async () => {
+    active++;
+    peak = Math.max(peak, active);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    active--;
+    return true;
+  });
+  const manager = new BrowserManager(true, { browserType: fake.browserType, headless: true });
+  context.after(() => manager.shutdown());
+  const result = await manager.snapshot() as { refs: Array<{ ref: string }> };
+  assert.equal(peak, 16);
+  assert.equal(active, 0);
+  assert.equal(result.refs.length, 80);
+  assert.equal(result.refs[0]?.ref, 'g1e1');
+  assert.equal(result.refs[79]?.ref, 'g1e80');
+});

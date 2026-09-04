@@ -36,7 +36,7 @@
         "LICENSE",
         "SKILL.md"
       ],
-      "sha256": "51952d974e289bb48477a3c2bf52dee60f76f9b01577476979a106b65141ac9c",
+      "sha256": "2e6532e289fbe024338af3cb09f29f14150d5558fc030e7c6f013b6190eb30e5",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",

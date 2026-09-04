@@ -1,3 +1,4 @@
+import { OfficePreviewManager } from './office-preview.js';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -28,7 +29,7 @@ import { AuditLog, contentAuditMetadata, toolAuditMetadata } from './audit.js';
 import { SkillManager } from './skills.js';
 import { RuntimePolicy } from './policy.js';
 import { ViewerPointerStore, type ViewerPointerUpdate } from './viewer-actions.js';
-import { BoundedFileSystem, BoundedPathError } from './bounded-files.js';
+import { BoundedFileSystem, BoundedPathError, type BoundedListOptions } from './bounded-files.js';
 import { createOpenTerminalArchive, OPEN_TERMINAL_ARCHIVE_LIMITS, type OpenTerminalArchive } from './open-terminal-archive.js';
 
 type ToolInput = Record<string, unknown>;
@@ -46,6 +47,7 @@ export interface ToolExecutorOptions {
   viewerPointers?: ViewerPointerStore;
   files?: BoundedFileSystem;
   archiveFactory?: typeof createOpenTerminalArchive;
+  officePreviews?: OfficePreviewManager;
 }
 
 type ProcessController = Pick<ProcessManager,
@@ -106,6 +108,7 @@ export class ToolExecutor {
   readonly durableRoot: string;
   readonly files: BoundedFileSystem;
   private readonly archiveFactory: typeof createOpenTerminalArchive;
+  private readonly officePreviews: OfficePreviewManager;
   private activeArchives = 0;
   private reservedArchiveBytes = 0;
   private gatewayEpoch: string | undefined;
@@ -119,6 +122,7 @@ export class ToolExecutor {
     this.durableRoot = resolve(options.durableRoot ?? options.files?.root ?? '/home/qubicl');
     this.files = options.files ?? new BoundedFileSystem(this.durableRoot);
     this.archiveFactory = options.archiveFactory ?? createOpenTerminalArchive;
+    this.officePreviews = options.officePreviews ?? new OfficePreviewManager();
     if (this.files.root !== this.durableRoot) throw new Error('The bounded filesystem root must match the durable root.');
     this.processes = options.processes ?? configuredProcessController(this.durableRoot);
     this.desktopApplications = options.desktopApplications ?? configuredDesktopApplicationController(contract.manifest.compatibility, this.durableRoot);
@@ -140,6 +144,7 @@ export class ToolExecutor {
       : undefined);
     this.leases.setRevocationHandler(async (proof) => {
       this.viewerPointers.clear();
+      await this.officePreviews.cancelAll();
       try {
         return await this.processes.terminateOwner(proof);
       } finally {
@@ -461,7 +466,7 @@ export class ToolExecutor {
   enabledToolNames(): ToolName[] { return this.policy.enabledTools(); }
 
   compatibilityProcessList(proof: LeaseProof): Promise<CompatibilityProcessSummary[]> {
-    return this.compatibilityProcessOperation('exec_command', 'process-list', proof, async (owner) => this.processes.listCompatibility(owner));
+    return this.compatibilityOperation('exec_command', 'process-list', proof, async (owner) => this.processes.listCompatibility(owner));
   }
 
   compatibilityProcessExecute(
@@ -471,7 +476,7 @@ export class ToolExecutor {
     options: CompatibilityStatusOptions,
     sessionId: string | null,
   ): Promise<CompatibilityProcessOutput> {
-    return this.compatibilityProcessOperation('exec_command', 'process-start', proof, (owner) => {
+    return this.compatibilityOperation('exec_command', 'process-start', proof, (owner) => {
       if (Buffer.byteLength(command, 'utf8') > 64 * 1024) {
         throw new QubiclError('command_too_large', 'command exceeds the 65536-byte UTF-8 limit.', 413);
       }
@@ -484,23 +489,48 @@ export class ToolExecutor {
   }
 
   compatibilityProcessStatus(id: string, proof: LeaseProof, options: CompatibilityStatusOptions): Promise<CompatibilityProcessOutput> {
-    return this.compatibilityProcessOperation('exec_command', 'process-attach', proof, (owner) => (
+    return this.compatibilityOperation('exec_command', 'process-attach', proof, (owner) => (
       this.processes.statusCompatibility(id, owner, options)
     ), { processId: id });
   }
 
   compatibilityProcessInput(id: string, input: string, proof: LeaseProof): Promise<{ status: 'ok' }> {
     const bytes = Buffer.byteLength(input, 'utf8');
-    return this.compatibilityProcessOperation('write_stdin', 'process-input', proof, (owner) => {
+    return this.compatibilityOperation('write_stdin', 'process-input', proof, (owner) => {
       if (bytes > 64 * 1024) throw new QubiclError('input_too_large', 'input exceeds the 65536-byte UTF-8 limit.', 413);
       return this.processes.inputCompatibility(id, input, owner);
     }, { processId: id, bytes }, true);
   }
 
   compatibilityProcessDelete(id: string, proof: LeaseProof, force: boolean): Promise<{ status: 'killed' }> {
-    return this.compatibilityProcessOperation('stop_process', 'process-stop', proof, (owner) => (
+    return this.compatibilityOperation('stop_process', 'process-stop', proof, (owner) => (
       this.processes.deleteCompatibility(id, owner, force)
     ), { processId: id, force });
+  }
+
+  compatibilityOfficePreview(data: Buffer, extension: '.docx' | '.pptx', proof: LeaseProof, signal?: AbortSignal): Promise<Buffer> {
+    return this.compatibilityOperation('read_file', 'office-preview', proof, async () => {
+      if (this.manifest.preset !== 'workstation') throw new QubiclError('preview_unsupported', 'PDF previews of Office documents require the workstation preset.', 415);
+      return this.officePreviews.convert(data, extension, signal);
+    });
+  }
+
+  compatibilityFileList(target: string, proof: LeaseProof, recursive: boolean, options: BoundedListOptions = {}) {
+    return this.compatibilityOperation('list_files', 'file-list', proof, () => (
+      this.files.list(this.workspacePath(target), recursive, 0, 10_000, 4_000_000, options)
+    ));
+  }
+
+  compatibilityFileRead(target: string, proof: LeaseProof): Promise<{ data: Buffer; mimeType?: string }> {
+    return this.compatibilityOperation('read_file', 'editor-read', proof, async () => {
+      const { data, info } = await this.files.readFile(this.workspacePath(target), MAX_TEXT_SOURCE_BYTES);
+      if (!info.isFile()) throw new QubiclError('not_a_file', 'Editor reads require a regular file.', 400);
+      if (info.size > MAX_TEXT_SOURCE_BYTES || data.length > MAX_TEXT_SOURCE_BYTES) {
+        throw new QubiclError('file_too_large', `Files larger than ${MAX_TEXT_SOURCE_BYTES} bytes cannot be opened in the editor. Download the original instead.`, 413);
+      }
+      const mimeType = supportedImageMimeType(data);
+      return { data, ...(mimeType ? { mimeType } : {}) };
+    });
   }
 
   async compatibilityArchive(paths: readonly string[], proof: LeaseProof, signal?: AbortSignal): Promise<OpenTerminalArchive> {
@@ -577,8 +607,8 @@ export class ToolExecutor {
     return this.viewerPointers.apply(update);
   }
 
-  private async compatibilityProcessOperation<T>(
-    tool: 'exec_command' | 'write_stdin' | 'stop_process',
+  private async compatibilityOperation<T>(
+    tool: 'exec_command' | 'write_stdin' | 'stop_process' | 'read_file' | 'list_files',
     operation: string,
     proof: LeaseProof,
     action: (owner: LeaseProof) => Promise<T> | T,
@@ -868,7 +898,8 @@ async function readToolFile(
   const bounded = truncateCompleteLines(requested, MAX_TEXT_READ_BYTES);
   const consumedLines = bounded.lines;
   const nextOffset = offset + consumedLines;
-  const truncated = nextOffset - 1 < lines.length;
+  const hasMoreLines = nextOffset - 1 < lines.length;
+  const truncated = hasMoreLines || bounded.longLineTruncated;
   return {
     path: target,
     size: data.length,
@@ -879,8 +910,7 @@ async function readToolFile(
     totalLines: lines.length,
     truncated,
     ...(truncated ? {
-      nextOffset,
-      continuation: `Read the next section with offset ${nextOffset}.`,
+      ...(hasMoreLines ? { nextOffset, continuation: `Read the next section with offset ${nextOffset}.` } : {}),
       ...(bounded.longLineTruncated ? { note: `Line ${nextOffset - 1} exceeded the ${MAX_TEXT_READ_BYTES}-byte response limit and was truncated.` } : {}),
     } : {}),
   };

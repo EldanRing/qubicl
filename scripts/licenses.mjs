@@ -2,7 +2,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { collectBundledPackages } from './bundle-evidence.mjs';
 
-const licenseFile = /^(?:licen[cs]e|copying|notice)(?:\..*)?$/i;
+const licenseFile = /^(?:licen[cs]e|copying|notice)(?:[._-].*)?$/i;
 
 export async function generateThirdPartyNotices(root, metafiles) {
   const packages = await collectBundledPackages(root, metafiles.map((metafile) => ({ metafile })));

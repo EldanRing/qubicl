@@ -97,7 +97,7 @@ clients must use an exact HTTPS origin included in the gateway's
 
 ## Open WebUI on the same computer
 
-Qubicl presents each computer as an isolated Open Terminal-compatible service for Open WebUI:
+Qubicl presents each computer as an Open Terminal-compatible service for Open WebUI:
 
 ```sh
 qubicl connect computer-name --client open-webui
@@ -115,7 +115,38 @@ The output maps to **Admin Panel → Settings → Integrations → Open Terminal
 
 Open WebUI should verify the server as **Terminal**. Its native file browser can list, read, view, upload, create, move, delete, and download a bounded multi-path ZIP within that computer's durable `/home`. The compatibility API can start, list, attach to, page output from, send bounded input to, and stop retained non-PTY processes. The compatibility OpenAPI also presents the computer's normal tools while owning a fenced Qubicl lease transparently, so a model is not asked to manufacture or renew lease proofs. Human viewer takeover still preempts that lease, fences compatibility processes, and makes calls fail closed until human control is released and a fresh lease is obtained.
 
-Enabled `web_search`, `web_extract`, `skills_list`, `skill_view`, and `skill_manage` tools project through Open Terminal exactly like MCP and direct OpenAPI. Operator-disabled tools are absent from discovery and cached calls fail closed. DDGS search needs no API key; local extraction needs no scraping service. Browser rendering remains available only on browser-capable presets. Native file browsing supports Open WebUI's current `/files/serve/*` preview route as well as the earlier `/files/view` compatibility route; both remain confined to the computer's durable home and enforce the same download bound. It also provides bounded filename/content search, file-display metadata for chat-created artifacts, writable/size/modified directory metadata, and filesystem-backed chat uploads. Search skips hidden paths unless requested, limits pages to 100 results, scans at most 1 MiB per file, and applies aggregate file and byte budgets.
+A connection uses one shared computer: chats and users share its durable home,
+compatibility lease, and process inventory. `X-Session-Id` tracks each chat's
+current folder and process metadata; it is not a filesystem or authorization
+boundary. Give users who require isolation separate computers and connection
+grants. Open WebUI context headers do not automatically provision computers.
+
+The Open Terminal tool catalog exposes `run_command` and
+`replace_file_content` so Open WebUI can supply folder guidance and emit its
+native refresh events. Relative filesystem paths and omitted command working
+directories use the folder shown in that chat. Explicit absolute paths remain
+confined to the durable home. MCP and generic OpenAPI retain `exec_command`,
+`edit_file`, and their original parameter contracts; existing compatibility
+endpoint aliases and native `POST /execute` continue to work. The model catalog
+uses one command-start operation to keep refresh behavior consistent. Refresh the connection's cached tool catalog
+after upgrading.
+
+Native `/files/read` editor requests return the complete UTF-8 file, including
+its BOM and line endings, up to 20,000,000 bytes. Larger files and unsupported
+binary data return an error instead of an editable prefix. Model `read_file`
+responses retain their separate 24,000-byte context budget and report truncated
+long lines explicitly.
+
+On `workstation`, `/files/view?path=...&preview=true` converts DOCX and PPTX to
+PDF. Original downloads omit `preview=true` and return unchanged source bytes.
+Conversions use a fresh private temporary profile, disabled macros/active
+content, a sanitized environment, a 30-second deadline, a 20 MB input/PDF limit,
+and at most two concurrent conversions. Disconnect, lease revocation, and human
+takeover cancel the conversion and clean temporary files. Other presets and
+conversion failures return explicit errors; fonts and document features can
+still affect rendering fidelity.
+
+Enabled `web_search`, `web_extract`, `skills_list`, `skill_view`, and `skill_manage` tools project through Open Terminal exactly like MCP and direct OpenAPI. Operator-disabled tools are absent from discovery and cached calls fail closed. DDGS search needs no API key; local extraction needs no scraping service. Browser rendering remains available only on browser-capable presets. Native file browsing supports Open WebUI's current `/files/serve/*` preview route as well as the earlier `/files/view` compatibility route; both remain confined to the computer's durable home and enforce the same download bound. It also provides bounded filename/content search, file-display metadata for chat-created artifacts, writable/size/modified directory metadata, and filesystem-backed chat uploads. Search prunes hidden paths unless requested and applies `.gitignore` rules at the selected root and in visited subdirectories, including nested negations. Ignored directories are not traversed. Git global excludes and rules above the selected root are not applied. Search visits at most 100,000 entries, retains at most 10,000 entries / 4 MB of listing metadata, and descends at most 64 directory levels; limits return partial results with `truncated: true`. Ignore files are bounded to 64 KB each / 1 MB total. Directory metadata work has at most 16 concurrent requests. Search pages contain at most 100 results. Content-search continuation pages reuse a bounded 15-second snapshot, keyed by chat, query, root, hidden setting, and lease; writes through the adapter invalidate it. Start at offset zero to refresh after external changes. Content matching accepts files up to 1 MiB and stops reading after 500 attempted files or 25,000,000 bytes, including overflow-detection reads. Failed reads consume their reserved byte allowance because partial I/O is unknown. Oversized, unreadable, or partially read files and exhausted budgets set `truncated: true`; filename matching continues over the bounded directory listing.
 
 Open WebUI's path-based `/files/serve/*` route keeps active documents seamless
 without trusting Open WebUI's iframe settings. For HTML, HTM, and SVG, Qubicl
@@ -156,6 +187,22 @@ On `browser`, `computer`, and `workstation` presets, that tool list includes nav
 Open Terminal serves both desktop and browser screenshot operations as native `image/png` responses. MCP likewise uses native image content and keeps only dimensions and other small metadata in structured/text results, avoiding a second base64 copy in the model context.
 
 The default generated URL uses Docker Desktop's `host.docker.internal` route so the Open WebUI backend can reach the host-loopback Qubicl gateway without joining a Qubicl-managed network. If Open WebUI runs directly on the host rather than in Docker, replace that hostname with `127.0.0.1`. A deliberately remote Open WebUI deployment can instead use the separately configured TLS origin; include its exact browser origin in `--trusted-origins` and keep the per-computer token restricted to the intended connection. Open WebUI stores the separately retrieved token in its admin settings; restrict the connection's Open WebUI access grants accordingly.
+
+Live app previews require explicit port publication. The Open WebUI HTTP proxy
+supports apps whose assets and redirects are relative to the proxied page, or
+whose generated URLs include the full browser-visible proxy base path. The
+upstream app receives the suffix after `/proxy/{port}`. Qubicl does not rewrite
+HTML, JavaScript, root-relative URLs, or `Location` headers. Configure the app's
+public base URL accordingly. Operator authorization and cookies are stripped,
+and app `Set-Cookie` headers are suppressed; cookie-based app sessions are not
+supported through this proxy.
+
+The Open Terminal proxy does not provide a WebSocket upgrade route. For apps
+using WebSockets, use the isolated local or remote preview URL returned by
+`publish_port`, with its authenticated handoff and an app configured for that
+preview path. This route supports WebSocket upgrades while keeping operator
+credentials out of the app. It has the same URL and app-cookie limitations;
+isolation alone does not make arbitrary root-based apps compatible.
 
 Compatibility intentionally reports `terminal: false` and `notebooks: false`, while advertising its existing `/system` guidance endpoint. It provides bounded non-PTY process management and ZIP download, not an interactive terminal emulator or notebooks. Process count, lifetime, command/input, queued stdin, retained records, output pages, per-process output, and aggregate output are capped; record or byte exhaustion marks paged output as truncated, and expired/deleted records fence surviving members before removal. ZIP input stays below `/home/qubicl`, rejects links and special files, and applies path, entry, ancestry-metadata, file, aggregate-byte, output, creation-time, and transfer-time limits. At most two ZIP creations/downloads can reserve output space on one computer at once. Open WebUI's `/ports` and `/proxy/{port}/...` routes expose only live ports that were explicitly published through Qubicl; an arbitrary listener never becomes reachable merely because it exists. Existing MCP, OpenAPI, viewer, and human-control routes remain unchanged.
 

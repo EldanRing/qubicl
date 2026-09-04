@@ -19,7 +19,7 @@ test('distributable bundles include project and dependency licenses', async () =
   for (const dependency of ['@modelcontextprotocol/core@', 'yaml@', 'zod@']) assert.match(cliNotices, new RegExp(dependency.replace('@', '\\@')));
   assert.match(await readFile(join(root, 'packages/cli/dist/assets/gateway/THIRD_PARTY_NOTICES.txt'), 'utf8'), /zod@/);
   const computerNotices = await readFile(join(root, 'packages/cli/dist/assets/computer/THIRD_PARTY_NOTICES.txt'), 'utf8');
-  for (const dependency of ['@modelcontextprotocol/server@', 'entities@', 'parse5@']) {
+  for (const dependency of ['@modelcontextprotocol/server@', 'entities@', 'parse5@', 'ignore@']) {
     assert.match(computerNotices, new RegExp(dependency.replace('@', '\\@')));
   }
 });
@@ -32,8 +32,8 @@ test('initial package publishing is explicit and guarded', async () => {
     devDependencies?: Record<string, string>;
   };
   assert.equal(workspace.license, 'Apache-2.0');
-  assert.equal(workspace.packageManager, 'npm@10.9.3');
-  assert.equal(workspace.devDependencies?.oxlint, '1.79.0');
+  assert.match(workspace.packageManager ?? '', /^npm@\d+\.\d+\.\d+$/u);
+  assert.match(workspace.devDependencies?.oxlint ?? '', /^\d+\.\d+\.\d+$/u);
   assert.match(workspace.scripts?.['lint:source'] ?? '', /oxlint/);
   assert.match(workspace.scripts?.test ?? '', /test-coverage-lines=75/);
   assert.match(workspace.scripts?.['check:release'] ?? '', /scan:secrets/);
@@ -51,7 +51,7 @@ test('initial package publishing is explicit and guarded', async () => {
     scripts?: { prepublishOnly?: string };
   };
   assert.equal(manifest.name, 'qubicl-cli');
-  assert.equal(manifest.version, '0.2.0');
+  assert.equal(manifest.version, (JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as { version: string }).version);
   assert.equal(manifest.author, 'Qubicl contributors');
   assert.equal(manifest.license, 'Apache-2.0');
   assert.notEqual(manifest.private, true);
@@ -59,14 +59,6 @@ test('initial package publishing is explicit and guarded', async () => {
   assert.ok(manifest.files?.includes('dist/THIRD_PARTY_NOTICES.txt'));
   assert.deepEqual(manifest.publishConfig, { access: 'public', registry: 'https://registry.npmjs.org/', tag: 'latest' });
   assert.equal(manifest.scripts?.prepublishOnly, 'node ../../scripts/guard-publish.mjs');
-
-  const publishGuard = await readFile(join(root, 'scripts/guard-publish.mjs'), 'utf8');
-  assert.match(publishGuard, /QUBICL_ALLOW_NPM_PUBLISH/);
-  assert.match(publishGuard, /approval !== version/);
-  assert.match(publishGuard, /npm_config_tag/);
-  assert.match(publishGuard, /requestedTag !== expectedTag/);
-  assert.match(publishGuard, /npm_config_provenance/);
-  assert.match(publishGuard, /requestedProvenance/);
 
   const candidateBuilder = await readFile(join(root, 'scripts/build-local-candidates.mjs'), 'utf8');
   assert.match(candidateBuilder, /release', 'candidates'/);

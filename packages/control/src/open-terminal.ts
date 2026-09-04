@@ -1,3 +1,4 @@
+import ignore, { type Ignore } from 'ignore';
 import { createReadStream, fstatSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -60,6 +61,8 @@ export interface OpenTerminalCompatibilityOptions {
 export class OpenTerminalCompatibility {
   private readonly home: string;
   private readonly sessionCwds = new Map<string, SessionCwd>();
+  private fileGeneration = 0;
+  private readonly matchCache = new Map<string, { expires: number; proof: string; matches: { results: Array<Record<string, unknown>>; truncated: boolean } }>();
   private lease: LeaseProof | undefined;
   private acquiringLease: Promise<LeaseProof> | undefined;
 
@@ -77,6 +80,7 @@ export class OpenTerminalCompatibility {
   async handle(request: IncomingMessage, response: ServerResponse, url: URL): Promise<boolean> {
     if (url.pathname !== PREFIX && !url.pathname.startsWith(`${PREFIX}/`)) return false;
     try {
+      if (request.method !== 'GET') { this.matchCache.clear(); this.fileGeneration++; }
       await this.dispatch(request, response, url);
     } catch (error) {
       sendCompatibilityError(response, error instanceof BoundedPathError
@@ -237,14 +241,15 @@ export class OpenTerminalCompatibility {
       this.requireTools('list_files');
       const requested = url.searchParams.get('directory') ?? '.';
       const target = await this.resolvePath(requested, request, true, { operation: 'list', path: requested });
-      const entries = await Promise.all((await this.listCompatibilityFiles(target))
-        .filter((entry) => typeof entry.name === 'string' && ['file', 'directory'].includes(entry.type ?? ''))
-        .map(async (entry) => ({
+      const listing = await this.listCompatibilityFiles(target);
+      const entries = await mapConcurrent(
+        listing.entries.filter((entry) => ['file', 'directory'].includes(entry.type)),
+        async (entry) => ({
           name: entry.name!,
           type: entry.type!,
           ...await compatibilityMetadata(this.executor.files, join(target, entry.name!)),
-        })));
-      sendJson(response, 200, { dir: target, entries, writable: await this.executor.files.isWritable(target) });
+        }));
+      sendJson(response, 200, { dir: target, entries, truncated: listing.truncated, writable: await this.executor.files.isWritable(target) });
       return;
     }
     if (request.method === 'GET' && path === '/files/search') {
@@ -255,22 +260,22 @@ export class OpenTerminalCompatibility {
       const type = enumQuery(url, 'type', ['file', 'directory', 'any'] as const, 'any');
       const showHidden = booleanQuery(url, 'show_hidden', false);
       const query = (url.searchParams.get('query') ?? '').trim().toLocaleLowerCase();
-      const ranked = (await this.listCompatibilityFiles(target, true))
-        .filter((entry): entry is { name: string; type: string } => typeof entry.name === 'string'
+      const listing = await this.listCompatibilityFiles(target, true, showHidden);
+      const ranked = listing.entries
+        .filter((entry): entry is { name: string; type: 'file' | 'directory' } => typeof entry.name === 'string'
           && ['file', 'directory'].includes(entry.type ?? '')
           && (type === 'any' || entry.type === type)
           && (showHidden || !hasHiddenSegment(entry.name)))
         .map((entry) => ({ entry, rank: filenameSearchRank(entry.name, query) }))
         .filter(({ rank }) => rank >= 0)
-        .sort(compareRankedEntries)
-        .slice(0, limit);
-      const results = await Promise.all(ranked.map(async ({ entry }) => ({
+        .sort(compareRankedEntries);
+      const results = await mapConcurrent(ranked.slice(0, limit), async ({ entry }) => ({
         path: join(target, entry.name),
         name: basename(entry.name),
         type: entry.type,
         ...await compatibilityMetadata(this.executor.files, join(target, entry.name)),
-      })));
-      sendJson(response, 200, { results });
+      }));
+      sendJson(response, 200, { results, truncated: listing.truncated || ranked.length > limit });
       return;
     }
     if (request.method === 'GET' && path === '/files/matches') {
@@ -282,7 +287,21 @@ export class OpenTerminalCompatibility {
       const showHidden = booleanQuery(url, 'show_hidden', false);
       const offset = boundedIntegerQuery(url, 'offset', 0, 0, 1_000_000);
       const limit = boundedIntegerQuery(url, 'limit', MATCH_PAGE_SIZE, 1, MATCH_PAGE_SIZE);
-      const matches = await this.matchCompatibilityFiles(target, query, showHidden);
+      const matches = await this.withLease(async (proof) => {
+        const key = JSON.stringify([sessionKey(request), target, query, showHidden]);
+        const now = Date.now();
+        const generation = this.fileGeneration;
+        for (const [id, cached] of this.matchCache) if (cached.expires <= now) this.matchCache.delete(id);
+        const cached = offset > 0 ? this.matchCache.get(key) : undefined;
+        const result = cached?.proof === JSON.stringify(proof) ? cached.matches : await this.matchCompatibilityFiles(target, query, showHidden);
+        this.requireTools('list_files', 'read_file');
+        this.executor.leases.verify(proof, true);
+        if ((!cached || cached.proof !== JSON.stringify(proof)) && generation === this.fileGeneration) {
+          if (this.matchCache.size >= 4) this.matchCache.delete(this.matchCache.keys().next().value!);
+          this.matchCache.set(key, { expires: now + 15_000, proof: JSON.stringify(proof), matches: result });
+        }
+        return result;
+      });
       const page = matches.results.slice(offset, offset + limit);
       sendJson(response, 200, {
         results: page,
@@ -320,23 +339,15 @@ export class OpenTerminalCompatibility {
       this.requireTools('read_file');
       const requested = requiredQuery(url, 'path');
       const target = await this.resolvePath(requested, request, true, { operation: 'read', path: requested });
-      const result = await this.callTool('read_file', {
-        path: target,
-        offset: 1,
-        limit: 10_000,
-        encoding: 'auto',
-        maxBytes: MAX_UPLOAD_BYTES,
-      }) as Record<string, unknown>;
-      if (typeof result.data === 'string' && typeof result.mimeType === 'string') {
-        sendBytes(response, 200, Buffer.from(result.data, 'base64'), result.mimeType, target);
+      const result = await this.withLease((proof) => this.executor.compatibilityFileRead(target, proof));
+      if (result.mimeType) {
+        sendBytes(response, 200, result.data, result.mimeType, target);
         return;
       }
-      sendJson(response, 200, {
-        path: target,
-        total_lines: result.totalLines ?? null,
-        content: result.content ?? '',
-        truncated: result.truncated ?? false,
-      });
+      let content: string;
+      try { content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(result.data); }
+      catch { throw new QubiclError('unsupported_binary_file', 'This file cannot be edited as UTF-8 text. Download the original instead.', 415); }
+      sendJson(response, 200, { path: target, total_lines: content.split('\n').length, content, truncated: false });
       return;
     }
     if (request.method === 'GET' && (path === '/files/view' || path.startsWith(FILE_SERVE_PREFIX))) {
@@ -384,6 +395,15 @@ export class OpenTerminalCompatibility {
           throw mapFileSystemError(error, { operation: 'read', path: target });
         }
       });
+      const extension = extname(target).toLowerCase();
+      if (path === '/files/view' && booleanQuery(url, 'preview', false) && (extension === '.docx' || extension === '.pptx')) {
+        const cancellation = requestCancellation(request, response);
+        try {
+          const pdf = await this.withLease((proof) => this.executor.compatibilityOfficePreview(result.data, extension, proof, cancellation.signal));
+          sendBytes(response, 200, pdf, 'application/pdf', `${target.slice(0, -extension.length)}.pdf`, 'inline');
+        } finally { cancellation.cleanup(); }
+        return;
+      }
       if (result.staticPreview) {
         sendStaticPreview(response, target, result.staticPreview, result.interactive);
         return;
@@ -466,7 +486,7 @@ export class OpenTerminalCompatibility {
         }
       }
       const targets = await Promise.all(requested.map((value) => this.resolveArchivePath(value, request)));
-      const cancellation = archiveCancellation(request, response);
+      const cancellation = requestCancellation(request, response);
       let archive: OpenTerminalArchive | undefined;
       try {
         archive = await this.withLease(async (proof) => this.executor.compatibilityArchive(targets, proof, cancellation.signal));
@@ -478,11 +498,30 @@ export class OpenTerminalCompatibility {
       return;
     }
     if (request.method === 'POST' && path.startsWith('/v1/tools/')) {
-      const name = path.slice('/v1/tools/'.length);
+      const operation = path.slice('/v1/tools/'.length);
+      const name = operation === 'run_command' ? 'exec_command' : operation === 'replace_file_content' ? 'edit_file' : operation;
       if (!isToolName(name) || !this.executor.enabledToolNames().includes(name) || ['acquire_lease', 'renew_lease', 'release_lease'].includes(name)) {
         throw new QubiclError('tool_not_found', `Tool ${name} is not available through Open Terminal compatibility.`, 404);
       }
-      const result = await this.callTool(name, await readJson(request));
+      const input = await readJson(request);
+      if (operation === 'replace_file_content') {
+        const { path: filePath, old_text, new_text, ...extra } = input;
+        if (Object.keys(extra).length) throw new QubiclError('invalid_arguments', 'Unexpected replacement parameters.', 400);
+        input.path = filePath;
+        input.edits = [{ oldText: old_text, newText: new_text }];
+        delete input.old_text;
+        delete input.new_text;
+      }
+      if (name === 'exec_command') {
+        input.cwd = await this.resolvePath(typeof input.cwd === 'string' ? input.cwd : '.', request, true, { operation: 'inspect', path: String(input.cwd ?? '.') });
+      }
+      if (['list_files', 'read_file', 'write_file', 'edit_file', 'get_file_info', 'create_directory', 'delete_path', 'move_path', 'copy_path'].includes(name)) {
+        for (const key of ['path', 'source', 'destination']) {
+          if (typeof input[key] === 'string') input[key] = this.executor.files.absolutePath(resolve(this.cwdFor(request), input[key]));
+        }
+        if (name === 'list_files' && input.path === undefined) input.path = this.cwdFor(request);
+      }
+      const result = await this.callTool(name, input);
       if (isOpenTerminalImageTool(name) || isImageResult(result)) {
         sendToolImage(response, result);
         return;
@@ -510,22 +549,40 @@ export class OpenTerminalCompatibility {
     throw new QubiclError('stale_lease', 'The Open Terminal compatibility lease could not be renewed.', 409);
   }
 
-  private async listCompatibilityFiles(target: string, recursive = false): Promise<Array<{ name?: string; type?: string }>> {
-    const entries: Array<{ name?: string; type?: string }> = [];
-    let cursor = 0;
-    while (entries.length < 10_000) {
-      const listing = await this.callTool('list_files', {
-        path: target,
-        recursive,
-        cursor,
-        maxEntries: 1000,
-      }) as { entries?: Array<{ name?: string; type?: string }>; nextCursor?: number };
-      entries.push(...(listing.entries ?? []));
-      if (listing.nextCursor === undefined) return entries;
-      if (listing.nextCursor <= cursor) throw new QubiclError('invalid_file_result', 'Qubicl returned an invalid directory cursor.', 500);
-      cursor = listing.nextCursor;
-    }
-    throw new QubiclError('too_many_entries', 'Directory listing exceeds the 10,000-entry Open Terminal compatibility limit.', 413);
+  private async listCompatibilityFiles(target: string, recursive = false, showHidden = false) {
+    const scopes = new Map<string, Ignore>();
+    let ignoreBytes = 0;
+    let incompleteIgnores = false;
+    const listing = await this.withLease((proof) => this.executor.compatibilityFileList(target, proof, recursive, recursive ? {
+      maximumDepth: 64,
+      maximumVisited: 100_000,
+      skipUnreadable: true,
+      prepareDirectory: async (prefix) => {
+        const path = join(target, prefix, '.gitignore');
+        try {
+          if (ignoreBytes >= 1_000_000) { incompleteIgnores = true; return; }
+          const read = await this.executor.files.readFile(path, Math.min(64_000, 1_000_000 - ignoreBytes));
+          ignoreBytes += read.data.length;
+          if (read.data.length < read.info.size || read.data.length > 64_000) { incompleteIgnores = true; return; }
+          scopes.set(prefix, ignore().add(read.data.toString('utf8')));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') incompleteIgnores = true;
+        }
+      },
+      include: (name, directory) => {
+        if (!showHidden && hasHiddenSegment(name)) return false;
+        let ignored = false;
+        for (const [prefix, rules] of scopes) {
+          if (prefix && !name.startsWith(`${prefix}${sep}`)) continue;
+          const scoped = (prefix ? name.slice(prefix.length + 1) : name).split(sep).join('/') + (directory ? '/' : '');
+          const result = rules.test(scoped);
+          if (result.ignored) ignored = true;
+          else if (result.unignored) ignored = false;
+        }
+        return !ignored;
+      },
+    } : {}));
+    return { ...listing, truncated: listing.truncated || incompleteIgnores };
   }
 
   private async matchCompatibilityFiles(target: string, query: string, showHidden: boolean): Promise<{
@@ -533,26 +590,32 @@ export class OpenTerminalCompatibility {
     truncated: boolean;
   }> {
     const lowered = query.toLocaleLowerCase();
-    const entries = (await this.listCompatibilityFiles(target, true))
-      .filter((entry): entry is { name: string; type: string } => typeof entry.name === 'string'
+    const listing = await this.listCompatibilityFiles(target, true, showHidden);
+    const entries = listing.entries
+      .filter((entry): entry is { name: string; type: 'file' | 'directory' } => typeof entry.name === 'string'
         && ['file', 'directory'].includes(entry.type ?? '')
         && (showHidden || !hasHiddenSegment(entry.name)))
       .sort((left, right) => left.name.localeCompare(right.name));
     const results: Array<Record<string, unknown> & { rank: number }> = [];
     let scannedFiles = 0;
     let scannedBytes = 0;
-    let truncated = false;
+    let truncated = listing.truncated;
     for (const entry of entries) {
       const nameRank = searchRank(entry.name, lowered);
       const contentMatches: Array<{ line: number; column: number; text: string }> = [];
       const candidate = join(target, entry.name);
       if (entry.type === 'file' && scannedFiles < MAX_CONTENT_SEARCH_FILES && scannedBytes < MAX_CONTENT_SEARCH_BYTES) {
+        const reservedBytes = Math.min(MAX_CONTENT_SEARCH_FILE_SIZE + 1, MAX_CONTENT_SEARCH_BYTES - scannedBytes);
+        scannedFiles += 1;
+        // Charge before reading: a failed read may already have consumed I/O.
+        // BoundedFileSystem reads at most maximumBytes + one overflow byte.
+        scannedBytes += reservedBytes;
         try {
-          const read = await this.executor.files.readFile(candidate, MAX_CONTENT_SEARCH_FILE_SIZE + 1);
+          const read = await this.executor.files.readFile(candidate, reservedBytes - 1);
+          scannedBytes -= reservedBytes - read.data.length;
           const info = read.info;
-          if (info.isFile() && info.size <= MAX_CONTENT_SEARCH_FILE_SIZE && scannedBytes + info.size <= MAX_CONTENT_SEARCH_BYTES) {
-            scannedFiles += 1;
-            scannedBytes += info.size;
+          if (info.isFile() && info.size <= MAX_CONTENT_SEARCH_FILE_SIZE
+            && read.data.length <= MAX_CONTENT_SEARCH_FILE_SIZE && read.data.length >= info.size) {
             const content = decodeSearchText(read.data);
             if (content !== undefined) {
               for (const [index, line] of content.split(/\r?\n/u).entries()) {
@@ -561,9 +624,12 @@ export class OpenTerminalCompatibility {
                 if (contentMatches.length >= MAX_CONTENT_MATCHES_PER_FILE) break;
               }
             }
+          } else {
+            truncated = true;
           }
         } catch {
-          // Concurrently removed and unreadable files are omitted from content matching.
+          // Preserve the reservation when partial I/O before failure is unknown.
+          truncated = true;
         }
       } else if (entry.type === 'file') {
         truncated = true;
@@ -1030,9 +1096,9 @@ async function sendArchive(response: ServerResponse, archive: OpenTerminalArchiv
   }
 }
 
-function archiveCancellation(request: IncomingMessage, response: ServerResponse): { signal: AbortSignal; cleanup(): void } {
+function requestCancellation(request: IncomingMessage, response: ServerResponse): { signal: AbortSignal; cleanup(): void } {
   const controller = new AbortController();
-  const cancel = (): void => controller.abort(new Error('archive client disconnected'));
+  const cancel = (): void => controller.abort(new Error('file client disconnected'));
   const close = (): void => { if (!response.writableFinished) cancel(); };
   request.once('aborted', cancel);
   response.once('close', close);
@@ -1153,4 +1219,16 @@ function sendCompatibilityError(response: ServerResponse, error: unknown): void 
   }
   console.error(error);
   sendJson(response, 500, { detail: 'The Qubicl computer encountered an internal error.', code: 'internal_error' });
+}
+
+async function mapConcurrent<T, R>(values: readonly T[], action: (value: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = [];
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(16, values.length) }, async () => {
+    while (cursor < values.length) {
+      const index = cursor++;
+      results[index] = await action(values[index]!);
+    }
+  }));
+  return results;
 }
