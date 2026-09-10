@@ -20,17 +20,11 @@ import {
 } from './cleanup-plan.js';
 import { docker, validateDocker } from './docker.js';
 import {
-  computerRuntimeContainerNames,
-  controlNetwork,
-  displaySocketVolume,
-  gatewayContainerName,
-  gatewayNetworkName,
   projectName,
   readRuntimeImageContracts,
   removeRuntimeImageContractRecords,
-  usesUnifiedComputerRuntime,
-  workspaceNetwork,
 } from './runtime.js';
+import { configuredExpectedRuntimeResources } from './runtime-inventory.js';
 import { loadState, statePaths, withStateLock, type LoadedState } from './state.js';
 import { inspectPendingTransaction } from './transactions.js';
 
@@ -82,19 +76,7 @@ export async function cleanupCommand(args: ParsedArgs): Promise<void> {
 export async function collectCleanupSnapshot(state: LoadedState, platform: DockerPlatform): Promise<CleanupSnapshot> {
   const installationId = state.config.installationId;
   const project = projectName(installationId, state.paths.root);
-  const expectedContainers = new Set([
-    gatewayContainerName(installationId, state.paths.root),
-    ...state.config.computers.flatMap((computer) => computerRuntimeContainerNames(state, computer)),
-  ]);
-  const expectedNetworks = new Set([
-    gatewayNetworkName(installationId, state.paths.root),
-    ...state.config.computers.flatMap((computer) => usesUnifiedComputerRuntime(computer)
-      ? [controlNetwork(installationId, computer.id, state.paths.root)]
-      : [controlNetwork(installationId, computer.id, state.paths.root), workspaceNetwork(installationId, computer.id, state.paths.root)]),
-  ]);
-  const expectedVolumes = new Set(state.config.computers
-    .filter((computer) => computer.capabilities.includes('viewer') && !usesUnifiedComputerRuntime(computer))
-    .map((computer) => displaySocketVolume(installationId, computer.id, state.paths.root)));
+  const expected = await configuredExpectedRuntimeResources(state);
 
   const containerIds = parseIdentifierLines(await docker([
     'ps', '--all', '--no-trunc', '--format', '{{.ID}}',
@@ -186,9 +168,9 @@ export async function collectCleanupSnapshot(state: LoadedState, platform: Docke
   return {
     installationId,
     projectName: project,
-    expectedContainers,
-    expectedNetworks,
-    expectedVolumes,
+    expectedContainers: expected.containers,
+    expectedNetworks: expected.networks,
+    expectedVolumes: expected.volumes,
     protectedImageReferences,
     retainedManagedImageReferences,
     items: [...containerItems, ...networkItems, ...volumeItems, ...imageItems, ...recordItems],

@@ -137,7 +137,7 @@ report from the retained bytes, and publication includes it as release evidence.
 The builder writes an ignored candidate beneath:
 
 ```text
-release/candidates/0.5.0-<revision>/linux-x64/
+release/candidates/0.5.1-<revision>/linux-x64/
 ```
 
 From the same clean reviewed revision, verify it without rebuilding or rerunning
@@ -199,7 +199,7 @@ The dry run verifies the full candidate and the exact checkout but performs no
 remote mutation. After explicit approval:
 
 ```sh
-QUBICL_RELEASE_APPROVAL=0.5.0 npm run release:publish -- \
+QUBICL_RELEASE_APPROVAL=0.5.1 npm run release:publish -- \
   --candidate /path/to/candidate \
   --public-key /secure/offline/qubicl-release.public.pem \
   --signature /path/to/candidate.signature.json \
@@ -240,7 +240,7 @@ never changes repository or package visibility.
 From a clean user environment:
 
 ```sh
-npm install -g qubicl-cli@0.5.0
+npm install -g qubicl-cli@0.5.1
 qubicl setup
 qubicl doctor
 ```

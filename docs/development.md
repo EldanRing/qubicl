@@ -266,12 +266,12 @@ they do not extend the release tier's general platform support matrix.
 | `iphone` | `platform: ios`, `deviceClass: phone`, `browserName: safari`, an iPhone `deviceModel`, and `physicalDevice: true` |
 
 Native rows also record `tlsHostname`, `tlsProtocol` (`TLSv1.2` or `TLSv1.3`)
-and `certificateFingerprint256` (`sha256:<64 lowercase hex digits>`). Their
-checks include `helperServicePassed`, `tlsPassed`
-and `physicalRebootPassed`, plus keyboard navigation and all six common UI
-checks. The iPhone row requires touch navigation and `physicalDevicePassed`
-alongside the common checks. The initial tier's Linux platform row must also
-pass its physical reboot check. Missing or false qualification results fail
+and `certificateFingerprint256` (`sha256:<64 lowercase hex digits>`). Initial
+release rows require `helperServicePassed` and `tlsPassed`, plus keyboard
+navigation and all six common UI checks. The supported tier additionally
+requires `physicalRebootPassed` for native dashboard rows and the Linux platform
+row. The iPhone row requires touch navigation and `physicalDevicePassed`
+alongside the common checks. Missing or false qualification results fail
 acceptance; retain the actual service, TLS and reboot observations in the
 referenced evidence rather than filling fields from source tests.
 

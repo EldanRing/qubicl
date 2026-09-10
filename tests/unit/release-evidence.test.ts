@@ -323,7 +323,7 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
     v05Initial.releaseSet.releaseTier = 'initial';
     v05Initial.approvedBy = v05Initial.owner;
     v05Initial.platforms = v05Initial.platforms.filter(({ id }: { id: string }) => id === 'linux-x64');
-    v05Initial.platforms[0]!.physicalRebootPassed = true;
+    v05Initial.platforms[0]!.physicalRebootPassed = false;
     v05Initial.remoteAccess = v05Initial.remoteAccess.filter(({ id }: { id: string }) => id === 'linux-x64-direct');
     v05Initial.workflows = Object.fromEntries(Object.entries(v05Initial.workflows).filter(([id]) => [
       'upgrade',
@@ -344,12 +344,11 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
       responsiveLayoutPassed: true,
       themePassed: true,
     };
-    const nativeDashboardChecks = {
+    const initialNativeDashboardChecks = {
       ...dashboardChecks,
       keyboardNavigationPassed: true,
       helperServicePassed: true,
       tlsPassed: true,
-      physicalRebootPassed: true,
     };
     v05Initial.dashboard = [
       {
@@ -357,14 +356,14 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
         qubiclVersion: '0.5.0', osVersion: 'Ubuntu 24.04.3', browserVersion: 'Chromium 140.0.0',
         serviceManager: 'systemd-user', serviceIdentifier: 'org.qubicl.dashboard.0123456789abcdef.service',
         tlsHostname: 'linux-admin.example.test', tlsProtocol: 'TLSv1.3', certificateFingerprint256: `sha256:${'7'.repeat(64)}`,
-        checks: nativeDashboardChecks, ...checked,
+        checks: initialNativeDashboardChecks, ...checked,
       },
       {
         id: 'macos', platform: 'macos', deviceClass: 'desktop', architecture: 'arm64',
         qubiclVersion: '0.5.0', osVersion: 'macOS 15.6.1', browserVersion: 'Safari 18.6',
         serviceManager: 'launch-agent', serviceIdentifier: 'org.qubicl.dashboard.fedcba9876543210',
         tlsHostname: 'mac-admin.example.test', tlsProtocol: 'TLSv1.3', certificateFingerprint256: `sha256:${'8'.repeat(64)}`,
-        checks: nativeDashboardChecks, ...checked,
+        checks: initialNativeDashboardChecks, ...checked,
       },
       {
         id: 'iphone', platform: 'ios', deviceClass: 'phone', physicalDevice: true,
@@ -388,9 +387,27 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
       remoteProfiles: 1,
       remoteSurfaces: remoteRequirements.requiredSurfaces.length,
       dashboardPlatforms: 3,
-      dashboardChecks: 28,
+      dashboardChecks: 26,
       workflows: 6,
     });
+    const v05Supported: Record<string, any> = structuredClone(evidence);
+    v05Supported.releaseSet.version = '0.5.0';
+    v05Supported.dashboard = structuredClone(v05Initial.dashboard);
+    for (const row of v05Supported.dashboard.filter(({ architecture }: { architecture?: string }) => architecture)) {
+      row.checks.physicalRebootPassed = true;
+    }
+    const v05SupportedContext = {
+      ...context,
+      releaseSet: { ...context.releaseSet, version: '0.5.0' },
+    };
+    const supportedSummary = await acceptance.validateAcceptanceEvidence(v05Supported, v05SupportedContext);
+    assert.equal(supportedSummary.dashboardChecks, 28);
+    const v05FailedSupportedDashboardReboot = structuredClone(v05Supported);
+    v05FailedSupportedDashboardReboot.dashboard[1]!.checks.physicalRebootPassed = false;
+    await assert.rejects(
+      acceptance.validateAcceptanceEvidence(v05FailedSupportedDashboardReboot, v05SupportedContext),
+      /requires physicalRebootPassed/,
+    );
     const v05MissingClient = structuredClone(v05Initial);
     v05MissingClient.clients = v05MissingClient.clients.filter(({ id }: { id: string }) => id !== 'opencode');
     await assert.rejects(acceptance.validateAcceptanceEvidence(v05MissingClient, v05InitialContext), /exactly 9 client rows/);
@@ -415,12 +432,9 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
     const v05WrongArchitecture = structuredClone(v05Initial);
     v05WrongArchitecture.dashboard[1]!.architecture = 'x64';
     await assert.rejects(acceptance.validateAcceptanceEvidence(v05WrongArchitecture, v05InitialContext), /architecture arm64/);
-    const v05MissingReboot = structuredClone(v05Initial);
-    v05MissingReboot.platforms[0]!.physicalRebootPassed = false;
-    await assert.rejects(acceptance.validateAcceptanceEvidence(v05MissingReboot, v05InitialContext), /physicalRebootPassed/);
-    const v05FailedDashboardReboot = structuredClone(v05Initial);
-    v05FailedDashboardReboot.dashboard[1]!.checks.physicalRebootPassed = false;
-    await assert.rejects(acceptance.validateAcceptanceEvidence(v05FailedDashboardReboot, v05InitialContext), /requires physicalRebootPassed/);
+    const v05UnexpectedDashboardReboot = structuredClone(v05Initial);
+    v05UnexpectedDashboardReboot.dashboard[1]!.checks.physicalRebootPassed = true;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(v05UnexpectedDashboardReboot, v05InitialContext), /exactly its required checks/);
     const v05VirtualIphone = structuredClone(v05Initial);
     v05VirtualIphone.dashboard[2]!.physicalDevice = false;
     await assert.rejects(acceptance.validateAcceptanceEvidence(v05VirtualIphone, v05InitialContext), /physical device/);

@@ -4,7 +4,7 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
-## 0.5.0 - 2026-09-10
+## 0.5.1 - 2026-09-10
 
 ### Added
 
@@ -33,6 +33,10 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Diagnostics and orphan cleanup recognize the configured dashboard container
+  and private asset network as current managed resources.
+- Initial-release acceptance no longer requires a physical host reboot;
+  physical reboot evidence remains mandatory for the supported release tier.
 - Candidate construction refreshes and validates the Trivy vulnerability
   database before capturing scanner metadata, so the retained database
   timestamp and digest describe the same scans.

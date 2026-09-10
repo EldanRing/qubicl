@@ -1,6 +1,6 @@
 {
   "name": "qubicl-workspace",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Local, observable computers for any compatible AI agent",
   "homepage": "https://github.com/EldanRing/qubicl#readme",
   "bugs": {

@@ -75,7 +75,7 @@ import {
 } from './docker.js';
 import { serveMcpBridge } from './mcp.js';
 import { ensureCurrentState, inspectStateFormat, recoverStateMigration } from './migrations.js';
-import { LEGACY_SPLIT_CONTROL_PROTOCOL_VERSION, PREVIEW_ACCESS_CONTAINER_PATH, computerContainerName, computerEgressContainerName, computerEgressServiceName, computerExecutorContainerName, computerExecutorServiceName, computerResourceEnvelope, computerRuntimeContainerNames, computerServiceName, computerSessionContainerName, computerSessionServiceName, computerSshContainerName, computerSshServiceName, computerWebContainerName, controlNetwork, displaySocketVolume, gatewayContainerName, GATEWAY_PIDS_LIMIT, gatewayNetworkName, hostIdentity, isPrimaryRuntimeRoot, projectName, renderRuntime, usesUnifiedComputerRuntime, workspaceNetwork } from './runtime.js';
+import { LEGACY_SPLIT_CONTROL_PROTOCOL_VERSION, PREVIEW_ACCESS_CONTAINER_PATH, computerContainerName, computerEgressContainerName, computerEgressServiceName, computerExecutorContainerName, computerExecutorServiceName, computerResourceEnvelope, computerServiceName, computerSessionContainerName, computerSessionServiceName, computerSshContainerName, computerSshServiceName, computerWebContainerName, controlNetwork, gatewayContainerName, GATEWAY_PIDS_LIMIT, gatewayNetworkName, hostIdentity, isPrimaryRuntimeRoot, projectName, renderRuntime, usesUnifiedComputerRuntime, workspaceNetwork } from './runtime.js';
 import {
   auditState,
   atomicWrite,
@@ -110,6 +110,7 @@ import { validateStatePath } from './preflight.js';
 import { browserProfileCommand } from './browser-profile.js';
 import { printBrowserProfileDisclosure } from './browser-profile-disclosures.js';
 import { cleanupCommand } from './cleanup-command.js';
+import { configuredExpectedRuntimeResources } from './runtime-inventory.js';
 import { lifecycleUpdateStatus, upgradeAllCommand, validateUpgradeInvocation } from './lifecycle-command.js';
 import {
   assertRemotePreviewUpgradeCompatibility,
@@ -1783,25 +1784,15 @@ function inspectSshIsolation(container: DockerInspection, port: number, workspac
 
 async function runtimeInventory(state: LoadedState): Promise<{ containers: string[]; networks: string[]; volumes: string[] }> {
   const installation = state.config.installationId;
-  const expectedContainers = new Set([
-    gatewayContainerName(installation, state.paths.root),
-    ...state.config.computers.flatMap((computer) => computerRuntimeContainerNames(state, computer)),
-  ]);
+  const expected = await configuredExpectedRuntimeResources(state);
   const actualContainers = (await docker(['ps', '--all', '--filter', `label=dev.qubicl.installation=${installation}`, '--format', '{{.Names}}'], { allowFailure: true })).split('\n').filter(Boolean);
-  const expectedNetworks = new Set([
-    gatewayNetworkName(installation, state.paths.root),
-    ...state.config.computers.flatMap((computer) => usesUnifiedComputerRuntime(computer)
-      ? [controlNetwork(installation, computer.id, state.paths.root)]
-      : [controlNetwork(installation, computer.id, state.paths.root), workspaceNetwork(installation, computer.id, state.paths.root)]),
-  ]);
   const project = projectName(installation, state.paths.root);
   const actualNetworks = (await docker(['network', 'ls', '--filter', `label=com.docker.compose.project=${project}`, '--format', '{{.Name}}'], { allowFailure: true })).split('\n').filter(Boolean);
-  const expectedVolumes = new Set(state.config.computers.filter((computer) => computer.capabilities.includes('viewer') && !usesUnifiedComputerRuntime(computer)).map((computer) => displaySocketVolume(installation, computer.id, state.paths.root)));
   const actualVolumes = (await docker(['volume', 'ls', '--filter', `label=com.docker.compose.project=${project}`, '--format', '{{.Name}}'], { allowFailure: true })).split('\n').filter(Boolean);
   return {
-    containers: actualContainers.filter((name) => !expectedContainers.has(name)).sort(),
-    networks: actualNetworks.filter((name) => !expectedNetworks.has(name)).sort(),
-    volumes: actualVolumes.filter((name) => !expectedVolumes.has(name)).sort(),
+    containers: actualContainers.filter((name) => !expected.containers.has(name)).sort(),
+    networks: actualNetworks.filter((name) => !expected.networks.has(name)).sort(),
+    volumes: actualVolumes.filter((name) => !expected.volumes.has(name)).sort(),
   };
 }
 

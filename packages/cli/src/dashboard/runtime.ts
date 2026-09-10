@@ -37,6 +37,9 @@ export function dashboardComposePath(root: string): string { return join(root, '
 export function dashboardContainerName(root: string, id: string): string {
   return isPrimaryRuntimeRoot(root) ? DASHBOARD_SERVICE : `${runtimeNamespace(id, root)}.dashboard`;
 }
+export function dashboardAssetNetworkName(root: string, id: string): string {
+  return `${runtimeNamespace(id, root)}-dashboard-assets`;
+}
 export async function readDashboardConfiguration(root: string): Promise<DashboardConfiguration | undefined> {
   let value: unknown;
   try { value = await readProtectedJson(dashboardConfigPath(root)); }
@@ -78,7 +81,7 @@ export function renderDashboardCompose(root: string, config: DashboardConfigurat
         },
       },
     },
-    networks: { dashboard_assets: { name: `${runtimeNamespace(config.installationId, root)}-dashboard-assets`, driver: 'bridge' } },
+    networks: { dashboard_assets: { name: dashboardAssetNetworkName(root, config.installationId), driver: 'bridge' } },
   };
 }
 export async function dashboardCatalogIdentity(): Promise<{ image: ImageIdentity; assetManifestSha256: string }> {
@@ -134,7 +137,7 @@ export function assertDashboardRuntimeInspection(infoValue: unknown, root: strin
     };
   };
   const labels = info?.Config?.Labels ?? {};
-  const expectedNetwork = `${runtimeNamespace(config.installationId, root)}-dashboard-assets`;
+  const expectedNetwork = dashboardAssetNetworkName(root, config.installationId);
   const configuredPorts = info?.HostConfig?.PortBindings ?? {};
   const configuredAssetPort = configuredPorts['3213/tcp'];
   const livePorts = info?.NetworkSettings?.Ports ?? {};

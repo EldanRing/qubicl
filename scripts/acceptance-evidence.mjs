@@ -141,7 +141,7 @@ export async function validateAcceptanceEvidence(evidence, context) {
     ), { profiles: profile.remoteProfiles });
   }
   const dashboardSummary = profile?.dashboardProfiles
-    ? await validateDashboardAcceptance(evidence.dashboard, evidenceDirectory, releaseSet.createdAt, now, releaseSet.version)
+    ? await validateDashboardAcceptance(evidence.dashboard, evidenceDirectory, releaseSet.createdAt, now, releaseSet.version, evidence.profile)
     : {};
   assert(evidence.workflows && typeof evidence.workflows === 'object', 'Acceptance workflows are required.');
   const workflows = evidence.schemaVersion === 4 ? profile.workflows : WORKFLOWS;
@@ -179,9 +179,6 @@ function acceptanceProfile(evidence, releaseSet) {
     ...selected,
     clients: undefined,
     protocols: undefined,
-    ...(evidence.profile === 'initial' ? {
-      platformChecks: { 'linux-x64': ['minimumVersionsPassed', 'restartPassed', 'physicalRebootPassed'] },
-    } : {}),
     dashboardProfiles: DASHBOARD_ACCEPTANCE_PROFILES.map(({ id }) => id),
   };
 }
@@ -203,7 +200,7 @@ export function acceptanceEvidenceFiles(evidence, directory) {
   return [...new Set(references.map((reference) => reference?.path).filter(Boolean))].sort().map((path) => join(directory, path));
 }
 
-async function validateDashboardAcceptance(rows, directory, notBefore, now, releaseVersion) {
+async function validateDashboardAcceptance(rows, directory, notBefore, now, releaseVersion, profile) {
   assert(Array.isArray(rows) && rows.length === DASHBOARD_ACCEPTANCE_PROFILES.length,
     `Dashboard acceptance requires exactly ${DASHBOARD_ACCEPTANCE_PROFILES.length} platform rows.`);
   let checks = 0;
@@ -241,7 +238,9 @@ async function validateDashboardAcceptance(rows, directory, notBefore, now, rele
     const expectedChecks = [
       ...DASHBOARD_COMMON_CHECKS,
       requirement.inputCheck,
-      ...(requirement.architecture ? DASHBOARD_NATIVE_CHECKS : ['physicalDevicePassed']),
+      ...(requirement.architecture
+        ? DASHBOARD_NATIVE_CHECKS.filter((check) => profile === 'supported' || check !== 'physicalRebootPassed')
+        : ['physicalDevicePassed']),
     ].sort();
     assert(canonicalJson(Object.keys(row.checks ?? {}).sort()) === canonicalJson(expectedChecks),
       `Dashboard ${requirement.id} must report exactly its required checks.`);

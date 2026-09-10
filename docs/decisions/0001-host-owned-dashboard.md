@@ -1,6 +1,6 @@
 # Host-owned management and isolated dashboard assets
 
-Status: implemented for v0.5.0; release acceptance pending.
+Status: implemented for v0.5.1; release acceptance pending.
 
 Qubicl management can change Docker resources, durable homes and credentials.
 Giving the gateway or browser frontend unrestricted host authority would extend
