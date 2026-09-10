@@ -9,6 +9,7 @@ import {
   IMAGE_NAMES,
   PLATFORMS,
   assertCatalogIdentity,
+  assertCurrentTrivyDatabase,
   assertReviewedTrivyVersion,
   assertTrivyReportPrivacy,
   assertTrivyScanBinding,
@@ -97,9 +98,11 @@ if (buildImages) {
   toolVersions.buildx = await capture('docker', ['buildx', 'version']);
 }
 if (scanImages) {
+  await run('trivy', ['image', '--download-db-only']);
   toolVersions.trivy = await capture('trivy', ['--version']);
   trivyDetails = JSON.parse(await capture('trivy', ['--version', '--format', 'json']));
   assertReviewedTrivyVersion(trivyDetails.Version);
+  assertCurrentTrivyDatabase(trivyDetails.VulnerabilityDB);
 }
 
 assert(clean === '', 'Local candidate assembly requires a clean Git worktree.');

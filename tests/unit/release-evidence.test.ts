@@ -629,7 +629,12 @@ test('filtered Trivy bindings reject mismatched platform config, layers, and dif
 });
 
 test('Trivy scanner evidence requires an identified scanner and a fresh exact database', async () => {
-  const { REQUIRED_TRIVY_VERSION, assertReviewedTrivyVersion, assertTrivyScannerIdentity } = await import(pathToFileURL(join(root, 'scripts', 'candidate-evidence.mjs')).href);
+  const {
+    REQUIRED_TRIVY_VERSION,
+    assertCurrentTrivyDatabase,
+    assertReviewedTrivyVersion,
+    assertTrivyScannerIdentity,
+  } = await import(pathToFileURL(join(root, 'scripts', 'candidate-evidence.mjs')).href);
   const bindings = {
     schemaVersion: 1,
     createdAt: '2026-08-23T12:00:00.000Z',
@@ -668,6 +673,14 @@ test('Trivy scanner evidence requires an identified scanner and a fresh exact da
   }), /required for this candidate/);
   assert.doesNotThrow(() => assertReviewedTrivyVersion(REQUIRED_TRIVY_VERSION));
   assert.throws(() => assertReviewedTrivyVersion('0.73.0'), /required for Qubicl 0\.5/);
+  assert.doesNotThrow(() => assertCurrentTrivyDatabase(
+    bindings.scanner.vulnerabilityDatabase,
+    '2026-08-23T13:00:00.000Z',
+  ));
+  assert.throws(() => assertCurrentTrivyDatabase(
+    bindings.scanner.vulnerabilityDatabase,
+    '2026-08-23T18:00:00.000Z',
+  ), /must be refreshed/);
   const stale = structuredClone(bindings);
   stale.scanner.vulnerabilityDatabase.UpdatedAt = '2026-08-20T11:00:00.000Z';
   assert.throws(() => assertTrivyScannerIdentity(stale, '2026-08-23T13:00:00.000Z'), /stale/);

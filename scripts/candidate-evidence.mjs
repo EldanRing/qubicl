@@ -707,6 +707,18 @@ export function assertReviewedTrivyVersion(version) {
     `Trivy ${REQUIRED_TRIVY_VERSION} is required for Qubicl 0.5 candidate creation; found ${version}.`);
 }
 
+export function assertCurrentTrivyDatabase(database, now = new Date().toISOString()) {
+  assert(Number.isInteger(database?.Version) && isoDate(database?.UpdatedAt)
+    && isoDate(database?.DownloadedAt) && isoDate(database?.NextUpdate),
+  'Trivy vulnerability database metadata is incomplete.');
+  const evaluated = Date.parse(now);
+  const updated = Date.parse(database.UpdatedAt);
+  const downloaded = Date.parse(database.DownloadedAt);
+  const nextUpdate = Date.parse(database.NextUpdate);
+  assert(updated <= evaluated && downloaded <= evaluated && nextUpdate > evaluated,
+    'Trivy vulnerability database must be refreshed before candidate metadata is captured.');
+}
+
 function requiresReviewedTrivyVersion(value) {
   const match = /^(\d+)\.(\d+)\.(\d+)(?:-|$)/u.exec(`${value}`);
   if (!match) return false;

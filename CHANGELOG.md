@@ -33,6 +33,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Candidate construction refreshes and validates the Trivy vulnerability
+  database before capturing scanner metadata, so the retained database
+  timestamp and digest describe the same scans.
 - Release documentation distinguishes the v0.1.0 directly tested platform
   baselines from the narrower v0.5 initial candidate evidence. Publisher
   examples include every mandatory signed-evidence input and the separately

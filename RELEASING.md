@@ -125,7 +125,9 @@ worktree, runs a fresh `npm ci`, and retains lockfile, registry, installed-tree,
 audit, and registry-signature evidence. It then creates the six multi-platform
 image archives first, generates their exact catalog, builds npm/native artifacts
 once against that catalog, and reruns source/npm/native acceptance against the
-staged bytes. Each amd64/arm64 Trivy run receives its own one-manifest OCI view;
+staged bytes. Before recording scanner identity, it explicitly refreshes the
+Trivy vulnerability database and rejects metadata whose next-update time has
+already passed. Each amd64/arm64 Trivy run receives its own one-manifest OCI view;
 the builder verifies the selected index, manifest, configuration, compressed
 layers, rootfs diff IDs, and report identity before retaining the report. It
 writes `oci-efficiency.json` for v0.2 and later from those exact archives and
