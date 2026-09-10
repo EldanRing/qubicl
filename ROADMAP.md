@@ -1,7 +1,7 @@
 # Qubicl roadmap
 
-Qubicl `0.1.x` is the first public, pre-1.0 series. It is intended for real
-local use, while interfaces and the state format may still evolve. The roadmap
+Qubicl is a public, pre-1.0 project intended for real local use, while
+interfaces and the state format may still evolve. The roadmap
 below describes product direction rather than a promise of dates or a hidden
 release checklist.
 
@@ -18,8 +18,8 @@ release checklist.
 
 ## Product direction
 
-- Better local observability for computers, leases, resources, audits, and
-  published previews without replacing the CLI as the source of truth.
+- Continue improving the local dashboard's observability, recovery, and
+  administrative workflows while keeping the CLI as the source of truth.
 - More portable templates and devcontainer workflows while keeping Qubicl's
   capability manifests authoritative.
 - Richer browser diagnostics and artifact workflows using the existing managed

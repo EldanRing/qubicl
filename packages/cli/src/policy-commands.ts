@@ -1,3 +1,4 @@
+import { operationOutput } from './operation-context.js';
 import { join } from 'node:path';
 import {
   ConfigSchema,
@@ -398,4 +399,4 @@ function toolDetail(tool: ComputerToolName): string {
   return title ? `${tool}: ${toolDefinitions[tool].description}` : `Qubicl tool: ${tool}`;
 }
 function skillProfileDetail(compatibility: Preset): string { return `Enable the tested Qubicl-native skills compatible with ${compatibility}.`; }
-function printResult(result: Record<string, unknown>, args: ParsedArgs, heading?: string): void { if (heading && !flag(args, 'json') && process.stdout.isTTY) console.log(heading); console.log(JSON.stringify(result, null, 2)); }
+function printResult(result: Record<string, unknown>, args: ParsedArgs, heading?: string): void { if (heading && !flag(args, 'json') && process.stdout.isTTY) operationOutput('log', heading); operationOutput('log', JSON.stringify(result, null, 2)); }

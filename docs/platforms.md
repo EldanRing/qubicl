@@ -17,17 +17,24 @@ One successful run does not silently promote a best-effort row. Changing a
 public support claim requires reviewing and versioning the matrix as well as
 retaining the corresponding release evidence.
 
-| Host shape | Support | Validation | Current boundary |
-| --- | --- | --- | --- |
-| Linux x64 | Supported | Directly tested | Native Linux CLI with a local Linux Docker Engine or Docker Desktop |
-| Linux ARM64 | Best-effort | Not directly tested | Native Linux CLI; ARM64 images and archive are produced, but no physical-host claim is made |
-| Apple Silicon macOS | Supported | Directly tested | Native arm64 CLI with Docker Desktop's Linux VM |
-| Intel macOS | Best-effort | Not directly tested | Native x64 CLI with Docker Desktop's Linux VM |
-| Windows 11 x64 through Ubuntu 24.04 on WSL 2 | Supported | Directly tested | Linux CLI, state, and Docker access stay inside WSL 2; Docker Desktop supplies the Linux engine |
-| Windows 11 x64 through another current WSL 2 distribution | Best-effort | Not directly tested | Must meet the same Node, glibc, filesystem, Docker, and interoperability contract |
-| Windows on ARM through WSL 2 | Best-effort | Not directly tested | No physical-host claim is made |
-| Native Windows CLI | Unsupported | Not directly tested | Qubicl publishes no native Windows archive |
-| WSL 1 | Unsupported | Not directly tested | Setup and doctor fail closed |
+| Host shape | Support | Validation | Evidence baseline | Current boundary |
+| --- | --- | --- | --- | --- |
+| Linux x64 | Supported | Directly tested | v0.1.0 | Native Linux CLI with a local Linux Docker Engine or Docker Desktop |
+| Linux ARM64 | Best-effort | Not directly tested | — | Native Linux CLI; ARM64 images and archive are produced, but no physical-host claim is made |
+| Apple Silicon macOS | Supported | Directly tested | v0.1.0 | Native arm64 CLI with Docker Desktop's Linux VM |
+| Intel macOS | Best-effort | Not directly tested | — | Native x64 CLI with Docker Desktop's Linux VM |
+| Windows 11 x64 through Ubuntu 24.04 on WSL 2 | Supported | Directly tested | v0.1.0 | Linux CLI, state, and Docker access stay inside WSL 2; Docker Desktop supplies the Linux engine |
+| Windows 11 x64 through another current WSL 2 distribution | Best-effort | Not directly tested | — | Must meet the same Node, glibc, filesystem, Docker, and interoperability contract |
+| Windows on ARM through WSL 2 | Best-effort | Not directly tested | — | No physical-host claim is made |
+| Native Windows CLI | Unsupported | Not directly tested | — | Qubicl publishes no native Windows archive |
+| WSL 1 | Unsupported | Not directly tested | — | Setup and doctor fail closed |
+
+The directly tested labels record historical v0.1.0 baselines. For the v0.5
+initial release, current-candidate general platform evidence is Linux x64 only.
+Separate dashboard-specific evidence covers native Linux x64, Apple Silicon
+macOS, and physical iPhone Safari. Those narrower rows do not revalidate general
+macOS or any Windows/WSL behavior for the v0.5 candidate; those current-candidate
+platform rows remain requirements of the `supported` profile.
 
 Native Windows and WSL 1 are unsupported. Qubicl computers are Linux
 containers on every host; macOS and Windows support does not mean native
@@ -44,10 +51,11 @@ best-effort platform by themselves.
 
 ## macOS with Docker Desktop
 
-Apple Silicon is the directly tested macOS host. Intel macOS remains
-best-effort until equivalent physical-host evidence is retained. Use the native
-Qubicl archive or npm installation for the Mac's architecture; do not substitute
-the other architecture through an emulation layer when recording acceptance.
+The matrix designates Apple Silicon as the directly tested macOS host from its
+v0.1.0 baseline. Intel macOS remains best-effort until equivalent physical-host
+evidence is retained. Use the native Qubicl archive or npm installation for the
+Mac's architecture; do not substitute the other architecture through an
+emulation layer when recording acceptance.
 
 Install a supported Node.js 22 or 24 release, Docker Desktop 4.29 or later, and
 Docker Compose 2.24 or later. Start Docker Desktop and wait until its engine is
@@ -96,3 +104,19 @@ needed for diagnosis.
 
 For Windows, continue with the focused [WSL 2 guide](wsl.md). General failures
 and safe diagnostic sharing are covered in [Troubleshooting](troubleshooting.md).
+
+## Dashboard qualification
+
+The new management helper is restricted to native Linux x64 and Apple Silicon
+macOS. Existing WSL CLI workflows remain available; dashboard service installation
+on WSL, native Windows and Intel macOS is deferred. Linux uses `systemd --user`
+with a foreground fallback; macOS uses a user LaunchAgent. Neither starts Docker
+or claims pre-login availability. Current-candidate native Linux/macOS
+service/TLS/reboot and physical iPhone Safari dashboard acceptance must be
+retained for v0.5. This is dashboard-specific evidence; it does not claim a
+general v0.5 macOS platform run. Focused source tests and a responsive
+mock-browser run do not establish those results. The v0.5 acceptance validator
+requires the exact native architecture, service identity, TLS identity and
+successful reboot checks; the phone row must identify a physical iPhone running
+Safari. These requirements also apply to the initial release tier. See
+[the evidence contract](development.md#dashboard-development-and-v05-acceptance).

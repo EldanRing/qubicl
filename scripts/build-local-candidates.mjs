@@ -9,6 +9,7 @@ import {
   IMAGE_NAMES,
   PLATFORMS,
   assertCatalogIdentity,
+  assertReviewedTrivyVersion,
   assertTrivyReportPrivacy,
   assertTrivyScanBinding,
   canonicalJson,
@@ -48,7 +49,7 @@ Build unpublished release candidates entirely on the current host.
   --catalog PATH      Embed an already-generated exact release catalog
   --help              Show this help
 
-A complete Linux x64 build creates five multi-architecture OCI archives first,
+A complete Linux x64 build creates six multi-architecture OCI archives first,
 generates their digest/size catalog, then builds and tests the final CLI artifacts.
 Binary-only and --skip-images builds require --catalog. Nothing is uploaded.`);
   process.exit(0);
@@ -68,7 +69,7 @@ const supportedTargets = new Set(['linux-x64', 'linux-arm64', 'darwin-x64', 'dar
 const target = `${process.platform}-${process.arch}`;
 assert(supportedTargets.has(target), `Native candidates are not supported on ${target}.`);
 if (!binaryOnly && target !== 'linux-x64') throw new Error('Complete local candidates must be built on Linux x64; use --binary-only on this host.');
-if (!buildImages && !options.catalog) throw new Error('--binary-only and --skip-images require --catalog PATH from an already-inspected five-image candidate set.');
+if (!buildImages && !options.catalog) throw new Error('--binary-only and --skip-images require --catalog PATH from an already-inspected six-image candidate set.');
 if (buildImages && options.catalog) throw new Error('--catalog cannot be combined with a build that generates new image candidates.');
 
 const workspace = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
@@ -90,11 +91,16 @@ const staging = join(outputRoot, `.${version}-${shortRevision}-${target}.${proce
 const clean = await capture('git', ['status', '--porcelain']);
 const toolVersions = { node: process.version, npm: await capture('npm', ['--version']) };
 const scanBindings = [];
+let trivyDetails;
 if (buildImages) {
   toolVersions.docker = await capture('docker', ['version', '--format', '{{.Server.Version}}']);
   toolVersions.buildx = await capture('docker', ['buildx', 'version']);
 }
-if (scanImages) toolVersions.trivy = await capture('trivy', ['--version']);
+if (scanImages) {
+  toolVersions.trivy = await capture('trivy', ['--version']);
+  trivyDetails = JSON.parse(await capture('trivy', ['--version', '--format', 'json']));
+  assertReviewedTrivyVersion(trivyDetails.Version);
+}
 
 assert(clean === '', 'Local candidate assembly requires a clean Git worktree.');
 await assertAbsent(candidateRoot, `Candidate output already exists at ${candidateRoot}.`);
@@ -108,6 +114,7 @@ const metadataEnvironment = releaseEnvironment({
 
 const imageSpecs = [
   { name: 'gateway', context: 'gateway' },
+  { name: 'dashboard', context: 'dashboard', dashboard: true },
   { name: 'file-system', context: 'computer', preset: 'file-system' },
   { name: 'browser', context: 'computer', preset: 'browser' },
   { name: 'computer', context: 'computer', preset: 'computer' },
@@ -127,8 +134,10 @@ try {
     // This first build creates only the image contexts. Final npm/native bytes are
     // built once after the exact OCI catalog exists.
     await run('npm', ['run', 'build'], { env: metadataEnvironment });
+    const dashboardManifestPath = join(root, 'packages', 'cli', 'dist', 'assets', 'dashboard', 'asset-manifest.json');
+    const dashboardAssetManifestSha256 = await sha256(dashboardManifestPath);
     console.log(`Building image candidates with at most ${LOCAL_CANDIDATE_CONCURRENCY} concurrent jobs.`);
-    await runWithConcurrency(imageSpecs, buildImageCandidate);
+    await runWithConcurrency(imageSpecs, (spec) => buildImageCandidate(spec, dashboardAssetManifestSha256));
     if (scanImages) {
       console.log('Scanning image candidates serially against the shared local Trivy cache.');
       for (const spec of imageSpecs) await scanImageCandidate(spec);
@@ -149,6 +158,7 @@ try {
       '--revision', revision,
       '--source', source,
       '--owner', owner,
+      '--dashboard-manifest', dashboardManifestPath,
     ], { env: metadataEnvironment });
   } else {
     await run('npm', ['run', 'build:types'], { env: metadataEnvironment });
@@ -221,7 +231,6 @@ try {
       releaseTier,
     });
     await writeFile(join(staging, 'trivy-summary.json'), `${JSON.stringify(security, null, 2)}\n`, { mode: 0o644 });
-    const trivyDetails = JSON.parse(await capture('trivy', ['--version', '--format', 'json']));
     const trivyDatabase = resolve(process.env.TRIVY_CACHE_DIR ?? join(homedir(), '.cache', 'trivy'), 'db', 'trivy.db');
     await writeFile(join(staging, 'trivy-bindings.json'), `${JSON.stringify({
       schemaVersion: 2,
@@ -313,7 +322,7 @@ try {
   throw error;
 }
 
-async function buildImageCandidate(spec) {
+async function buildImageCandidate(spec, dashboardAssetManifestSha256) {
   const archive = join(staging, `qubicl-${spec.name}.oci.tar`);
   const repository = `ghcr.io/${owner}/qubicl-${spec.name}:${version}`;
   const args = [
@@ -337,11 +346,15 @@ async function buildImageCandidate(spec) {
       '--build-arg', `QUBICL_CONTRACT_CAPABILITIES=${manifest.capabilities.join(',')}`,
       '--build-arg', `QUBICL_MANIFEST_SHA256=${canonicalDigest(manifest)}`,
     );
+  } else if (spec.dashboard) {
+    assert(dashboardAssetManifestSha256, 'Dashboard asset-manifest identity was not captured before image construction.');
+    args.push('--build-arg', `QUBICL_ASSET_MANIFEST_SHA256=${dashboardAssetManifestSha256}`);
   }
   args.push(join(root, 'packages', 'cli', 'dist', 'assets', spec.context));
   await run('docker', args, { env: metadataEnvironment });
   const inspectArgs = ['scripts/inspect-oci-candidate.mjs', archive, version, revision, source];
   if (spec.preset) inspectArgs.push(spec.preset, join(root, 'packages', 'cli', 'dist', 'assets', 'computer', 'manifests', `${spec.preset}.json`));
+  else if (spec.dashboard) inspectArgs.push('dashboard', dashboardAssetManifestSha256);
   await run(process.execPath, inspectArgs, { env: metadataEnvironment });
 }
 
@@ -428,7 +441,9 @@ async function scanImageCandidate(spec) {
 }
 
 function catalogImage(catalog, name) {
-  return name === 'gateway' ? catalog.gateway : catalog.presets[name].image;
+  if (name === 'gateway') return catalog.gateway;
+  if (name === 'dashboard') return catalog.dashboard.image;
+  return catalog.presets[name].image;
 }
 
 function canonicalDigest(value) {

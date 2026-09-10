@@ -27,6 +27,8 @@ await mkdir(new URL('computer/', assets), { recursive: true });
 await mkdir(new URL('computer/manifests/', assets), { recursive: true });
 await mkdir(new URL('computer/node_modules/playwright-core/lib/', assets), { recursive: true });
 await mkdir(new URL('computer/skills/', assets), { recursive: true });
+await command(process.execPath, [fileURLToPath(new URL('./build-dashboard.mjs', import.meta.url)), '--out-dir', fileURLToPath(new URL('dashboard/', assets))], root);
+await command(process.execPath, [fileURLToPath(new URL('../node_modules/typescript/bin/tsc', import.meta.url)), '-p', 'packages/dashboard', '--pretty', 'false'], root);
 
 const contracts = await import(new URL('../packages/core/dist/presets.js', import.meta.url));
 const catalog = process.env.QUBICL_IMAGE_CATALOG_PATH
@@ -38,6 +40,8 @@ for (const preset of contracts.CURATED_PRESETS) {
 }
 await writeFile(new URL('image-catalog.json', assets), `${JSON.stringify(catalog, null, 2)}\n`);
 
+const dashboardBrowserMetafile = JSON.parse(await readFile(new URL('dashboard/browser-metafile.json', assets), 'utf8'));
+const dashboardServerMetafile = JSON.parse(await readFile(new URL('dashboard/server-metafile.json', assets), 'utf8'));
 const [cliBuild, gatewayBuild, controlBuild] = await Promise.all([
   build({
     entryPoints: [fileURLToPath(new URL('../packages/cli/src/main.ts', import.meta.url))],
@@ -89,6 +93,8 @@ const [cliBuild, gatewayBuild, controlBuild] = await Promise.all([
 
 await Promise.all([
   cp(new URL('../packages/cli/assets/chromium-seccomp.json', import.meta.url), new URL('chromium-seccomp.json', assets)),
+  cp(new URL('../images/dashboard/Dockerfile', import.meta.url), new URL('dashboard/Dockerfile', assets)),
+  cp(new URL('../LICENSE', import.meta.url), new URL('dashboard/LICENSE', assets)),
   cp(new URL('../images/gateway/Dockerfile', import.meta.url), new URL('gateway/Dockerfile', assets)),
   cp(new URL('../images/computer/Dockerfile', import.meta.url), new URL('computer/Dockerfile', assets)),
   cp(new URL('../images/computer/entrypoint.sh', import.meta.url), new URL('computer/entrypoint.sh', assets)),
@@ -123,6 +129,8 @@ const [bundledCliPackages, gatewayPackages, bundledControlPackages] = await Prom
     { bundle: 'cli', metafile: cliBuild.metafile },
     { bundle: 'gateway', metafile: gatewayBuild.metafile },
     { bundle: 'control', metafile: controlBuild.metafile },
+    { bundle: 'dashboard-browser', metafile: dashboardBrowserMetafile },
+    { bundle: 'dashboard-server', metafile: dashboardServerMetafile },
   ]),
   collectBundledPackages(rootPath, [{ bundle: 'gateway', metafile: gatewayBuild.metafile }]),
   collectBundledPackages(rootPath, [{ bundle: 'control', metafile: controlBuild.metafile }]),
@@ -145,7 +153,7 @@ const applicationSbom = generateSpdxDocument({
   source,
   artifactKind: 'npm-application',
   packages: cliPackages,
-  extraPackages: [{
+  extraPackages: [{ name: 'qubicl-dashboard', version: metadata.version, license: 'Apache-2.0', downloadLocation: source, purl: `pkg:github/EldanRing/qubicl@${metadata.revision}#packages/dashboard`, comment: 'Static management UI and isolated static asset server.' }, {
     name: 'qubicl-core-skill-adaptations',
     version: metadata.version,
     license: 'MIT',
@@ -157,6 +165,7 @@ const applicationSbom = generateSpdxDocument({
 await Promise.all([
   writeFile(new URL('../packages/cli/dist/THIRD_PARTY_NOTICES.txt', import.meta.url), `${cliNotices}${coreSkillsNotice}`),
   writeFile(new URL('../packages/cli/dist/SBOM.spdx.json', import.meta.url), `${JSON.stringify(applicationSbom, null, 2)}\n`),
+  writeFile(new URL('dashboard/THIRD_PARTY_NOTICES.txt', assets), await generateThirdPartyNoticesFromPackages(await collectBundledPackages(rootPath, [{ bundle: 'dashboard-browser', metafile: dashboardBrowserMetafile }, { bundle: 'dashboard-server', metafile: dashboardServerMetafile }]))),
   writeFile(new URL('gateway/THIRD_PARTY_NOTICES.txt', assets), gatewayNotices),
   writeFile(new URL('computer/THIRD_PARTY_NOTICES.txt', assets), `${controlNotices}${coreSkillsNotice}`),
   writeFile(new URL('computer/PLAYWRIGHT_THIRD_PARTY_NOTICES.txt', assets), playwrightNotices),

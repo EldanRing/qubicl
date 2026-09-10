@@ -6,17 +6,24 @@ artifact.
 
 ## The practical pre-1.0 policy
 
-`0.1.x` is an initial pre-1.0 series. Linux x64, Apple Silicon macOS with Docker
-Desktop, and Windows 11 x64 through Ubuntu 24.04 on WSL 2 with Docker Desktop
-are directly exercised hosts. Native Windows and WSL 1 are unsupported; Linux
-ARM64, Intel macOS, Windows on ARM, and other WSL distributions are best-effort.
-Missing external client or best-effort hardware coverage does not block 0.1.
-That exception ends with the v0.1 series: every v0.2-or-later publication,
+Qubicl remains a pre-1.0 series. The supported-host policy covers Linux x64,
+Apple Silicon macOS with Docker Desktop, and Windows 11 x64 through Ubuntu
+24.04 on WSL 2 with Docker Desktop. Their directly tested classifications
+record historical v0.1.0 evidence baselines; they do not claim that every
+current candidate repeats the full macOS and Windows matrices. Native Windows
+and WSL 1 are unsupported; Linux ARM64, Intel macOS, Windows on ARM, and other
+WSL distributions are best-effort.
+The initial v0.1 series allowed missing external-client or best-effort hardware
+coverage. That exception ended with v0.1: every v0.2-or-later publication,
 including one built with the `initial` candidate tier, requires the signed
 schema-4 release-set acceptance bundle. The signed tier selects the acceptance
-profile: `initial` records the exact Linux x64 evidence required for an honest
-pre-1.0 release, while `supported` retains the complete cross-platform,
-real-client, reboot, and independent-review matrix.
+profile: `initial` records the exact Linux x64 general platform, lifecycle, and
+native remote-access evidence required for an honest pre-1.0 release, while
+`supported` retains the complete cross-platform and independent-review matrix.
+Beginning with v0.5, both tiers also require the complete real-client/protocol
+matrix plus dashboard-specific native Linux x64, Apple Silicon macOS, and
+physical-iPhone Safari evidence. The narrower dashboard rows do not establish
+general current-candidate macOS or Windows testing.
 The versioned [platform support matrix](conformance/platform-support-v1.json)
 is the source of truth for these support and evidence classifications.
 
@@ -25,9 +32,9 @@ An initial candidate must still:
 - come from a clean, privacy-checked public source revision;
 - pass source, package, native, and Docker acceptance on the release host;
 - contain exact amd64/arm64 OCI archives, catalogs, SBOMs, provenance, checksums,
-  and ten retained Trivy reports;
-- bind post-freeze Codex, Open WebUI, all four protocol probes, Linux x64
-  lifecycle, and native-Linux remote-access evidence in schema 4;
+  and twelve retained Trivy reports;
+- bind post-freeze client, protocol, Linux x64 lifecycle, native-Linux
+  remote-access, and v0.5 dashboard evidence in schema 4;
 - contain no scanner-detected secrets; and
 - reject every HIGH/CRITICAL finding for which the scanner reports an available
   fix unless an exact current review record covers it.
@@ -82,13 +89,15 @@ Prerequisites on the Linux x64 release host:
 
 - the Node/npm versions pinned by this repository;
 - Docker Engine/Desktop, Compose, and a multi-platform Buildx builder;
-- the locally pinned Gitleaks and Trivy versions documented in
-  [docs/development.md](docs/development.md); and
+- checksum-verified Gitleaks 8.30.1, or a separately reviewed compatible build;
+- Trivy 0.74.0, which the v0.5 candidate tooling enforces; and
 - a clean checkout of the new public repository at the release revision.
 
 Run:
 
 ```sh
+gitleaks version
+trivy --version
 npm ci
 npm run public:check
 npm run check:release
@@ -113,7 +122,7 @@ remains available for diagnosis or explicit cleanup but cannot be promoted.
 
 `candidate:release` first exports the reviewed commit into a disposable clean
 worktree, runs a fresh `npm ci`, and retains lockfile, registry, installed-tree,
-audit, and registry-signature evidence. It then creates the five multi-platform
+audit, and registry-signature evidence. It then creates the six multi-platform
 image archives first, generates their exact catalog, builds npm/native artifacts
 once against that catalog, and reruns source/npm/native acceptance against the
 staged bytes. Each amd64/arm64 Trivy run receives its own one-manifest OCI view;
@@ -126,7 +135,7 @@ report from the retained bytes, and publication includes it as release evidence.
 The builder writes an ignored candidate beneath:
 
 ```text
-release/candidates/0.2.1-<revision>/linux-x64/
+release/candidates/0.5.0-<revision>/linux-x64/
 ```
 
 From the same clean reviewed revision, verify it without rebuilding or rerunning
@@ -159,29 +168,51 @@ distribution.
 
 Install Skopeo on the release host before publication; it copies the exact
 multi-platform OCI archives to GHCR without rebuilding them. Authenticate npm
-and `gh`, then inspect the publication plan:
+and `gh`. Before even the publisher dry run, obtain separate authorization to
+fast-forward the exact reviewed release commit to `origin/main`; build, signing,
+or publication approval does not substitute for that push approval. Push only
+that reviewed commit, then confirm the remote-tracking branch resolves to it:
+
+```sh
+git fetch origin main
+git merge-base --is-ancestor origin/main HEAD
+git push origin HEAD:main
+git fetch origin main
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+```
+
+Then inspect the publication plan:
 
 ```sh
 npm run release:publish -- --candidate /path/to/candidate \
   --public-key /secure/offline/qubicl-release.public.pem \
-  --signature /path/to/candidate.signature.json
+  --signature /path/to/candidate.signature.json \
+  --release-set /path/to/release-set.json \
+  --release-set-signature /path/to/release-set-signature.json \
+  --acceptance /path/to/acceptance.json \
+  --acceptance-signature /path/to/acceptance-signature.json
 ```
 
 The dry run verifies the full candidate and the exact checkout but performs no
 remote mutation. After explicit approval:
 
 ```sh
-QUBICL_RELEASE_APPROVAL=0.2.1 npm run release:publish -- \
+QUBICL_RELEASE_APPROVAL=0.5.0 npm run release:publish -- \
   --candidate /path/to/candidate \
   --public-key /secure/offline/qubicl-release.public.pem \
-  --signature /path/to/candidate.signature.json --publish --yes
+  --signature /path/to/candidate.signature.json \
+  --release-set /path/to/release-set.json \
+  --release-set-signature /path/to/release-set-signature.json \
+  --acceptance /path/to/acceptance.json \
+  --acceptance-signature /path/to/acceptance-signature.json \
+  --publish --yes
 ```
 
 The guarded publisher:
 
 1. logs Skopeo into GHCR using the active GitHub CLI token without printing it;
-2. copies and verifies all five exact versioned OCI indexes;
-3. verifies that all five GHCR packages permit anonymous pulls;
+2. copies and verifies all six exact versioned OCI indexes;
+3. verifies that all six GHCR packages permit anonymous pulls;
 4. publishes the exact npm tarball under a temporary `next` tag and verifies its
    registry integrity;
 5. creates and pushes the annotated tag for the candidate version;
@@ -192,8 +223,8 @@ The guarded publisher:
 GitHub creates container packages pushed from the command line as private and
 does not provide a supported package-visibility REST operation. On the first
 run, the publisher therefore stops after the verified versioned image upload
-and prints the five package-settings links. Set each package to **Public**, then
-rerun the same command. The npm package is not published until all five image
+and prints the six package-settings links. Set each package to **Public**, then
+rerun the same command. The npm package is not published until all six image
 packages report public visibility, so `qubicl setup` cannot be stranded behind
 private images.
 
@@ -207,7 +238,7 @@ never changes repository or package visibility.
 From a clean user environment:
 
 ```sh
-npm install -g qubicl-cli@0.2.1
+npm install -g qubicl-cli@0.5.0
 qubicl setup
 qubicl doctor
 ```
@@ -250,9 +281,11 @@ For v0.2 and later release sets, acceptance schema 4 is mandatory; schema-3
 evidence remains readable only for v0.1. Schema 4 hash-binds the reviewed
 `client-conformance-v1.json` requirements and requires exact installed versions
 plus post-freeze evidence for every applicable surface in each required row.
-The initial profile requires Codex, Open WebUI, MCP stdio, MCP HTTP, OpenAPI,
-and Open Terminal. The supported profile requires all nine named applications
-and all four protocol probes. Adding this gate does not produce the evidence:
+For v0.2 through v0.4, the initial profile requires Codex, Open WebUI, MCP
+stdio, MCP HTTP, OpenAPI, and Open Terminal. The supported profile requires all
+nine named applications and all four protocol probes. Beginning with v0.5, the
+complete nine-application and four-protocol matrix is required by both tiers.
+Adding this gate does not produce the evidence:
 the required real-client runs must still be performed against the frozen
 candidate before acceptance is signed.
 

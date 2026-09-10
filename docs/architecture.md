@@ -1,18 +1,27 @@
 # Architecture
 
-Qubicl is a daemonless host CLI around Docker Compose. The CLI owns durable intent; Docker owns runtime containers.
+Qubicl is a host CLI around Docker Compose with an optional native dashboard
+helper. The CLI owns durable intent; Docker owns runtime containers.
 
 ## Components
 
 ### Host CLI
 
-`qubicl` validates a local Docker host, owns state under `~/.qubicl`, resolves exact image identities, renders runtime files, and invokes Compose. It leaves no resident host daemon. Mutations take a private lock and write a recovery journal before durable or runtime changes.
+`qubicl` validates a local Docker host, owns state under `~/.qubicl`, resolves
+exact image identities, renders runtime files, and invokes Compose. Normal CLI
+use leaves no resident host process. Operators can explicitly enable the native
+dashboard helper as a user service. Mutations take a private lock and write a
+recovery journal before durable or runtime changes.
 
 `qubicl setup` is the sole onboarding path. Its pure setup plan separates review from mutation: host/preset/resource checks and preview occur before confirmation; exact image acquisition, contract inspection, a no-network bind probe, and the setup transaction occur afterward.
 
 ### Image catalog and presets
 
-The CLI embeds a schema-validated catalog for the gateway and four preset images. Development entries use local tags and unknown registry sizes. Release entries must contain the multi-architecture index digest, per-platform manifest digest, measured download/expanded bytes, capability-manifest digest, limits, and startup budget.
+The CLI embeds a schema-validated catalog for the gateway, isolated dashboard,
+and four preset images. Development entries use local tags and unknown registry
+sizes. Release entries must contain the multi-architecture index digest,
+per-platform manifest digest, measured download/expanded bytes, applicable
+asset/capability-manifest digest, limits, and startup budget.
 
 Each computer image embeds a canonical version-1 manifest and matching OCI labels. The control service uses it to register the exact MCP/OpenAPI tool set. The host stores its expected digest; a mismatch prevents health from succeeding. Control protocol version 10 uses one bounded container per computer while retaining lease-transparent stdio sessions, compact/paginated model results, static and per-computer tool profiles, operator-controlled skills, explicit MCP result modes, the desktop-session handoff contract, Open Terminal compatibility, persistent browser automation, keyless web research, bounded rendered-DOM handoff, and authenticated port previews.
 
@@ -82,11 +91,11 @@ the host-local setting, while manifest export omits it.
 
 Coding-oriented tools keep that lease and process architecture while bounding model-facing output. Text reads default to 2,000 lines and 24 KB with explicit continuation offsets; supported image reads and screenshots become native MCP image content. Commands return one combined 24 KB tail by default (split streams are opt-in) and disclose the temporary retained-log path only after inline truncation; retained logs are capped at 100 MB and removed one hour after process exit. Directory listings are deterministic, root-relative, and cursor-paginated. Writes and exact-match multi-edits serialize per path; edits preserve UTF-8 BOMs and line endings and reject ambiguous or overlapping replacements.
 
-## State format 3
+## State format 4
 
 ```text
 ~/.qubicl/                       mode 0700
-├── config.yaml                  state v3; mode 0600
+├── config.yaml                  state v4; mode 0600
 ├── secrets.yaml                 raw tokens/internal credentials; mode 0600
 ├── transaction.yaml             temporary lifecycle journal; mode 0600
 ├── state-migration.yaml         temporary migration journal; mode 0600
@@ -97,8 +106,12 @@ Coding-oriented tools keep that lease and process architecture while bounding mo
 │   ├── ssh/                     optional private operator identity
 │   └── home/                    the computer's durable /home
 ├── trash/                       recoverable deleted computers
+├── dashboard/                   protected helper configuration, authentication, operations
+│   └── runtime/compose.yaml     isolated static asset service in the same Compose project
 └── runtime/
     ├── compose.yaml             generated, disposable
+    ├── backup-create.json       temporary exact-container pause/recovery journal
+    ├── upgrade-all.json         accepted catalog targets and completed checkpoints
     ├── preferences.json         private local-only operator preferences
     ├── image-contracts.json     exact inspected runtime image evidence
     ├── legacy-runtime-migration.json temporary verified runtime-name migration journal
@@ -121,3 +134,15 @@ State records requested and resolved image references, local content ID, expecte
 - Only `/home` is durable. Container root is not part of any lifecycle guarantee.
 
 See [Persistence and recovery](persistence.md) and the [Security model](security-model.md).
+
+
+## Administrative plane
+
+The [dashboard](dashboard.md) connects to a native host helper, which calls the
+same host lifecycle functions as the CLI under installation locking. The gateway
+exposes only narrowly authenticated operator metadata and exact stop/revoke
+operations; it has no general host-management channel. Browser assets come from
+an isolated static container and are independently verified by the helper. The
+helper owns administrative auth/TLS, scoped previews and durable receipts; the
+existing lifecycle journals own recoverable effects. This boundary is recorded
+in [decision 0001](decisions/0001-host-owned-dashboard.md).

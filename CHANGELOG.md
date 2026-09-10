@@ -4,6 +4,117 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
+## 0.5.0 - 2026-09-10
+
+### Added
+
+- Native host management helper and responsive light/dark dashboard, with
+  first-run setup, computer lifecycle/resources, controller/process metadata,
+  preview access, tools/skills/network policy, write-only scoped credentials,
+  manual home backups/checkpoints/clones, recovery, and operation history.
+- Optional login-time systemd user service or macOS LaunchAgent, a foreground
+  mode, and an authenticated local recovery interface independent of Docker.
+- Private direct HTTPS administration with host-supplied certificates, distinct
+  administrator/viewer identities, session management, and local password reset.
+- A sixth, isolated static dashboard image and catalog-bound asset manifest;
+  candidate, provenance, scan, packaging, and publisher checks cover all six
+  images on both architectures. v0.5 acceptance requires all nine clients, four
+  protocols, and explicit Linux/macOS/iPhone dashboard evidence.
+- Explicit `qubicl recover` for validated state, backup, and upgrade journals.
+
+### Changed
+
+- State format 4 requires an explicitly approved, backed-up migration; older
+  CLIs refuse the migrated state. Dashboard records use a separate schema 1 and
+  the image catalog uses schema 2.
+- Upgrade-all records accepted targets and checkpoints so interrupted updates
+  can resume only with matching catalog, platform, state and runtime identities.
+- Security maintenance follows the latest stable minor release line.
+
+### Fixed
+
+- Release documentation distinguishes the v0.1.0 directly tested platform
+  baselines from the narrower v0.5 initial candidate evidence. Publisher
+  examples include every mandatory signed-evidence input and the separately
+  authorized `origin/main` fast-forward prerequisite, and release prerequisites
+  identify the enforced Trivy 0.74.0 version.
+- Fresh core skill working copies report their catalog integrity as unchanged,
+  including skills whose reviewed packages contain nested resource files.
+- Fresh dashboard setup recognizes an absent Docker container and creates it
+  instead of reporting a conflicting runtime identity.
+- The static dashboard uses a dedicated ordinary bridge so Docker reliably
+  publishes its loopback-only asset port.
+- The root and npm README capability tables have real column headers so the
+  first row renders correctly.
+- Local preview token URLs continue to return their content directly; dashboard
+  tickets and remote preview tokens still redirect once to scrub credentials.
+- Network-policy changes detach the gateway from disposable per-computer
+  networks before Compose recreates them, avoiding active-endpoint failures.
+- Artifact verification recognizes the dashboard as a first-party SBOM
+  component while keeping it out of third-party notices.
+- Stopped dashboard containers can restart using their retained loopback port
+  configuration; running containers still require verified active publication.
+- Dashboard preview handoffs use the isolated preview origin, and plan Cancel
+  and Close controls work without submitting or validating password fields.
+- Backup recovery retains its journal when unpause leaves an unsafe or
+  inconsistent runtime. Absent-start recovery verifies the pinned image before
+  adopting a running computer.
+- v0.5 release acceptance requires native Linux x64 and Apple Silicon dashboard
+  service, TLS and reboot evidence in addition to browser/device checks.
+- Completed-process cleanup closes each output descriptor only once, preserving
+  unrelated requests when the operating system reuses file descriptor numbers.
+- Dashboard computer creation keeps connection handoffs out of helper logs.
+- Read-only backup verification, token display and credential listing leave
+  pending transactions untouched until explicit recovery.
+- Interrupted computer lifecycle changes retain exact container bindings for
+  recovery; upgrade recovery rejects replacement of an unreviewed container.
+- Dashboard recovery preserves stop/disable intent, and explicit starts adopt
+  the current bundled dashboard image and verified asset contract.
+- Dashboard updates, network approvals, diagnostics, settings and operation
+  streams use the host API contracts. Operation history stays chronological
+  after restarting the helper.
+- Dashboard error recovery, keyboard navigation, recovery-state actions and
+  phone navigation remain usable under the administrative security policy.
+- Cloning a running computer requires confirmation of its temporary pause.
+- Dashboard candidate builds pass the asset digest explicitly and OCI checks
+  verify the embedded manifest bytes as well as labels and provenance.
+- Start, stop and restart reject partial or inconsistent runtime groups and use
+  verified immutable container identities instead of broad name-based changes.
+- Network/resource/credential replacement uses the lifecycle recovery journal.
+- Backup creation journals exact paused containers, recovers interruption, and
+  publishes complete verified captures. Retention selects immutable source IDs
+  so renamed computers cannot remove another computer's backups.
+- Backup pruning rejects ambiguous reused historical names and preserves
+  archives with malformed metadata instead of treating them as retention targets.
+
+### Security
+
+- The guarded publisher requires the reviewed commit on canonical remote
+  `main`, binds the supplied signing key to the release-notes trust anchor, and
+  verifies every versioned image through an isolated anonymous registry client
+  before npm publication. Native executable builds no longer embed their
+  private source/build paths and reject those bytes before packaging.
+- The locked Hono runtime is updated to 4.13.7, resolving the current path
+  traversal, nested-form denial-of-service, and URL-fragment parsing advisories.
+- Administrator certificates reject additional IP, URI, email or DNS identities.
+  Expired and terminally rejected plans promptly discard retained credential
+  inputs without requiring another plan request.
+- Idle browser polling does not renew administrator sessions. Closing an
+  administrative listener terminates active event streams and connections.
+- Administrative passwords use bounded asynchronous scrypt; sessions enforce
+  user-idle and absolute expiry, rotation on reauthentication, memory-only local
+  authorization (no cross-port ambient cookie), Secure remote cookies, CSRF/origin/Host
+  checks, rate limits, and protected host storage.
+- Workloads and frontend containers receive no administrative authority.
+  Browser assets are checked against trusted path/type/size/digest contracts;
+  remote administration fails closed on unavailable or invalid trusted assets.
+- Management actions use session-bound expiring previews, final state/runtime
+  checks, interruption confirmation, sensitive-action reauthentication, and
+  private idempotent acceptance receipts without credential values.
+- Operator process/preview inspection bypasses agent lease acquisition only
+  through narrowly authenticated internal routes; metadata omits commands,
+  working directories, process output, credential values and lease proofs.
+
 ## 0.2.1 - 2026-09-04
 
 ### Fixed

@@ -75,7 +75,8 @@ test('candidate assembly wires bounded builds and isolated serial artifact accep
     readFile(join(process.cwd(), 'tests', 'e2e', 'run.mjs'), 'utf8'),
   ]);
 
-  assert.match(builder, /runWithConcurrency\(imageSpecs, buildImageCandidate\)/u);
+  assert.match(builder, /runWithConcurrency\(imageSpecs, \(spec\) => buildImageCandidate\(spec, dashboardAssetManifestSha256\)\)/u);
+  assert.match(builder, /async function buildImageCandidate\(spec, dashboardAssetManifestSha256\)/u);
   assert.match(builder, /for \(const spec of imageSpecs\) await scanImageCandidate\(spec\)/u);
   assert.match(builder, /for \(const args of acceptanceJobs\)/u);
   assert.doesNotMatch(builder, /runWithConcurrency\(acceptanceJobs/u);

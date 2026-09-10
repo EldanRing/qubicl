@@ -1,10 +1,9 @@
+import { operationOutput } from './operation-context.js';
 import { SecretsSchema, type ComputerConfig } from '@qubicl/core';
 import type { ParsedArgs } from './args.js';
 import { stringOption } from './args.js';
-import { compose, containerStatus } from './docker.js';
-import { computerEgressServiceName } from './runtime.js';
 import { loadState, statePaths, withStateLock, type LoadedState } from './state.js';
-import { createStateTransaction, executeStateTransaction } from './transactions.js';
+import { commitPolicyChange } from './network-policy.js';
 
 export async function secretCommand(args: ParsedArgs): Promise<void> {
   const action = required(args.positionals[0], 'secret action');
@@ -16,7 +15,7 @@ export async function secretCommand(args: ParsedArgs): Promise<void> {
     const secret = state.secrets.computers[computer.id]!;
     const entries = secret.brokerCredentials ??= [];
     if (action === 'list') {
-      console.log(JSON.stringify(entries.map(({ provider, ...entry }) => ({ ...entry, provider: { type: provider.type, ...providerReference(provider) } })), null, 2));
+      operationOutput('log', JSON.stringify(entries.map(({ provider, ...entry }) => ({ ...entry, provider: { type: provider.type, ...providerReference(provider) } })), null, 2));
       return;
     }
     if (action === 'remove') {
@@ -25,7 +24,7 @@ export async function secretCommand(args: ParsedArgs): Promise<void> {
       if (index === -1) throw new Error(`Credential ${id} was not found on ${computer.name}.`);
       entries.splice(index, 1);
       await saveAndRefresh(state, computer);
-      console.log(`Removed broker credential ${id} from ${computer.name}.`);
+      operationOutput('log', `Removed broker credential ${id} from ${computer.name}.`);
       return;
     }
     if (action !== 'add') throw new Error(`Unknown secret action ${action}.`);
@@ -41,15 +40,32 @@ export async function secretCommand(args: ParsedArgs): Promise<void> {
     entries.push({ id, baseUrl, pathPrefix, methods: methods as never, header, provider: provider as never, ...(expiresAt ? { expiresAt } : {}) });
     SecretsSchema.parse(state.secrets);
     await saveAndRefresh(state, computer);
-    console.log(`Added scoped broker credential ${id} to ${computer.name}; the value is not mounted into its workload containers.`);
+    operationOutput('log', `Added scoped broker credential ${id} to ${computer.name}; the value is not mounted into its workload containers.`);
   });
 }
 
 async function saveAndRefresh(state: LoadedState, computer: ComputerConfig): Promise<void> {
-  await executeStateTransaction(state.paths, createStateTransaction('config', state), { includeRuntime: false });
-  if ((await containerStatus(state, computer.id)).status !== 'absent') {
-    await compose(state, ['up', '--detach', '--force-recreate', '--no-deps', computerEgressServiceName(state, computer)]);
+  await commitPolicyChange(state, computer);
+}
+
+/** Write-only administrator operation; shares persistence with the CLI. */
+export async function manageBrokerCredential(
+  state: LoadedState, computer: ComputerConfig, action: 'add' | 'replace' | 'remove', input: Record<string, unknown>,
+): Promise<void> {
+  const id = typeof input.id === 'string' ? input.id : '';
+  if (!id) throw new Error('Credential ID is required.');
+  const secret = state.secrets.computers[computer.id]!;
+  const entries = secret.brokerCredentials ??= [];
+  const index = entries.findIndex((entry) => entry.id === id);
+  if (action === 'add' && index !== -1) throw new Error('Credential already exists.');
+  if (action !== 'add' && index === -1) throw new Error('Credential was not found.');
+  if (index !== -1) entries.splice(index, 1);
+  if (action !== 'remove') {
+    if (typeof input.value !== 'string' || !input.value) throw new Error('A new credential value is required.');
+    entries.push({ id, baseUrl: input.baseUrl, pathPrefix: input.pathPrefix ?? '/', methods: input.methods ?? ['GET'], header: input.header ?? 'Authorization', provider: { type: 'direct', value: input.value } } as never);
   }
+  SecretsSchema.parse(state.secrets);
+  await saveAndRefresh(state, computer);
 }
 
 async function parseProvider(type: string, reference: string | undefined): Promise<Record<string, string>> {

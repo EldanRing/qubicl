@@ -316,6 +316,120 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
       remoteSurfaces: remoteRequirements.requiredSurfaces.length,
       workflows: 6,
     });
+
+    const v05Initial: Record<string, any> = structuredClone(evidence);
+    v05Initial.profile = 'initial';
+    v05Initial.releaseSet.version = '0.5.0';
+    v05Initial.releaseSet.releaseTier = 'initial';
+    v05Initial.approvedBy = v05Initial.owner;
+    v05Initial.platforms = v05Initial.platforms.filter(({ id }: { id: string }) => id === 'linux-x64');
+    v05Initial.platforms[0]!.physicalRebootPassed = true;
+    v05Initial.remoteAccess = v05Initial.remoteAccess.filter(({ id }: { id: string }) => id === 'linux-x64-direct');
+    v05Initial.workflows = Object.fromEntries(Object.entries(v05Initial.workflows).filter(([id]) => [
+      'upgrade',
+      'backupRestoreInterruption',
+      'restart',
+      'fullTopologyPerformance',
+      'multipleComputers',
+      'remoteGateway',
+    ].includes(id)));
+    v05Initial.securityReview.reviewedBy = v05Initial.owner;
+    v05Initial.vulnerabilityReview.reviewedBy = v05Initial.owner;
+    v05Initial.privacyReview.reviewedBy = v05Initial.owner;
+    const dashboardChecks = {
+      loginPassed: true,
+      navigationPassed: true,
+      planExecutionPassed: true,
+      disconnectRecoveryPassed: true,
+      responsiveLayoutPassed: true,
+      themePassed: true,
+    };
+    const nativeDashboardChecks = {
+      ...dashboardChecks,
+      keyboardNavigationPassed: true,
+      helperServicePassed: true,
+      tlsPassed: true,
+      physicalRebootPassed: true,
+    };
+    v05Initial.dashboard = [
+      {
+        id: 'linux', platform: 'linux', deviceClass: 'desktop', architecture: 'x64',
+        qubiclVersion: '0.5.0', osVersion: 'Ubuntu 24.04.3', browserVersion: 'Chromium 140.0.0',
+        serviceManager: 'systemd-user', serviceIdentifier: 'org.qubicl.dashboard.0123456789abcdef.service',
+        tlsHostname: 'linux-admin.example.test', tlsProtocol: 'TLSv1.3', certificateFingerprint256: `sha256:${'7'.repeat(64)}`,
+        checks: nativeDashboardChecks, ...checked,
+      },
+      {
+        id: 'macos', platform: 'macos', deviceClass: 'desktop', architecture: 'arm64',
+        qubiclVersion: '0.5.0', osVersion: 'macOS 15.6.1', browserVersion: 'Safari 18.6',
+        serviceManager: 'launch-agent', serviceIdentifier: 'org.qubicl.dashboard.fedcba9876543210',
+        tlsHostname: 'mac-admin.example.test', tlsProtocol: 'TLSv1.3', certificateFingerprint256: `sha256:${'8'.repeat(64)}`,
+        checks: nativeDashboardChecks, ...checked,
+      },
+      {
+        id: 'iphone', platform: 'ios', deviceClass: 'phone', physicalDevice: true,
+        browserName: 'safari', deviceModel: 'iPhone 16', qubiclVersion: '0.5.0',
+        osVersion: 'iOS 18.6.2', browserVersion: 'Safari 18.6',
+        checks: { ...dashboardChecks, touchNavigationPassed: true, physicalDevicePassed: true }, ...checked,
+      },
+    ];
+    const v05InitialContext = {
+      ...initialContext,
+      releaseSet: { ...initialContext.releaseSet, version: '0.5.0' },
+    };
+    assert.deepEqual(await acceptance.validateAcceptanceEvidence(v05Initial, v05InitialContext), {
+      schemaVersion: 4,
+      profile: 'initial',
+      clients: requirements.clients.length,
+      protocols: requirements.protocols.length,
+      surfaces: [...requirements.clients, ...requirements.protocols]
+        .reduce((count: number, profile: { requiredSurfaces: string[] }) => count + profile.requiredSurfaces.length, 0),
+      platforms: 1,
+      remoteProfiles: 1,
+      remoteSurfaces: remoteRequirements.requiredSurfaces.length,
+      dashboardPlatforms: 3,
+      dashboardChecks: 28,
+      workflows: 6,
+    });
+    const v05MissingClient = structuredClone(v05Initial);
+    v05MissingClient.clients = v05MissingClient.clients.filter(({ id }: { id: string }) => id !== 'opencode');
+    await assert.rejects(acceptance.validateAcceptanceEvidence(v05MissingClient, v05InitialContext), /exactly 9 client rows/);
+    const v05MissingDashboard = structuredClone(v05Initial);
+    v05MissingDashboard.dashboard = v05MissingDashboard.dashboard.filter(({ id }: { id: string }) => id !== 'iphone');
+    await assert.rejects(acceptance.validateAcceptanceEvidence(v05MissingDashboard, v05InitialContext), /exactly 3 platform rows/);
+    const v05FailedDashboard = structuredClone(v05Initial);
+    v05FailedDashboard.dashboard[0]!.checks.responsiveLayoutPassed = false;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(v05FailedDashboard, v05InitialContext), /requires responsiveLayoutPassed/);
+    const v05MissingServiceIdentity = structuredClone(v05Initial);
+    delete v05MissingServiceIdentity.dashboard[0]!.serviceIdentifier;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(v05MissingServiceIdentity, v05InitialContext), /exact managed helper service identifier/);
+    const v05FailedHelperService = structuredClone(v05Initial);
+    v05FailedHelperService.dashboard[1]!.checks.helperServicePassed = false;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(v05FailedHelperService, v05InitialContext), /requires helperServicePassed/);
+    const v05MissingTlsIdentity = structuredClone(v05Initial);
+    delete v05MissingTlsIdentity.dashboard[0]!.certificateFingerprint256;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(v05MissingTlsIdentity, v05InitialContext), /exact certificate SHA-256 fingerprint/);
+    const v05FailedTls = structuredClone(v05Initial);
+    v05FailedTls.dashboard[0]!.checks.tlsPassed = false;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(v05FailedTls, v05InitialContext), /requires tlsPassed/);
+    const v05WrongArchitecture = structuredClone(v05Initial);
+    v05WrongArchitecture.dashboard[1]!.architecture = 'x64';
+    await assert.rejects(acceptance.validateAcceptanceEvidence(v05WrongArchitecture, v05InitialContext), /architecture arm64/);
+    const v05MissingReboot = structuredClone(v05Initial);
+    v05MissingReboot.platforms[0]!.physicalRebootPassed = false;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(v05MissingReboot, v05InitialContext), /physicalRebootPassed/);
+    const v05FailedDashboardReboot = structuredClone(v05Initial);
+    v05FailedDashboardReboot.dashboard[1]!.checks.physicalRebootPassed = false;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(v05FailedDashboardReboot, v05InitialContext), /requires physicalRebootPassed/);
+    const v05VirtualIphone = structuredClone(v05Initial);
+    v05VirtualIphone.dashboard[2]!.physicalDevice = false;
+    await assert.rejects(acceptance.validateAcceptanceEvidence(v05VirtualIphone, v05InitialContext), /physical device/);
+    const v05GenericIphone = structuredClone(v05Initial);
+    v05GenericIphone.dashboard[2]!.deviceModel = 'iPhone';
+    await assert.rejects(acceptance.validateAcceptanceEvidence(v05GenericIphone, v05InitialContext), /exact physical iPhone model/);
+    const v05WrongIphoneBrowser = structuredClone(v05Initial);
+    v05WrongIphoneBrowser.dashboard[2]!.browserName = 'chromium';
+    await assert.rejects(acceptance.validateAcceptanceEvidence(v05WrongIphoneBrowser, v05InitialContext), /record Safari/);
     const mismatchedInitialTier = structuredClone(initial);
     mismatchedInitialTier.releaseSet.releaseTier = 'supported';
     await assert.rejects(acceptance.validateAcceptanceEvidence(mismatchedInitialTier, initialContext), /another release tier/);
@@ -515,7 +629,7 @@ test('filtered Trivy bindings reject mismatched platform config, layers, and dif
 });
 
 test('Trivy scanner evidence requires an identified scanner and a fresh exact database', async () => {
-  const { assertTrivyScannerIdentity } = await import(pathToFileURL(join(root, 'scripts', 'candidate-evidence.mjs')).href);
+  const { REQUIRED_TRIVY_VERSION, assertReviewedTrivyVersion, assertTrivyScannerIdentity } = await import(pathToFileURL(join(root, 'scripts', 'candidate-evidence.mjs')).href);
   const bindings = {
     schemaVersion: 1,
     createdAt: '2026-08-23T12:00:00.000Z',
@@ -544,6 +658,16 @@ test('Trivy scanner evidence requires an identified scanner and a fresh exact da
   assert.doesNotThrow(() => assertTrivyScannerIdentity({ ...bindings, schemaVersion: 2 }, '2026-08-23T13:00:00.000Z', {
     requiredSchemaVersion: 2,
   }));
+  const reviewed = structuredClone(bindings);
+  reviewed.scanner.version = REQUIRED_TRIVY_VERSION;
+  assert.doesNotThrow(() => assertTrivyScannerIdentity(reviewed, '2026-08-23T13:00:00.000Z', {
+    requiredVersion: REQUIRED_TRIVY_VERSION,
+  }));
+  assert.throws(() => assertTrivyScannerIdentity(bindings, '2026-08-23T13:00:00.000Z', {
+    requiredVersion: REQUIRED_TRIVY_VERSION,
+  }), /required for this candidate/);
+  assert.doesNotThrow(() => assertReviewedTrivyVersion(REQUIRED_TRIVY_VERSION));
+  assert.throws(() => assertReviewedTrivyVersion('0.73.0'), /required for Qubicl 0\.5/);
   const stale = structuredClone(bindings);
   stale.scanner.vulnerabilityDatabase.UpdatedAt = '2026-08-20T11:00:00.000Z';
   assert.throws(() => assertTrivyScannerIdentity(stale, '2026-08-23T13:00:00.000Z'), /stale/);

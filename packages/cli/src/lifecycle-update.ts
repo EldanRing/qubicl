@@ -511,6 +511,14 @@ export interface UpgradeAllExecutionDependencies {
   acquireAndInspect(target: ExactUpgradeTarget): Promise<AcquiredUpgradeTarget>;
   applyGatewayAndDefaults(mutation: GatewayAndDefaultsMutation): Promise<RuntimeContainerBinding[] | void>;
   applyComputer(mutation: ComputerUpgradeMutation): Promise<void>;
+  /** Persist operator acceptance before the first image acquisition or mutation. */
+  recordAccepted?(plan: UpgradeAllPlan): Promise<void>;
+  /** Record the exact post-step configuration before starting its transaction. */
+  recordStepStarted?(step: string, expectedConfigDigest: string): Promise<void>;
+  /** Advance the accepted configuration checkpoint after the step completed. */
+  recordStepCompleted?(step: string, configDigest: string): Promise<void>;
+  /** Remove persisted acceptance only after every planned mutation completed. */
+  clearAccepted?(): Promise<void>;
 }
 
 export interface UpgradeAllExecutionResult {
@@ -557,6 +565,7 @@ export async function executeUpgradeAll(
   if (plan.reviewDigest !== reviewedPlan.reviewDigest) {
     throw new Error('Upgrade inputs changed after preview; review the new plan before acquiring images.');
   }
+  await dependencies.recordAccepted?.(plan);
 
   const acquired = new Map<string, AcquiredUpgradeTarget>();
   for (const target of plan.exactTargets) {
@@ -569,34 +578,177 @@ export async function executeUpgradeAll(
 
   const steps = mutationSteps(plan);
   const completed: string[] = [];
+  let progressConfig = structuredClone(config);
   let gatewayRuntimeBinding = structuredClone(
     plan.rows.find(({ key }) => key === 'gateway')?.runtimeContainers ?? [],
   );
   for (const step of steps) {
     try {
       if (step.kind === 'gateway-and-defaults') {
-        const replacementBinding = await dependencies.applyGatewayAndDefaults(buildGatewayMutation(plan, config, acquired));
+        const mutation = buildGatewayMutation(plan, config, acquired);
+        const expectedConfig = structuredClone(progressConfig);
+        expectedConfig.gateway = structuredClone(mutation.nextGateway);
+        expectedConfig.defaults = structuredClone(mutation.nextDefaults);
+        const expectedDigest = digestConfig(expectedConfig);
+        await dependencies.recordStepStarted?.(step.key, expectedDigest);
+        const replacementBinding = await dependencies.applyGatewayAndDefaults(mutation);
         if (replacementBinding) gatewayRuntimeBinding = structuredClone(replacementBinding);
+        progressConfig = expectedConfig;
+        await dependencies.recordStepCompleted?.(step.key, expectedDigest);
       } else {
-        await dependencies.applyComputer(buildComputerMutation(
+        const mutation = buildComputerMutation(
           plan,
           config,
           acquired,
           step.computerId,
           gatewayRuntimeBinding,
-        ));
+        );
+        const expectedConfig = structuredClone(progressConfig);
+        const index = expectedConfig.computers.findIndex(({ id }) => id === mutation.next.id);
+        if (index === -1) throw new Error(`Computer ${mutation.next.id} disappeared from upgrade progress.`);
+        expectedConfig.computers[index] = structuredClone(mutation.next);
+        const expectedDigest = digestConfig(expectedConfig);
+        await dependencies.recordStepStarted?.(step.key, expectedDigest);
+        await dependencies.applyComputer(mutation);
+        progressConfig = expectedConfig;
+        await dependencies.recordStepCompleted?.(step.key, expectedDigest);
       }
       completed.push(step.key);
     } catch (error) {
       throw new UpgradeAllPartialFailure(completed, steps.slice(completed.length).map(({ key }) => key), error);
     }
   }
+  await dependencies.clearAccepted?.();
 
   return {
     outcome: 'completed',
     acquiredExactTargets: plan.exactTargets.map(({ exactTarget }) => exactTarget),
     completed,
   };
+}
+
+export function digestUpgradeConfig(config: QubiclConfig): string {
+  return digestConfig(config);
+}
+
+export interface UpgradeAllAcceptedRow {
+  key: string;
+  kind: UpgradePreviewRow['kind'];
+  action: UpgradeRowAction;
+  preset: UpgradePreviewRow['preset'];
+  runtimeState: UpgradePreviewRow['runtimeState'];
+  exactTarget: string | null;
+  runtimeContainers: RuntimeContainerBinding[];
+}
+
+export interface UpgradeAllAcceptedTarget {
+  exactTarget: string;
+  consumerIds: string[];
+}
+
+export interface UpgradeAllAcceptance {
+  platform: DockerPlatform;
+  catalogRevision: string;
+  catalogReleaseVersion: string;
+  configDigest: string;
+  reviewDigest: string;
+  rows: UpgradeAllAcceptedRow[];
+  exactTargets: UpgradeAllAcceptedTarget[];
+}
+
+export function acceptedUpgradeAllPlan(plan: UpgradeAllPlan): UpgradeAllAcceptance {
+  return {
+    platform: plan.platform,
+    catalogRevision: plan.catalogRevision,
+    catalogReleaseVersion: plan.catalogReleaseVersion,
+    configDigest: plan.configDigest,
+    reviewDigest: plan.reviewDigest,
+    rows: plan.rows.map((row) => ({
+      key: row.key,
+      kind: row.kind,
+      action: row.action,
+      preset: row.preset,
+      runtimeState: row.runtimeState,
+      exactTarget: row.targetImage?.resolved ?? null,
+      runtimeContainers: structuredClone(row.runtimeContainers),
+    })),
+    exactTargets: plan.exactTargets.map((target) => ({
+      exactTarget: target.exactTarget,
+      consumerIds: target.consumers.map(({ id }) => id),
+    })),
+  };
+}
+
+/**
+ * Recovery may roll forward only a subset of the exact operator-reviewed plan.
+ * Rows already applied become `current`; every remaining mutation must retain
+ * the same target, catalog identity, runtime state, and consumer set.
+ */
+export function assertAcceptedUpgradeAllRecovery(
+  accepted: UpgradeAllAcceptance,
+  current: UpgradeAllPlan,
+): void {
+  if (accepted.platform !== current.platform
+    || accepted.catalogRevision !== current.catalogRevision
+    || accepted.catalogReleaseVersion !== current.catalogReleaseVersion) {
+    throw new Error('The bundled image catalog or Docker platform changed after upgrade acceptance; review a new upgrade plan.');
+  }
+  const acceptedRows = new Map(accepted.rows.map((row) => [row.key, row]));
+  if (acceptedRows.size !== accepted.rows.length || current.rows.length !== accepted.rows.length) {
+    throw new Error('Configured upgrade consumers changed after upgrade acceptance; review a new upgrade plan.');
+  }
+  for (const row of current.rows) {
+    const prior = acceptedRows.get(row.key);
+    if (!prior
+      || prior.kind !== row.kind
+      || prior.preset !== row.preset
+      || prior.runtimeState !== row.runtimeState
+      || prior.exactTarget !== (row.targetImage?.resolved ?? null)
+      || (['upgrade', 'repair-content-drift'].includes(row.action)
+        && !sameRuntimeContainers(prior.runtimeContainers, row.runtimeContainers))
+      || !recoveryActionAllowed(prior.action, row.action)) {
+      throw new Error(`Upgrade row ${row.key} changed after acceptance; review a new upgrade plan.`);
+    }
+  }
+  const acceptedTargets = new Map(accepted.exactTargets.map((target) => [target.exactTarget, target]));
+  if (acceptedTargets.size !== accepted.exactTargets.length || current.exactTargets.length !== accepted.exactTargets.length) {
+    throw new Error('Exact upgrade target set changed after acceptance; review a new upgrade plan.');
+  }
+  for (const target of current.exactTargets) {
+    const prior = acceptedTargets.get(target.exactTarget);
+    if (!prior || JSON.stringify(prior.consumerIds) !== JSON.stringify(target.consumers.map(({ id }) => id))) {
+      throw new Error(`Exact upgrade target ${target.exactTarget} changed consumers after acceptance; review a new upgrade plan.`);
+    }
+  }
+}
+
+function sameRuntimeContainers(
+  left: readonly RuntimeContainerBinding[],
+  right: readonly RuntimeContainerBinding[],
+): boolean {
+  if (left.length !== right.length) return false;
+  if (new Set(left.map(({ id }) => id)).size !== left.length
+    || new Set(right.map(({ id }) => id)).size !== right.length
+    || new Set(left.map(({ name }) => name)).size !== left.length
+    || new Set(right.map(({ name }) => name)).size !== right.length) return false;
+  const current = new Map(right.map((binding) => [binding.id, binding]));
+  return left.every((expected) => {
+    const actual = current.get(expected.id);
+    return actual?.name === expected.name
+      && actual.imageId === expected.imageId
+      && actual.role === expected.role
+      && actual.topologyVersion === expected.topologyVersion;
+  });
+}
+
+export function upgradeAllPlanHasMutations(plan: UpgradeAllPlan): boolean {
+  return mutationSteps(plan).length > 0;
+}
+
+function recoveryActionAllowed(accepted: UpgradeRowAction, current: UpgradeRowAction): boolean {
+  if (accepted === current) return true;
+  return current === 'current'
+    && ['upgrade', 'repair-content-drift', 'update-default'].includes(accepted);
 }
 
 function customRow(
@@ -814,6 +966,10 @@ function stableJson(value: unknown): string {
       .join(',')}}`;
   }
   return JSON.stringify(value);
+}
+
+function digestConfig(config: QubiclConfig): string {
+  return createHash('sha256').update(stableJson(config)).digest('hex');
 }
 
 function assertExecutable(plan: UpgradeAllPlan): void {

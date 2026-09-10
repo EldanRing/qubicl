@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
-import { chmod, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { createServer, type Server } from 'node:http';
+import { chmod, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -10,7 +10,7 @@ import { OfficePreviewManager } from '../../packages/control/dist/office-preview
 import { buildOpenApi, buildOpenTerminalOpenApi } from '@qubicl/core';
 
 async function fixture(context: TestContext, officePreviews?: OfficePreviewManager) {
-  const home = await mkdtemp(join(tmpdir(), 'qubicl-editor-'));
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'qubicl-editor-')));
   const executor = new ToolExecutor(undefined, { durableRoot: home, ...(officePreviews ? { officePreviews } : {}) });
   const compatibility = new OpenTerminalCompatibility(executor, executor.enabledToolNames(), { home });
   const server = createServer(async (request, response) => {
@@ -20,7 +20,7 @@ async function fixture(context: TestContext, officePreviews?: OfficePreviewManag
   context.after(async () => {
     await compatibility.shutdown();
     await executor.shutdown();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await closeServer(server);
     await rm(home, { recursive: true, force: true });
   });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/open-terminal`;
@@ -28,6 +28,13 @@ async function fixture(context: TestContext, officePreviews?: OfficePreviewManag
     method: 'POST', headers: { 'content-type': 'application/json', 'x-session-id': session }, body: JSON.stringify(body),
   });
   return { home, executor, base, post };
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve) => {
+    server.close(() => resolve());
+    server.closeAllConnections();
+  });
 }
 
 test('native editor round trips complete long, multiline, Unicode, BOM and CRLF files', async (context) => {
@@ -90,7 +97,7 @@ test('Open WebUI projected commands and file edits follow each chat folder while
 });
 
 test('Office preview route returns PDF and preserves original downloads', async (context) => {
-  const temporary = await mkdtemp(join(tmpdir(), 'qubicl-office-test-'));
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'qubicl-office-test-')));
   context.after(() => rm(temporary, { recursive: true, force: true }));
   const converter = join(temporary, 'converter');
   await writeFile(converter, '#!/bin/sh\nprintf "%s" "%PDF-1.4 test" > document.pdf\n');

@@ -1,3 +1,4 @@
+import { operationRoot, ownsOperationLock, inOperationLock } from './operation-context.js';
 import { randomBytes } from 'node:crypto';
 import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
@@ -49,7 +50,7 @@ export interface StateAuditCheck {
   detail: string;
 }
 
-export function statePaths(root = process.env.QUBICL_HOME ?? join(homedir(), '.qubicl')): StatePaths {
+export function statePaths(root = operationRoot() ?? process.env.QUBICL_HOME ?? join(homedir(), '.qubicl')): StatePaths {
   return {
     root,
     config: join(root, 'config.yaml'),
@@ -209,11 +210,12 @@ export async function auditState(state: LoadedState): Promise<StateAuditCheck[]>
 }
 
 export async function withStateLock<T>(paths: StatePaths, action: () => Promise<T>): Promise<T> {
+  if (ownsOperationLock(paths.lock)) return action();
   await ensureSecureDirectory(paths.root);
   await ensureSecureDirectory(dirname(paths.lock));
   const owner = await acquireStateLock(paths.lock);
   try {
-    return await action();
+    return await inOperationLock(paths.lock, action);
   } finally {
     await releaseOwnedStateLock(paths.lock, owner);
   }

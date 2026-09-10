@@ -258,3 +258,18 @@ exercise real remote MCP HTTP, OpenAPI, Open Terminal, viewer, and isolated
 preview traffic. The pre-1.0 `initial` profile requires the native-Linux path;
 the `supported` profile adds both Docker Desktop/NAT paths. Passing the local
 client matrix alone cannot satisfy either remote gate.
+
+
+## Dashboard and shared controller attribution
+
+The dashboard observes the current human/agent controller without acquiring an
+agent lease. Client-provided names are displayed as untrusted labels. Explicit
+process stops, preview revocations and disruptive lifecycle changes warn about
+interruption. An Open WebUI/Open Terminal connection still shares one fenced
+lease and one assigned computer; chat folders are organizational directories,
+not security isolation or automatically provisioned computers.
+
+The v0.5 release gate requires real acceptance for Codex, Claude Code, Claude
+Desktop, Cursor, VS Code, OpenCode, OpenClaw, Hermes and Open WebUI, together with
+all four protocol profiles, including for an initial release. No adapter or
+physical-client acceptance is inferred from dashboard mock tests.

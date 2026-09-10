@@ -15,7 +15,12 @@ import {
   type RunOptions,
   type RuntimeInspection,
 } from '../../packages/cli/dist/docker.js';
-import { computerContainerName, gatewayContainerName } from '../../packages/cli/dist/runtime.js';
+import {
+  computerContainerName,
+  controlNetwork,
+  gatewayContainerName,
+  workspaceNetwork,
+} from '../../packages/cli/dist/runtime.js';
 import { statePaths, type LoadedState } from '../../packages/cli/dist/state.js';
 
 test('managed runtime inventory fails closed when Docker listing fails', async () => {
@@ -175,6 +180,48 @@ test('lifecycle replacement never deletes a same-name substitution or an unbound
   assert.equal(dockerCalls.some((args) => args[0] === 'rm'), false);
 });
 
+test('lifecycle replacement removes disposable networks after its bound source runtime', async () => {
+  const { state, computer } = fixture();
+  const name = computerContainerName(state, computer);
+  const sourceInspection = managedInspection(state, computer, name, 'running');
+  const sourceBinding: RuntimeContainerBinding = {
+    name,
+    id: sourceInspection.Id!,
+    status: 'running',
+    imageId: sourceInspection.Image! as `sha256:${string}`,
+    role: 'computer',
+    topologyVersion: '6',
+  };
+  const calls: string[][] = [];
+  const adapter: ManagedRuntimeObservationAdapter = {
+    docker: async (args) => {
+      calls.push(args);
+      if (args[0] === 'container') {
+        return args.some((arg) => arg.includes('dev.qubicl.id='))
+          ? JSON.stringify({ ID: sourceBinding.id, Names: name })
+          : '';
+      }
+      if (args[0] === 'network' && args[1] === 'inspect') return 'network-id';
+      return '';
+    },
+    inspectContainer: async (reference) => reference === sourceBinding.id ? sourceInspection : undefined,
+  };
+
+  await removeComputerRuntimeForLifecycleReplacement(state, computer, [sourceBinding], false, adapter);
+
+  const control = controlNetwork(state.config.installationId, computer.id, state.paths.root);
+  const workspace = workspaceNetwork(state.config.installationId, computer.id, state.paths.root);
+  const gateway = gatewayContainerName(state.config.installationId, state.paths.root);
+  assert.deepEqual(calls.filter(([command]) => command === 'rm' || command === 'network'), [
+    ['rm', '--force', sourceBinding.id],
+    ['network', 'inspect', '--format', '{{.Id}}', control],
+    ['network', 'disconnect', '--force', control, gateway],
+    ['network', 'rm', control],
+    ['network', 'inspect', '--format', '{{.Id}}', workspace],
+    ['network', 'rm', workspace],
+  ]);
+});
+
 test('gateway assertion recovery accepts only an exact reviewed image when a source is recreated without a config content ID', async () => {
   const { state } = fixture();
   const name = gatewayContainerName(state.config.installationId, state.paths.root);
@@ -276,6 +323,7 @@ test('split-to-unified recovery removes only a remaining bound source ID and ret
     adapter,
   );
   assert.deepEqual(calls.find((args) => args[0] === 'rm'), ['rm', '--force', oldSidecar.id]);
+  assert.equal(calls.some((args) => args[0] === 'network'), false);
 });
 
 function fixture(): { state: LoadedState; computer: ComputerConfig } {
@@ -291,7 +339,7 @@ function fixture(): { state: LoadedState; computer: ComputerConfig } {
   const state = {
     paths,
     config: {
-      version: 3,
+      version: 4,
       installationId: '00000000-0000-4000-8000-000000000000',
       gateway: { port: 3211, image: { requested: 'gateway', resolved: 'gateway' } },
       defaults: presetDefaults('file-system'),
@@ -299,7 +347,7 @@ function fixture(): { state: LoadedState; computer: ComputerConfig } {
       computers: [computer],
     },
     secrets: {
-      version: 3,
+      version: 4,
       computers: {
         [computer.id]: { token: 't'.repeat(32), internalKey: 'i'.repeat(32) },
       },

@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { lstat, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, isAbsolute, join, win32 } from 'node:path';
+import { basename, isAbsolute, join, posix, win32 } from 'node:path';
 import { promisify } from 'node:util';
 import { createGunzip } from 'node:zlib';
 
@@ -31,12 +31,17 @@ export async function inspectOciArchive(archive, {
   expectedPreset,
   expectedManifestPath,
   expectedManifest,
+  expectedDashboardAssetManifestSha256,
   requireAttestations = false,
   expectedPlatforms = OCI_PLATFORMS,
   includeLayerMeasurements = false,
   includePackageInventory = false,
 } = {}) {
   assert(!(expectedManifest && expectedManifestPath), 'OCI inspection accepts expectedManifest or expectedManifestPath, not both.');
+  assert(!(expectedPreset && expectedDashboardAssetManifestSha256), 'OCI inspection cannot validate computer and dashboard contracts together.');
+  if (expectedDashboardAssetManifestSha256 !== undefined) {
+    assert(/^[a-f0-9]{64}$/u.test(expectedDashboardAssetManifestSha256), 'Expected dashboard asset-manifest SHA-256 is invalid.');
+  }
   const details = await lstat(archive);
   assert(details.isFile(), `${archive} must be a regular file.`);
   const extracted = await mkdtemp(join(tmpdir(), 'qubicl-oci-inspect-'));
@@ -135,6 +140,12 @@ export async function inspectOciArchive(archive, {
           }
           const embedded = await embeddedComputerManifest(extracted, manifest.layers, archive);
           assert(canonicalJson(embedded) === canonicalJson(expectedManifestDocument), `${archive} ${platform} embeds a different computer manifest.`);
+        } else if (expectedDashboardAssetManifestSha256) {
+          const qubiclLabels = Object.fromEntries(Object.entries(labels).filter(([name]) => name.startsWith('dev.qubicl.')));
+          assert(canonicalJson(qubiclLabels) === canonicalJson({
+            'dev.qubicl.dashboard-protocol-version': '1',
+            'dev.qubicl.asset-manifest-sha256': expectedDashboardAssetManifestSha256,
+          }), `${archive} ${platform} dashboard has the wrong asset contract labels.`);
         } else {
           const qubiclLabels = Object.fromEntries(Object.entries(labels).filter(([name]) => name.startsWith('dev.qubicl.')));
           assert(canonicalJson(qubiclLabels) === canonicalJson({
@@ -143,6 +154,12 @@ export async function inspectOciArchive(archive, {
             'dev.qubicl.viewer-authentication': 'header-v1',
           }), `${archive} ${platform} gateway has the wrong authenticated-viewer contract labels.`);
         }
+      }
+
+      if (expectedDashboardAssetManifestSha256) {
+        const embedded = await embeddedDashboardManifest(extracted, manifest.layers, archive);
+        assert(createHash('sha256').update(embedded).digest('hex') === expectedDashboardAssetManifestSha256,
+          `${archive} ${platform} embeds a different dashboard asset manifest.`);
       }
 
       measurements[platform] = {
@@ -168,6 +185,7 @@ export async function inspectOciArchive(archive, {
         expectedVersion,
         expectedRevision,
         expectedSource,
+        expectedDashboardAssetManifestSha256,
         includePackageInventory,
       });
       if (includePackageInventory) {
@@ -242,7 +260,7 @@ async function validateAttestations(
   archive,
   descriptors,
   platformContent,
-  { expectedVersion, expectedRevision, expectedSource, includePackageInventory },
+  { expectedVersion, expectedRevision, expectedSource, expectedDashboardAssetManifestSha256, includePackageInventory },
 ) {
   assert(descriptors.length === platformContent.size, `${archive} must contain one attestation manifest per platform.`);
   const bySubject = new Map();
@@ -297,6 +315,10 @@ async function validateAttestations(
           assert(external.request.args['build-arg:QUBICL_VERSION'] === expectedVersion, `${archive} provenance version build argument does not match.`);
           assert(external.request.args['build-arg:QUBICL_REVISION'] === expectedRevision, `${archive} provenance revision build argument does not match.`);
           assert(external.request.args['build-arg:QUBICL_SOURCE'] === expectedSource, `${archive} provenance source build argument does not match.`);
+          if (expectedDashboardAssetManifestSha256) {
+            assert(external.request.args['build-arg:QUBICL_ASSET_MANIFEST_SHA256'] === expectedDashboardAssetManifestSha256,
+              `${archive} provenance dashboard asset-manifest build argument does not match.`);
+          }
         }
         assert(Array.isArray(build?.resolvedDependencies) && build.resolvedDependencies.length > 0
           && build.resolvedDependencies.every(validMaterial), `${archive} SLSA v1 resolved source/materials are missing or invalid.`);
@@ -411,6 +433,37 @@ async function descriptorPath(directory, descriptor, archive) {
   const details = await stat(path);
   assert(details.isFile() && details.size === descriptor.size, `${archive} descriptor ${descriptor.digest} size does not match its blob.`);
   return path;
+}
+
+async function embeddedDashboardManifest(directory, layers, archive) {
+  let embedded;
+  for (const layer of layers) {
+    const path = await descriptorPath(directory, layer, archive);
+    const names = archiveLines((await exec('tar', ['-tf', path], { maxBuffer: 50_000_000 })).stdout);
+    const normalized = names.map((name) => {
+      const raw = name.replace(/^\.\//u, '').replace(/\/$/u, '');
+      const canonical = posix.normalize(raw);
+      if (['app', 'app/asset-manifest.json', '.wh.app', '.wh..wh..opq', 'app/.wh.asset-manifest.json', 'app/.wh..wh..opq'].includes(canonical)) {
+        assert(raw === canonical, `${archive} contains an aliased dashboard manifest path.`);
+      }
+      return canonical;
+    });
+    assert(!normalized.some((name) => ['.wh.app', '.wh..wh..opq', 'app/.wh.asset-manifest.json', 'app/.wh..wh..opq'].includes(name)),
+      `${archive} dashboard manifest has ambiguous whiteout ancestry.`);
+    for (let index = 0; index < names.length; index += 1) {
+      if (!['app', 'app/asset-manifest.json'].includes(normalized[index])) continue;
+      const name = names[index];
+      const listing = archiveLines((await exec('tar', ['-tvf', path, '--no-recursion', '--', name], { maxBuffer: 2_000_000 })).stdout);
+      const expectedType = normalized[index] === 'app' ? 'd' : '-';
+      assert(listing.length === 1 && listing[0].startsWith(expectedType),
+        `${archive} dashboard manifest must have unique regular-file and directory entries, without links.`);
+      if (expectedType === 'd') continue;
+      assert(embedded === undefined, `${archive} contains duplicate dashboard manifest paths.`);
+      embedded = (await exec('tar', ['-xOf', path, '--', name], { encoding: 'buffer', maxBuffer: 2_000_000 })).stdout;
+    }
+  }
+  assert(embedded !== undefined, `${archive} does not embed /app/asset-manifest.json.`);
+  return embedded;
 }
 
 async function embeddedComputerManifest(directory, layers, archive) {

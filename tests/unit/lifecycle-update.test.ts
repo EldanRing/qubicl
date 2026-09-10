@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -7,9 +7,11 @@ import {
   ComputerConfigSchema,
   ConfigSchema,
   createDevelopmentCatalog,
+  defaultSecrets,
   presetDefaults,
   toolsForCapabilities,
   type ComputerConfig,
+  type ComputerDefaults,
   type ImageCatalog,
   type ImageIdentity,
   type QubiclConfig,
@@ -17,8 +19,10 @@ import {
 } from '../../packages/core/dist/index.js';
 import {
   UpgradeAllPartialFailure,
+  acceptedUpgradeAllPlan,
   assessUpgradeSpace,
   assertRemotePreviewUpgradeCompatibility,
+  assertAcceptedUpgradeAllRecovery,
   buildLifecycleUpdateStatus,
   buildUpgradeAllPlan,
   computerUpgradeRuntimePlan,
@@ -30,8 +34,15 @@ import {
   type ManagedRuntimeObservation,
   type UpgradeAllPlanningInput,
 } from '../../packages/cli/dist/lifecycle-update.js';
-import { lifecycleUpdateStatus, printUpgradeAllPreview, validateUpgradeInvocation } from '../../packages/cli/dist/lifecycle-command.js';
-import { statePaths, type LoadedState } from '../../packages/cli/dist/state.js';
+import {
+  inspectPendingUpgradeAll,
+  lifecycleUpdateStatus,
+  printUpgradeAllPreview,
+  recordAcceptedUpgradeAll,
+  recoverPendingUpgradeAll,
+  validateUpgradeInvocation,
+} from '../../packages/cli/dist/lifecycle-command.js';
+import { prepareStateDirectories, saveState, statePaths, type LoadedState } from '../../packages/cli/dist/state.js';
 
 test('upgrade-all preview is deterministic, deduplicated, honest about unknown sizes, and read-only', () => {
   const fixture = upgradeFixture();
@@ -200,7 +211,7 @@ test('status exact targets use the inspected Docker daemon platform instead of t
     const state = {
       paths: statePaths(root),
       config: fixture.config,
-      secrets: { version: 3, computers: {} },
+      secrets: { version: 4, computers: {} },
     } as LoadedState;
 
     const status = await lifecycleUpdateStatus(state, 'linux/arm64', fixture.catalog);
@@ -317,6 +328,16 @@ test('execution acquires and inspects every deduplicated exact target before gat
       events.push(`acquire:${target.exactTarget}`);
       return acquired(target);
     },
+    recordAccepted: async () => { events.push('journal:accepted'); },
+    recordStepStarted: async (step, digest) => {
+      assert.match(digest, /^[a-f0-9]{64}$/u);
+      events.push(`journal:start:${step}`);
+    },
+    recordStepCompleted: async (step, digest) => {
+      assert.match(digest, /^[a-f0-9]{64}$/u);
+      events.push(`journal:complete:${step}`);
+    },
+    clearAccepted: async () => { events.push('journal:cleared'); },
     applyGatewayAndDefaults: async (mutation) => {
       events.push('mutate:gateway');
       gatewayMutation = mutation;
@@ -331,7 +352,20 @@ test('execution acquires and inspects every deduplicated exact target before gat
   const acquisitions = events.filter((event) => event.startsWith('acquire:'));
   assert.equal(acquisitions.length, plan.exactTargets.length);
   assert.equal(events.slice(0, firstMutation).filter((event) => event.startsWith('acquire:')).length, plan.exactTargets.length);
-  assert.deepEqual(events.slice(firstMutation), ['mutate:gateway', 'mutate:alpha', 'mutate:zeta']);
+  assert.ok(events.indexOf('journal:accepted') < events.findIndex((event) => event.startsWith('acquire:')));
+  assert.deepEqual(events.slice(firstMutation), [
+    'mutate:gateway',
+    'journal:complete:gateway-and-defaults',
+    `journal:start:computer:${IDS.alpha}`,
+    'mutate:alpha',
+    `journal:complete:computer:${IDS.alpha}`,
+    `journal:start:computer:${IDS.zeta}`,
+    'mutate:zeta',
+    `journal:complete:computer:${IDS.zeta}`,
+    'journal:cleared',
+  ]);
+  assert.equal(events[firstMutation - 1], 'journal:start:gateway-and-defaults');
+  assert.equal(events.at(-1), 'journal:cleared');
   assert.deepEqual(result.completed, ['gateway-and-defaults', `computer:${IDS.alpha}`, `computer:${IDS.zeta}`]);
   assert.equal(gatewayMutation!.gatewayRuntimeState, 'running');
   assert.equal(gatewayMutation!.nextDefaults.cpus, fixture.config.defaults.cpus);
@@ -349,6 +383,79 @@ test('execution acquires and inspects every deduplicated exact target before gat
   assert.equal(alphaAfter.cpus, alphaBefore.cpus);
   assert.equal(alphaAfter.memory, alphaBefore.memory);
   assert.equal(alphaAfter.image.resolved, presetDefaults('file-system', 'linux/amd64', fixture.catalog).image.resolved);
+});
+
+test('accepted upgrade recovery permits only completed rows or the original exact targets', () => {
+  const fixture = upgradeFixture(false);
+  fixture.runtime.gateway.containers = [runtimeBinding('gateway', '9', 'gateway', 'running')];
+  const plan = buildUpgradeAllPlan(planningInput(fixture));
+  const accepted = acceptedUpgradeAllPlan(plan);
+  const partiallyCompleted = structuredClone(plan);
+  partiallyCompleted.rows[0]!.action = 'current';
+  assert.doesNotThrow(() => assertAcceptedUpgradeAllRecovery(accepted, partiallyCompleted));
+  partiallyCompleted.rows[0]!.targetImage!.resolved = 'registry.example/qubicl/gateway@sha256:changed';
+  assert.throws(() => assertAcceptedUpgradeAllRecovery(accepted, partiallyCompleted), /changed after acceptance/);
+
+  const replacedRuntime = structuredClone(plan);
+  replacedRuntime.rows[0]!.runtimeContainers[0]!.id = 'f'.repeat(64);
+  assert.throws(() => assertAcceptedUpgradeAllRecovery(accepted, replacedRuntime), /changed after acceptance/);
+});
+
+test('a durable accepted upgrade with no remaining mutations is cleared by explicit recovery', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-upgrade-recovery-'));
+  try {
+    const fixture = upgradeFixture(false);
+    fixture.config.gateway.image = { ...targetGateway(fixture.catalog), contentId: sha('1') };
+    fixture.config.defaults = currentCuratedDefaults(fixture.config.defaults, fixture.catalog);
+    fixture.config.computers = fixture.config.computers.map((computer) => computer.preset === 'custom'
+      ? computer
+      : ComputerConfigSchema.parse({
+          ...computer,
+          ...currentCuratedDefaults(computer, fixture.catalog),
+        }));
+    fixture.runtime.gateway.contentDrift = false;
+    for (const observation of Object.values(fixture.runtime.computers)) {
+      if (observation) observation.contentDrift = false;
+    }
+    const plan = buildUpgradeAllPlan(planningInput(fixture));
+    assert.equal(plan.rows.some(({ action }) => ['upgrade', 'repair-content-drift', 'update-default'].includes(action)), false);
+    const paths = statePaths(root);
+    const secrets = defaultSecrets();
+    for (const computer of fixture.config.computers) {
+      secrets.computers[computer.id] = { token: 't'.repeat(32), internalKey: 'i'.repeat(32) };
+    }
+    const state: LoadedState = { paths, config: fixture.config, secrets };
+    await prepareStateDirectories(paths);
+    await saveState(state);
+    await recordAcceptedUpgradeAll(state, plan, true, {
+      operationId: '00000000-0000-4000-8000-000000000710',
+      createdAt: '2026-09-07T12:00:00.000Z',
+    });
+    assert.equal((await inspectPendingUpgradeAll(state))?.offline, true);
+    let executed = false;
+    assert.equal(await recoverPendingUpgradeAll(state, {
+      validateDocker: async () => ({ platform: 'linux/amd64' }),
+      collectPlan: async () => plan,
+      execute: async () => { executed = true; },
+    }), true);
+    assert.equal(executed, false);
+    await assert.rejects(stat(join(paths.runtime, 'upgrade-all.json')), { code: 'ENOENT' });
+
+    await recordAcceptedUpgradeAll(state, plan, false, {
+      operationId: '00000000-0000-4000-8000-000000000711',
+      createdAt: '2026-09-07T12:01:00.000Z',
+    });
+    state.config.gateway.port += 1;
+    await saveState(state);
+    await assert.rejects(recoverPendingUpgradeAll(state, {
+      validateDocker: async () => ({ platform: 'linux/amd64' }),
+      collectPlan: async () => plan,
+      execute: async () => { executed = true; },
+    }), /changed outside the accepted upgrade checkpoint/);
+    assert.equal((await stat(join(paths.runtime, 'upgrade-all.json'))).isFile(), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('gateway-first execution refreshes the immutable gateway binding before running-computer replacement', async () => {
@@ -587,7 +694,7 @@ function upgradeFixture(unknownBrowser = true): {
     memory: '6g',
   });
   const config = ConfigSchema.parse({
-    version: 3,
+    version: 4,
     installationId: '00000000-0000-4000-8000-000000000000',
     gateway: { port: 3211, image: oldImage(targetGateway(catalog), 'gateway') },
     defaults: { ...defaultTarget, image: oldImage(defaultTarget.image, 'default'), cpus: 4, memory: '7g' },
@@ -730,6 +837,20 @@ function replaceComputer(config: QubiclConfig, replacement: ComputerConfig): voi
   config.computers = config.computers.map((computer) => computer.id === replacement.id
     ? structuredClone(replacement)
     : computer);
+}
+
+function currentCuratedDefaults(
+  current: ComputerConfig | ComputerDefaults,
+  catalog: ImageCatalog,
+): ComputerDefaults {
+  if (current.preset === 'custom') throw new Error('Expected a curated preset fixture.');
+  const target = presetDefaults(current.preset, 'linux/amd64', catalog);
+  return {
+    ...target,
+    image: { ...target.image, contentId: sha('1') },
+    cpus: current.cpus,
+    memory: current.memory,
+  };
 }
 
 function sha(character: string): `sha256:${string}` {

@@ -6,7 +6,7 @@ Performance checks run only on the current maintainer-controlled host and upload
 npm run performance
 ```
 
-The baseline builds source, dry-runs the npm package, samples CLI help/version latency and peak RSS, inspects the exact local gateway plus all four preset images, and enforces initial size budgets. It uses `docker image inspect` only; missing images are reported rather than pulled/built.
+The baseline builds source, dry-runs the npm package, samples CLI help/version latency and peak RSS, inspects the exact local gateway, dashboard, and all four preset images, and enforces initial size budgets. It uses `docker image inspect` only; missing images are reported rather than pulled/built.
 
 For preset recommendations, run one explicit container session and wait for it to finish:
 
@@ -29,6 +29,7 @@ bundle. Container layers are measured separately below.
 | CLI help p95 | 125 ms |
 | CLI help peak RSS | 96 MiB |
 | gateway image | 65 MB expanded platform content |
+| dashboard image | 65 MB expanded platform content |
 | file-system image | 205 MB |
 | browser image | 625 MB |
 | computer image | 675 MB |
@@ -42,7 +43,7 @@ Multi-computer scaling and cold/warm hardware comparisons remain separate local 
 
 Complete v0.2 image candidates also carry `oci-efficiency.json`. Unlike the
 local expanded-size guardrails above, that immutable report compares both
-architectures across all five exact OCI archives. It records compressed and
+architectures across all six exact OCI archives. It records compressed and
 expanded layer sharing and a bounded normalized package inventory derived from
 each platform's embedded SPDX attestation. Candidate verification regenerates the
 report, so package/layer optimization decisions can be reviewed against the

@@ -9,6 +9,7 @@ import { invokeTool, mcpResult } from './contract.js';
 import { loadComputerManifest } from './image-manifest.js';
 import { OpenTerminalCompatibility } from './open-terminal.js';
 import { parseViewerPointerUpdate } from './viewer-actions.js';
+import type { LeaseActor } from './lease.js';
 
 const loadedManifest = loadComputerManifest();
 const executor = new ToolExecutor(loadedManifest);
@@ -23,7 +24,7 @@ export async function shutdownControlService(): Promise<void> {
   await executor.shutdown();
 }
 
-const mcp = createMcpHandler(() => {
+const mcp = createMcpHandler(({ requestInfo }) => {
   const server = new McpServer(
     { name: `qubicl-${executor.computerId}`, version: QUBICL_BUILD.version },
     { instructions: QUBICL_MODEL_INSTRUCTIONS },
@@ -40,7 +41,9 @@ const mcp = createMcpHandler(() => {
       name,
       config,
       async (input: unknown) => {
-        const outcome = await invokeTool(executor, name, input);
+        const outcome = await invokeTool({
+          call: (tool, value) => executor.call(tool, value, { leaseActor: mcpLeaseActor(server.server.getClientVersion(), requestInfo) }),
+        }, name, input);
         if (!outcome.ok && outcome.status === 500) console.error(outcome.cause);
         return mcpResult(outcome);
       },
@@ -96,6 +99,43 @@ export const controlServer = createServer(async (request, response) => {
       json(response, 200, await executor.reloadPolicy());
       return;
     }
+    if (url.pathname.startsWith('/_qubicl/operator/management/')) {
+      if (request.headers['x-qubicl-access-surface'] !== 'local') {
+        throw new QubiclError('operator_route_local_only', 'Operator management is available only through the local Qubicl gateway.', 403);
+      }
+      if (request.method === 'GET' && url.pathname === '/_qubicl/operator/management/status') {
+        json(response, 200, await executor.operatorManagementStatus());
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/_qubicl/operator/management/processes') {
+        json(response, 200, await executor.operatorManagementProcesses());
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/_qubicl/operator/management/previews') {
+        json(response, 200, executor.operatorManagementPreviews());
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/_qubicl/operator/management/processes/stop') {
+        requireJson(request);
+        const body = exactOperatorBody(await readJson(request, 4096), ['processId']);
+        json(response, 200, await executor.stopOperatorManagedProcess(managedId(body.processId, 'processId')));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/_qubicl/operator/management/previews/revoke') {
+        requireJson(request);
+        const body = exactOperatorBody(await readJson(request, 4096), ['previewId']);
+        json(response, 200, executor.revokeOperatorPreview(managedId(body.previewId, 'previewId')));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/_qubicl/operator/management/previews/open') {
+        requireJson(request);
+        const body = exactOperatorBody(await readJson(request, 4096), ['access', 'previewId']);
+        if (body.access !== 'local' && body.access !== 'remote') throw new QubiclError('invalid_arguments', 'access must be local or remote.', 400);
+        json(response, 200, executor.openOperatorPreview(managedId(body.previewId, 'previewId'), body.access));
+        return;
+      }
+      throw new QubiclError('not_found', 'Operator management route not found.', 404);
+    }
     if (url.pathname === '/mcp') {
       await handleMcp(request as never, response as never);
       return;
@@ -115,7 +155,9 @@ export const controlServer = createServer(async (request, response) => {
     if (request.method === 'POST' && url.pathname.startsWith('/v1/tools/')) {
       const name = url.pathname.slice('/v1/tools/'.length);
       if (!isToolName(name) || !executor.enabledToolNames().includes(name)) throw new QubiclError('tool_not_found', `Tool ${name} is not available for this computer's operator policy or capability contract.`, 404);
-      const outcome = await invokeTool(executor, name, await readJson(request));
+      const outcome = await invokeTool({
+        call: (tool, value) => executor.call(tool, value, { leaseActor: openApiLeaseActor(request) }),
+      }, name, await readJson(request));
       if (!outcome.ok && outcome.status === 500) console.error(outcome.cause);
       json(response, outcome.status, outcome.value);
       return;
@@ -178,18 +220,59 @@ function authenticatedPointerPublisher(request: IncomingMessage): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
-async function readJson(request: IncomingMessage): Promise<unknown> {
+async function readJson(request: IncomingMessage, limit = 25_000_000): Promise<unknown> {
   const chunks: Buffer[] = [];
   let bytes = 0;
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     bytes += buffer.length;
-    if (bytes > 25_000_000) throw new QubiclError('request_too_large', 'Request body exceeds 25 MB.', 413);
+    if (bytes > limit) throw new QubiclError('request_too_large', `Request body exceeds ${limit} bytes.`, 413);
     chunks.push(buffer);
   }
   if (!chunks.length) return {};
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown; }
   catch { throw new QubiclError('invalid_json', 'Request body must be valid JSON.'); }
+}
+
+function exactOperatorBody(value: unknown, keys: readonly string[]): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new QubiclError('invalid_arguments', 'Operator request body must be an object.', 400);
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).sort().join('\0') !== [...keys].sort().join('\0')) {
+    throw new QubiclError('invalid_arguments', 'Operator request body has an unsupported shape.', 400);
+  }
+  return record;
+}
+
+function requireJson(request: IncomingMessage): void {
+  const value = request.headers['content-type']?.toLowerCase().replaceAll(/\s+/gu, '');
+  if (value !== 'application/json' && value !== 'application/json;charset=utf-8') {
+    throw new QubiclError('content_type_required', 'Operator requests must use application/json.', 415);
+  }
+}
+
+function managedId(value: unknown, name: string): string {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{16}$/u.test(value)) {
+    throw new QubiclError('invalid_arguments', `${name} must be an exact managed identifier.`, 400);
+  }
+  return value;
+}
+
+function mcpLeaseActor(client: { name: string; version: string } | undefined, request: Request | undefined): LeaseActor {
+  const fallback = request?.headers.get('user-agent') ?? 'MCP client';
+  return { protocol: 'mcp', untrustedLabel: displayLabel(client ? `${client.name} ${client.version}` : fallback, 'MCP client') };
+}
+
+function openApiLeaseActor(request: IncomingMessage): LeaseActor {
+  const value = typeof request.headers['user-agent'] === 'string' ? request.headers['user-agent'] : 'OpenAPI client';
+  return { protocol: 'openapi', untrustedLabel: displayLabel(value, 'OpenAPI client') };
+}
+
+function displayLabel(value: string, fallback: string): string {
+  const normalized = [...value].map((character) => {
+    const code = character.codePointAt(0)!;
+    return code <= 0x1f || code === 0x7f ? ' ' : character;
+  }).join('').replace(/\s+/gu, ' ').trim();
+  return normalized ? [...normalized].slice(0, 120).join('') : fallback;
 }
 
 function json(response: ServerResponse, status: number, value: unknown): void {

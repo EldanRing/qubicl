@@ -95,6 +95,11 @@ try {
       'dist/SBOM.spdx.json',
       'dist/assets/image-catalog.json',
       'dist/assets/gateway/Dockerfile',
+      'dist/assets/dashboard/Dockerfile',
+      'dist/assets/dashboard/LICENSE',
+      'dist/assets/dashboard/server.mjs',
+      'dist/assets/dashboard/asset-manifest.json',
+      'dist/assets/dashboard/public/index.html',
       'dist/assets/computer/Dockerfile',
     ]) {
       assert(files.includes(required), `Packed npm candidate is missing ${required}.`);
@@ -127,7 +132,9 @@ try {
 
     const sbomPath = join(installedRoot, 'dist', 'SBOM.spdx.json');
     if (options.npmSbom) assert(await readFile(sbomPath, 'utf8') === await readFile(options.npmSbom, 'utf8'), 'The staged npm archive embeds a different SPDX document.');
-    await assertSbomMatchesNotices(sbomPath, join(installedRoot, 'dist', 'THIRD_PARTY_NOTICES.txt'));
+    await assertSbomMatchesNotices(sbomPath, join(installedRoot, 'dist', 'THIRD_PARTY_NOTICES.txt'), {
+      version: workspace.version,
+    });
     if (options.npmArchive) {
       await assertNpmArtifact({
         archive: npmArchive,
@@ -157,7 +164,19 @@ try {
     } else {
       directory = join(root, 'release', `qubicl-${target}`);
     }
-    for (const file of ['qubicl', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'NODE_LICENSE', 'SBOM.spdx.json', 'assets/image-catalog.json']) {
+    for (const file of [
+      'qubicl',
+      'LICENSE',
+      'THIRD_PARTY_NOTICES.txt',
+      'NODE_LICENSE',
+      'SBOM.spdx.json',
+      'assets/image-catalog.json',
+      'assets/dashboard/Dockerfile',
+      'assets/dashboard/LICENSE',
+      'assets/dashboard/server.mjs',
+      'assets/dashboard/asset-manifest.json',
+      'assets/dashboard/public/index.html',
+    ]) {
       assert((await stat(join(directory, file))).isFile(), `Native candidate is missing ${file}.`);
     }
     const nativeCatalogText = await readFile(join(directory, 'assets', 'image-catalog.json'), 'utf8');
@@ -171,7 +190,10 @@ try {
       });
     }
     if (options.nativeSbom) assert(await readFile(join(directory, 'SBOM.spdx.json'), 'utf8') === await readFile(options.nativeSbom, 'utf8'), 'The staged native archive embeds a different SPDX document.');
-    await assertSbomMatchesNotices(join(directory, 'SBOM.spdx.json'), join(directory, 'THIRD_PARTY_NOTICES.txt'), { native: true });
+    await assertSbomMatchesNotices(join(directory, 'SBOM.spdx.json'), join(directory, 'THIRD_PARTY_NOTICES.txt'), {
+      native: true,
+      version: workspace.version,
+    });
     const revision = options.expectedRevision ?? nativeCatalog.revision;
     const nativeVersion = await exec(join(directory, 'qubicl'), ['--version']);
     assert(nativeVersion.stdout.trim() === `qubicl ${workspace.version} (${revision})`, 'The staged native CLI version or revision does not match the candidate.');
@@ -220,15 +242,20 @@ async function packDevelopmentArtifact(destination) {
   return join(destination, basename(report[0].filename));
 }
 
-async function assertSbomMatchesNotices(sbomPath, noticePath, { native = false } = {}) {
+async function assertSbomMatchesNotices(sbomPath, noticePath, { native = false, version } = {}) {
   const document = await jsonFile(sbomPath);
   assert(document.spdxVersion === 'SPDX-2.3', 'Artifact SBOM must use SPDX 2.3.');
   const noticeKeys = thirdPartyNoticeKeys(await readFile(noticePath, 'utf8'));
   const sbomKeys = spdxPackageKeys(document);
-  const expected = native
-    ? [...noticeKeys, ...sbomKeys.filter((key) => key.startsWith('node@'))].sort()
-    : noticeKeys;
+  const dashboardKey = `qubicl-dashboard@${version}`;
+  assert(!noticeKeys.includes(dashboardKey), 'The first-party dashboard must not be listed as a third-party dependency.');
+  const expected = [
+    ...noticeKeys,
+    dashboardKey,
+    ...(native ? sbomKeys.filter((key) => key.startsWith('node@')) : []),
+  ].sort();
   assert(JSON.stringify(sbomKeys) === JSON.stringify(expected), 'Artifact SBOM components do not match THIRD_PARTY_NOTICES.txt.');
+  assert(sbomKeys.includes(dashboardKey), 'Artifact SBOM omits the first-party dashboard.');
   assert(sbomKeys.some((key) => key.startsWith('@modelcontextprotocol/node@')), 'Artifact SBOM omits @modelcontextprotocol/node.');
   assert(sbomKeys.some((key) => key.startsWith('@hono/node-server@')), 'Artifact SBOM omits @hono/node-server.');
   assert(!sbomKeys.some((key) => key.startsWith('@modelcontextprotocol/client@')), 'Artifact SBOM includes test-only @modelcontextprotocol/client.');

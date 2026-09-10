@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { build } from 'esbuild';
+import { assertNativeBinaryPrivacy } from './artifact-evidence.mjs';
 import { collectBundledPackages, spdxPackageKeys } from './bundle-evidence.mjs';
 import { buildMetadata, metadataDefines } from './build-metadata.mjs';
 
@@ -48,8 +49,8 @@ for (const dependency of nativePackages) {
   if (!applicationKeys.has(dependency.key)) throw new Error(`Native bundle dependency ${dependency.key} is absent from the application SBOM.`);
 }
 
-await writeFile(config, JSON.stringify({ main: bundle, output: blob, disableExperimentalSEAWarning: true, useSnapshot: false, useCodeCache: false }));
-await run(process.execPath, ['--experimental-sea-config', config]);
+await writeFile(config, JSON.stringify({ main: 'qubicl.cjs', output: 'qubicl.blob', disableExperimentalSEAWarning: true, useSnapshot: false, useCodeCache: false }));
+await run(process.execPath, ['--experimental-sea-config', 'sea-config.json'], false, work);
 await copyFile(process.execPath, binary);
 if (process.platform === 'darwin') await run('codesign', ['--remove-signature', binary], true);
 const postject = join(root, 'node_modules', '.bin', 'postject');
@@ -57,6 +58,7 @@ const postjectArgs = [binary, 'NODE_SEA_BLOB', blob, '--sentinel-fuse', 'NODE_SE
 if (process.platform === 'darwin') postjectArgs.push('--macho-segment-name', 'NODE_SEA');
 await run(postject, postjectArgs);
 if (process.platform === 'darwin') await run('codesign', ['--sign', '-', binary]);
+assertNativeBinaryPrivacy(await readFile(binary), [root, work, bundle, blob, config]);
 await chmod(binary, 0o755);
 await cp(join(root, 'packages/cli/dist/assets'), join(output, 'assets'), { recursive: true });
 await copyFile(join(root, 'LICENSE'), join(output, 'LICENSE'));

@@ -17,12 +17,13 @@ import {
   inspectOciEfficiencyArchives,
 } from './oci-efficiency.mjs';
 import { inspectOciArchive } from './oci-evidence.mjs';
-export const IMAGE_NAMES = ['gateway', 'file-system', 'browser', 'computer', 'workstation'];
+export const IMAGE_NAMES = ['gateway', 'dashboard', 'file-system', 'browser', 'computer', 'workstation'];
 export const PLATFORMS = ['linux/amd64', 'linux/arm64'];
+export const REQUIRED_TRIVY_VERSION = '0.74.0';
 export const RELEASE_TIERS = ['preview', 'initial', 'supported'];
 const exec = promisify(execFile);
-const PRESETS = IMAGE_NAMES.filter((name) => name !== 'gateway');
-const REPORT_PATTERN = /^trivy-(gateway|file-system|browser|computer|workstation)-linux-(amd64|arm64)\.json$/;
+const PRESETS = IMAGE_NAMES.filter((name) => !['gateway', 'dashboard'].includes(name));
+const REPORT_PATTERN = /^trivy-(gateway|dashboard|file-system|browser|computer|workstation)-linux-(amd64|arm64)\.json$/;
 const EXCEPTION_KEYS = new Set([
   'id',
   'vulnerabilityId',
@@ -81,18 +82,20 @@ export function assertReviewedRevisionFacts(facts, candidate) {
 }
 
 export function assertCatalogIdentity(catalog, expected) {
-  assert(catalog?.schemaVersion === 1, 'Image catalog schemaVersion must be 1.');
+  assert(catalog?.schemaVersion === 2, 'Image catalog schemaVersion must be 2.');
   assert(catalog.development === false, 'Candidate artifacts require a non-development image catalog.');
   assert(catalog.releaseVersion === expected.version, `Image catalog releaseVersion ${catalog.releaseVersion} does not match candidate version ${expected.version}.`);
   assert(catalog.revision === expected.revision, `Image catalog revision ${catalog.revision} does not match candidate revision ${expected.revision}.`);
   assert(normalizeRepository(catalog.source) === normalizeRepository(expected.source), `Image catalog source ${catalog.source} does not match candidate source ${expected.source}.`);
   assert(equalArrays(catalog.supportedPlatforms, PLATFORMS), `Image catalog platforms must be exactly ${PLATFORMS.join(', ')}.`);
-  assert(catalog.gateway && catalog.presets && typeof catalog.presets === 'object', 'Image catalog is missing gateway or preset entries.');
+  assert(catalog.gateway && catalog.dashboard && catalog.presets && typeof catalog.presets === 'object', 'Image catalog is missing gateway, dashboard, or preset entries.');
+  assert(catalog.dashboard.protocolVersion === 1, 'Image catalog dashboard protocolVersion must be 1.');
+  assert(/^[a-f0-9]{64}$/.test(catalog.dashboard.assetManifestSha256 ?? ''), 'Image catalog dashboard has no asset-manifest digest.');
   assert(equalArrays(Object.keys(catalog.presets).sort(), [...PRESETS].sort()), 'Image catalog must contain exactly the four curated presets.');
   for (const preset of PRESETS) {
     assert(/^[a-f0-9]{64}$/.test(catalog.presets[preset]?.manifestSha256 ?? ''), `Catalog preset ${preset} has no manifest digest.`);
   }
-  for (const [name, image] of [['gateway', catalog.gateway], ...PRESETS.map((preset) => [preset, catalog.presets[preset]?.image])]) {
+  for (const [name, image] of [['gateway', catalog.gateway], ['dashboard', catalog.dashboard.image], ...PRESETS.map((preset) => [preset, catalog.presets[preset]?.image])]) {
     assert(image && typeof image.requested === 'string' && image.requested.length > 0, `Catalog image ${name} has no requested reference.`);
     assert(/^sha256:[a-f0-9]{64}$/.test(image.indexDigest ?? ''), `Catalog image ${name} has no index digest.`);
     for (const platform of PLATFORMS) {
@@ -211,7 +214,7 @@ export function summarizeTrivyReports(reportEntries, exceptionsDocument, {
   const trackedFindings = new Map();
   const notAffectedFindings = new Map();
 
-  assert(reportEntries.length === IMAGE_NAMES.length * PLATFORMS.length, `Expected ten Trivy reports; found ${reportEntries.length}.`);
+  assert(reportEntries.length === IMAGE_NAMES.length * PLATFORMS.length, `Expected ${IMAGE_NAMES.length * PLATFORMS.length} Trivy reports; found ${reportEntries.length}.`);
 
   for (const { name, document } of [...reportEntries].sort((left, right) => left.name.localeCompare(right.name))) {
     const identity = reportIdentity(name);
@@ -502,17 +505,25 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
       if (inspectOci) {
         assert(root, 'OCI inspection requires the repository root.');
         for (const image of IMAGE_NAMES) {
+          const preset = PRESETS.includes(image) ? image : undefined;
           const measured = await inspectOciArchive(join(candidateDirectory, `qubicl-${image}.oci.tar`), {
             expectedVersion: candidate.version,
             expectedRevision: candidate.revision,
             expectedSource: candidate.source,
-            expectedPreset: image === 'gateway' ? undefined : image,
-            expectedManifestPath: image === 'gateway'
-              ? undefined
-              : join(npmRoot, 'dist', 'assets', 'computer', 'manifests', `${image}.json`),
+            expectedPreset: preset,
+            expectedManifestPath: preset
+              ? join(npmRoot, 'dist', 'assets', 'computer', 'manifests', `${image}.json`)
+              : undefined,
+            expectedDashboardAssetManifestSha256: image === 'dashboard'
+              ? catalog.dashboard.assetManifestSha256
+              : undefined,
             requireAttestations: true,
           });
-          const expectedImage = image === 'gateway' ? catalog.gateway : catalog.presets[image].image;
+          const expectedImage = image === 'gateway'
+            ? catalog.gateway
+            : image === 'dashboard'
+              ? catalog.dashboard.image
+              : catalog.presets[image].image;
           assert(measured.indexDigest === expectedImage.indexDigest, `${image} OCI index digest does not match image-catalog.json.`);
           for (const platform of PLATFORMS) {
             const actual = measured.platforms[platform];
@@ -550,6 +561,7 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
       })));
       assertTrivyScannerIdentity(bindings, now, {
         requiredSchemaVersion: requiresClientConformance(candidate.version) ? 2 : undefined,
+        requiredVersion: requiresReviewedTrivyVersion(candidate.version) ? REQUIRED_TRIVY_VERSION : undefined,
       });
       assert(Array.isArray(bindings.scans) && bindings.scans.length === reportEntries.length, 'trivy-bindings.json has incomplete scan coverage.');
       for (const report of reportEntries) {
@@ -668,7 +680,7 @@ export function assertTrivyScanBinding(binding, report, expected) {
   }
 }
 
-export function assertTrivyScannerIdentity(bindings, now, { requiredSchemaVersion } = {}) {
+export function assertTrivyScannerIdentity(bindings, now, { requiredSchemaVersion, requiredVersion } = {}) {
   const scanner = bindings?.scanner;
   const database = scanner?.vulnerabilityDatabase;
   assert([1, 2].includes(bindings?.schemaVersion) && isoDate(bindings.createdAt), 'trivy-bindings.json has an invalid schema or creation time.');
@@ -678,12 +690,29 @@ export function assertTrivyScannerIdentity(bindings, now, { requiredSchemaVersio
   }
   assert(scanner?.name === 'trivy' && /^\d+\.\d+\.\d+$/u.test(scanner.version ?? '')
     && /^[a-f0-9]{64}$/u.test(scanner.versionOutputSha256 ?? ''), 'trivy-bindings.json has an invalid scanner identity.');
+  if (requiredVersion !== undefined) {
+    assert(scanner.version === requiredVersion,
+      `Trivy ${requiredVersion} is required for this candidate; found ${scanner.version}.`);
+  }
   assert(Number.isInteger(database?.Version) && isoDate(database?.UpdatedAt) && isoDate(database?.DownloadedAt)
     && isoDate(database?.NextUpdate) && /^[a-f0-9]{64}$/u.test(database?.sha256 ?? ''), 'trivy-bindings.json has an invalid vulnerability database identity.');
   const evaluated = Date.parse(now);
   const updated = Date.parse(database.UpdatedAt);
   assert(updated <= Date.parse(bindings.createdAt) && evaluated - updated <= 48 * 60 * 60 * 1000, 'Trivy vulnerability database is stale or postdates the scan binding.');
   assert(/^sha256:[a-f0-9]{64}$/u.test(scanner.checkBundle?.Digest ?? '') && isoDate(scanner.checkBundle?.DownloadedAt), 'trivy-bindings.json has an invalid checks bundle identity.');
+}
+
+export function assertReviewedTrivyVersion(version) {
+  assert(version === REQUIRED_TRIVY_VERSION,
+    `Trivy ${REQUIRED_TRIVY_VERSION} is required for Qubicl 0.5 candidate creation; found ${version}.`);
+}
+
+function requiresReviewedTrivyVersion(value) {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-|$)/u.exec(`${value}`);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 0 || minor >= 5;
 }
 
 function isoDate(value) { return typeof value === 'string' && Number.isFinite(Date.parse(value)); }

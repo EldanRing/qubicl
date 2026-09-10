@@ -7,6 +7,7 @@ import {
   CLIENT_CONFORMANCE_REQUIREMENTS_NAME,
   CLIENT_CONFORMANCE_REQUIREMENTS_PATH,
   clientConformanceEvidenceReferences,
+  exactClientVersion,
   loadClientConformanceRequirements,
   requiresClientConformance,
   validateClientConformance,
@@ -32,6 +33,34 @@ const LEGACY_CLIENTS = ['codex', 'claude-code', 'claude-desktop', 'cursor', 'vsc
 const LEGACY_PLATFORMS = ['linux-x64', 'linux-arm64', 'macos-intel', 'macos-apple-silicon', 'windows-wsl2-x64'];
 const WORKFLOWS = ['upgrade', 'backupRestoreInterruption', 'restart', 'physicalReboot', 'fullTopologyPerformance', 'multipleComputers', 'sustainedDogfooding'];
 const REMOTE_ACCESS_WORKFLOW = 'remoteGateway';
+const DASHBOARD_ACCEPTANCE_PROFILES = [
+  {
+    id: 'linux',
+    platform: 'linux',
+    deviceClass: 'desktop',
+    architecture: 'x64',
+    serviceManager: 'systemd-user',
+    inputCheck: 'keyboardNavigationPassed',
+  },
+  {
+    id: 'macos',
+    platform: 'macos',
+    deviceClass: 'desktop',
+    architecture: 'arm64',
+    serviceManager: 'launch-agent',
+    inputCheck: 'keyboardNavigationPassed',
+  },
+  { id: 'iphone', platform: 'ios', deviceClass: 'phone', inputCheck: 'touchNavigationPassed' },
+];
+const DASHBOARD_COMMON_CHECKS = [
+  'loginPassed',
+  'navigationPassed',
+  'planExecutionPassed',
+  'disconnectRecoveryPassed',
+  'responsiveLayoutPassed',
+  'themePassed',
+];
+const DASHBOARD_NATIVE_CHECKS = ['helperServicePassed', 'tlsPassed', 'physicalRebootPassed'];
 const ACCEPTANCE_PROFILES = {
   initial: {
     clients: ['codex', 'open-webui'],
@@ -111,6 +140,9 @@ export async function validateAcceptanceEvidence(evidence, context) {
       validateResult(result, label, evidenceDirectory, releaseSet.createdAt, now)
     ), { profiles: profile.remoteProfiles });
   }
+  const dashboardSummary = profile?.dashboardProfiles
+    ? await validateDashboardAcceptance(evidence.dashboard, evidenceDirectory, releaseSet.createdAt, now, releaseSet.version)
+    : {};
   assert(evidence.workflows && typeof evidence.workflows === 'object', 'Acceptance workflows are required.');
   const workflows = evidence.schemaVersion === 4 ? profile.workflows : WORKFLOWS;
   for (const id of workflows) await validateResult(evidence.workflows[id], `workflow ${id}`, evidenceDirectory, releaseSet.createdAt, now);
@@ -129,6 +161,7 @@ export async function validateAcceptanceEvidence(evidence, context) {
     ...conformance,
     ...platformSummary,
     ...remoteSummary,
+    ...dashboardSummary,
     workflows: workflows.length,
   };
 }
@@ -140,7 +173,17 @@ function acceptanceProfile(evidence, releaseSet) {
     'Acceptance release set has an unsupported release tier.');
   assert(evidence.profile === releaseSet.releaseTier,
     'Acceptance profile must exactly match the signed release-set tier.');
-  return ACCEPTANCE_PROFILES[evidence.profile];
+  const selected = ACCEPTANCE_PROFILES[evidence.profile];
+  if (!requiresDashboardAcceptance(releaseSet.version)) return selected;
+  return {
+    ...selected,
+    clients: undefined,
+    protocols: undefined,
+    ...(evidence.profile === 'initial' ? {
+      platformChecks: { 'linux-x64': ['minimumVersionsPassed', 'restartPassed', 'physicalRebootPassed'] },
+    } : {}),
+    dashboardProfiles: DASHBOARD_ACCEPTANCE_PROFILES.map(({ id }) => id),
+  };
 }
 
 export function acceptanceEvidenceFiles(evidence, directory) {
@@ -150,6 +193,7 @@ export function acceptanceEvidenceFiles(evidence, directory) {
     evidence.remoteAccessConformance?.requirements,
     ...clientConformanceEvidenceReferences(evidence),
     ...remoteAccessEvidenceReferences(evidence),
+    ...(evidence.dashboard ?? []).map(({ evidence: value }) => value),
     ...(evidence.platforms ?? []).map(({ evidence: value }) => value),
     ...Object.values(evidence.workflows ?? {}).map((value) => value?.evidence),
     evidence.securityReview?.evidence,
@@ -157,6 +201,62 @@ export function acceptanceEvidenceFiles(evidence, directory) {
     evidence.privacyReview?.evidence,
   ];
   return [...new Set(references.map((reference) => reference?.path).filter(Boolean))].sort().map((path) => join(directory, path));
+}
+
+async function validateDashboardAcceptance(rows, directory, notBefore, now, releaseVersion) {
+  assert(Array.isArray(rows) && rows.length === DASHBOARD_ACCEPTANCE_PROFILES.length,
+    `Dashboard acceptance requires exactly ${DASHBOARD_ACCEPTANCE_PROFILES.length} platform rows.`);
+  let checks = 0;
+  for (const requirement of DASHBOARD_ACCEPTANCE_PROFILES) {
+    const matches = rows.filter((row) => row?.id === requirement.id);
+    assert(matches.length === 1, `Expected exactly one dashboard row for ${requirement.id}.`);
+    const row = matches[0];
+    assert(row.platform === requirement.platform, `Dashboard ${requirement.id} must record platform ${requirement.platform}.`);
+    assert(row.deviceClass === requirement.deviceClass, `Dashboard ${requirement.id} must record device class ${requirement.deviceClass}.`);
+    assert(row.qubiclVersion === releaseVersion,
+      `Dashboard ${requirement.id} must record the exact release-set Qubicl version.`);
+    assert(exactClientVersion(row.osVersion), `Dashboard ${requirement.id} requires an exact OS version.`);
+    assert(exactClientVersion(row.browserVersion), `Dashboard ${requirement.id} requires an exact browser version.`);
+    if (requirement.architecture) {
+      assert(row.architecture === requirement.architecture,
+        `Dashboard ${requirement.id} must record architecture ${requirement.architecture}.`);
+      assert(row.serviceManager === requirement.serviceManager,
+        `Dashboard ${requirement.id} must record service manager ${requirement.serviceManager}.`);
+      const serviceSuffix = requirement.id === 'linux' ? '\\.service' : '';
+      assert(new RegExp(`^org\\.qubicl\\.dashboard\\.[a-f0-9]{16}${serviceSuffix}$`, 'u').test(row.serviceIdentifier ?? ''),
+        `Dashboard ${requirement.id} requires its exact managed helper service identifier.`);
+      assert(exactHostname(row.tlsHostname),
+        `Dashboard ${requirement.id} must record an exact lowercase TLS hostname.`);
+      assert(['TLSv1.2', 'TLSv1.3'].includes(row.tlsProtocol),
+        `Dashboard ${requirement.id} must record TLSv1.2 or TLSv1.3.`);
+      assert(/^sha256:[a-f0-9]{64}$/u.test(row.certificateFingerprint256 ?? ''),
+        `Dashboard ${requirement.id} must record the exact certificate SHA-256 fingerprint.`);
+    } else {
+      assert(row.browserName === 'safari', 'Dashboard iphone must record Safari as the physical browser.');
+      assert(typeof row.deviceModel === 'string' && /^iPhone\s+\S/u.test(row.deviceModel),
+        'Dashboard iphone requires an exact physical iPhone model.');
+      assert(row.physicalDevice === true, 'Dashboard iphone must explicitly identify a physical device.');
+    }
+    await validateResult(row, `dashboard ${requirement.id}`, directory, notBefore, now);
+    const expectedChecks = [
+      ...DASHBOARD_COMMON_CHECKS,
+      requirement.inputCheck,
+      ...(requirement.architecture ? DASHBOARD_NATIVE_CHECKS : ['physicalDevicePassed']),
+    ].sort();
+    assert(canonicalJson(Object.keys(row.checks ?? {}).sort()) === canonicalJson(expectedChecks),
+      `Dashboard ${requirement.id} must report exactly its required checks.`);
+    for (const check of expectedChecks) {
+      assert(row.checks[check] === true, `Dashboard ${requirement.id} requires ${check}.`);
+      checks += 1;
+    }
+  }
+  return { dashboardPlatforms: DASHBOARD_ACCEPTANCE_PROFILES.length, dashboardChecks: checks };
+}
+
+export function requiresDashboardAcceptance(versionValue) {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/u.exec(versionValue ?? '');
+  assert(match, `Release version ${versionValue ?? 'unknown'} is not valid Semantic Versioning.`);
+  return Number(match[1]) > 0 || Number(match[2]) >= 5;
 }
 
 async function verifyConformanceRequirements(evidence, directory) {
@@ -274,6 +374,20 @@ function iso(value) { return typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d
 function identity(value) { return typeof value === 'string' && value.trim().length >= 3 && !/^(?:x|todo|tbd|placeholder)$/iu.test(value.trim()); }
 function different(left, right) { return `${left}`.trim().toLowerCase() !== `${right}`.trim().toLowerCase(); }
 function version(value) { return typeof value === 'string' && value.trim().length >= 2 && /\d/u.test(value); }
+function exactHostname(value) {
+  return typeof value === 'string'
+    && value === value.trim()
+    && value === value.toLowerCase()
+    && value.length >= 3
+    && value.length <= 253
+    && value.split('.').every((label) => label.length <= 63
+      && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label));
+}
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`).join(',')}}`;
+  return JSON.stringify(value);
+}
 function assert(condition, message) { if (!condition) throw new Error(message); }
 
 const invoked = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);

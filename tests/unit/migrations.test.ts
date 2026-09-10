@@ -5,13 +5,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import YAML from 'yaml';
-import { defaultConfig, defaultSecrets } from '@qubicl/core';
+import {
+  LegacyConfigV3Schema,
+  LegacySecretsV3Schema,
+  defaultConfig,
+  defaultSecrets,
+} from '@qubicl/core';
 import {
   ensureCurrentState,
   inspectStateFormat,
   type StateMigrationCheckpoint,
 } from '../../packages/cli/dist/migrations.js';
 import { loadState, statePaths } from '../../packages/cli/dist/state.js';
+import { createStateTransaction, readPendingTransaction } from '../../packages/cli/dist/transactions.js';
 
 const checkpoints: StateMigrationCheckpoint[] = [
   'backup-written',
@@ -40,9 +46,9 @@ test('version-1 state migrates durably after every interruption boundary', async
 
       await ensureCurrentState(paths);
       const state = await loadState(paths);
-      assert.equal(state.config.version, 3);
+      assert.equal(state.config.version, 4);
       assert.match(state.config.installationId, /^[0-9a-f-]{36}$/);
-      assert.equal(state.secrets.version, 3);
+      assert.equal(state.secrets.version, 4);
       assert.equal((await inspectStateFormat(paths)).status, 'current');
       await assert.rejects(stat(paths.migration), { code: 'ENOENT' });
       assert.equal((await stat(paths.runtimeNamespacePending)).mode & 0o777, 0o600);
@@ -66,7 +72,7 @@ test('version-1 state migrates durably after every interruption boundary', async
           const manifest = YAML.parse(await readFile(join(directory, 'manifest.yaml'), 'utf8'));
           assert.equal(manifest.reason, 'state-format');
           assert.equal(manifest.sourceVersion, 1);
-          assert.equal(manifest.targetVersion, 3);
+          assert.equal(manifest.targetVersion, 4);
           assert.deepEqual(manifest.files['config.yaml'], fileDigest(configRaw));
           assert.deepEqual(manifest.files['secrets.yaml'], fileDigest(secretsRaw));
           exactBackupFound = true;
@@ -75,6 +81,143 @@ test('version-1 state migrates durably after every interruption boundary', async
       assert.equal(exactBackupFound, true);
     });
   }
+});
+
+test('version-3 state migrates durably without changing its installation identity', async (context) => {
+  for (const interruptedAt of checkpoints) {
+    await context.test(interruptedAt, async () => {
+      const root = await mkdtemp(join(tmpdir(), 'qubicl-v3-migration-'));
+      const paths = statePaths(root);
+      const { configRaw, secretsRaw, installationId } = await writeVersion3State(root);
+      assert.deepEqual(await inspectStateFormat(paths), {
+        status: 'legacy',
+        detail: 'state format 3 requires explicit setup migration to 4',
+      });
+
+      let interrupted = false;
+      await assert.rejects(ensureCurrentState(paths, {
+        checkpoint(checkpoint) {
+          if (!interrupted && checkpoint === interruptedAt) {
+            interrupted = true;
+            throw new Error(`interrupt ${checkpoint}`);
+          }
+        },
+      }), new RegExp(`interrupt ${interruptedAt}`));
+
+      await ensureCurrentState(paths);
+      const state = await loadState(paths);
+      assert.equal(state.config.version, 4);
+      assert.equal(state.config.installationId, installationId);
+      assert.equal(state.secrets.version, 4);
+      assert.equal((await inspectStateFormat(paths)).status, 'current');
+      await assert.rejects(stat(paths.migration), { code: 'ENOENT' });
+
+      const backups = await readdir(paths.backups);
+      let exactBackupFound = false;
+      for (const name of backups) {
+        const directory = join(paths.backups, name);
+        if (await readFile(join(directory, 'config.yaml'), 'utf8') !== configRaw) continue;
+        if (await readFile(join(directory, 'secrets.yaml'), 'utf8') !== secretsRaw) continue;
+        const manifest = YAML.parse(await readFile(join(directory, 'manifest.yaml'), 'utf8'));
+        assert.equal(manifest.sourceVersion, 3);
+        assert.equal(manifest.targetVersion, 4);
+        assert.equal(manifest.installationId, installationId);
+        assert.deepEqual(manifest.files['config.yaml'], fileDigest(configRaw));
+        assert.deepEqual(manifest.files['secrets.yaml'], fileDigest(secretsRaw));
+        exactBackupFound = true;
+      }
+      assert.equal(exactBackupFound, true);
+    });
+  }
+});
+
+test('version-3 schemas are strict and explicit bootstrap identity is retained', async () => {
+  const installationId = '00000000-0000-4000-8000-000000000400';
+  const currentConfig = defaultConfig(installationId);
+  assert.equal(currentConfig.installationId, installationId);
+  const version3Config = { ...currentConfig, version: 3 as const };
+  const version3Secrets = { ...defaultSecrets(), version: 3 as const };
+  assert.equal(LegacyConfigV3Schema.parse(version3Config).installationId, installationId);
+  assert.deepEqual(LegacySecretsV3Schema.parse(version3Secrets).computers, {});
+  assert.throws(() => LegacyConfigV3Schema.parse({ ...version3Config, unexpected: true }));
+  assert.throws(() => LegacySecretsV3Schema.parse({ ...version3Secrets, unexpected: true }));
+});
+
+test('pending version-3 state migration resumes with its journal and backup identities', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-pending-v3-state-migration-'));
+  const paths = statePaths(root);
+  const installationId = '00000000-0000-4000-8000-000000000410';
+  const migrationId = '00000000-0000-4000-8000-000000000411';
+  const backupName = 'preserved-v2-to-v3-backup';
+  const config = { ...defaultConfig(installationId), version: 3 as const };
+  const secrets = { ...defaultSecrets(), version: 3 as const };
+  await mkdir(join(paths.backups, backupName), { recursive: true, mode: 0o700 });
+  await writeFile(join(paths.backups, backupName, 'marker'), 'preserve me\n', { mode: 0o600 });
+  await writeFile(paths.migration, YAML.stringify({
+    version: 2,
+    id: migrationId,
+    createdAt: '2026-09-07T12:00:00.000Z',
+    sourceVersion: 2,
+    targetVersion: 3,
+    backupName,
+    config,
+    secrets,
+  }), { mode: 0o600 });
+
+  assert.deepEqual(await inspectStateFormat(paths), {
+    status: 'migration-pending',
+    detail: `state migration ${migrationId} from format 2 to 4 awaits recovery`,
+  });
+  let recoveredIdentity: { id: string; backupName: string; sourceVersion: number; targetVersion: number } | undefined;
+  await ensureCurrentState(paths, {
+    checkpoint(checkpoint, migration) {
+      if (checkpoint === 'config-written') {
+        recoveredIdentity = {
+          id: migration.id,
+          backupName: migration.backupName,
+          sourceVersion: migration.sourceVersion,
+          targetVersion: migration.targetVersion,
+        };
+      }
+    },
+  });
+
+  assert.deepEqual(recoveredIdentity, { id: migrationId, backupName, sourceVersion: 2, targetVersion: 4 });
+  assert.equal((await loadState(paths)).config.installationId, installationId);
+  assert.equal(await readFile(join(paths.backups, backupName, 'marker'), 'utf8'), 'preserve me\n');
+  await assert.rejects(stat(paths.migration), { code: 'ENOENT' });
+});
+
+test('pending version-3 lifecycle journal is backed up before normalization to version 4', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-pending-v3-lifecycle-'));
+  const paths = statePaths(root);
+  await mkdir(root, { recursive: true });
+  const current = { paths, config: defaultConfig('00000000-0000-4000-8000-000000000420'), secrets: defaultSecrets() };
+  const transaction = createStateTransaction('config', current);
+  const legacy = {
+    ...transaction,
+    version: 3 as const,
+    config: { ...transaction.config, version: 3 as const },
+    secrets: { ...transaction.secrets, version: 3 as const },
+  };
+  const original = YAML.stringify(legacy);
+  await writeFile(paths.journal, original, { mode: 0o600 });
+
+  const normalized = await readPendingTransaction(paths);
+  assert.equal(normalized?.version, 4);
+  assert.equal(normalized?.config.version, 4);
+  assert.equal(normalized?.secrets.version, 4);
+  assert.equal(YAML.parse(await readFile(paths.journal, 'utf8')).version, 4);
+
+  const backups = await readdir(paths.backups);
+  assert.equal(backups.length, 1);
+  const backup = join(paths.backups, backups[0]!);
+  assert.equal(await readFile(join(backup, 'transaction.yaml'), 'utf8'), original);
+  const manifest = YAML.parse(await readFile(join(backup, 'manifest.yaml'), 'utf8'));
+  assert.equal(manifest.reason, 'lifecycle-journal');
+  assert.equal(manifest.sourceVersion, 3);
+  assert.equal(manifest.targetVersion, 4);
+  assert.deepEqual(manifest.files['transaction.yaml'], fileDigest(original));
 });
 
 test('current state is not backed up again and newer state is never overwritten', async () => {
@@ -144,7 +287,7 @@ test('version-2 state preserves identities and maps legacy full/custom images co
 
   await ensureCurrentState(paths);
   const migrated = await loadState(paths);
-  assert.equal(migrated.config.version, 3);
+  assert.equal(migrated.config.version, 4);
   assert.equal(migrated.config.installationId, config.installationId);
   assert.equal(migrated.config.gateway.port, 4321);
   assert.equal(migrated.config.computers[0]?.preset, 'workstation');
@@ -251,6 +394,21 @@ async function writeLegacyState(root: string): Promise<{ configRaw: string; secr
   await writeFile(paths.config, configRaw);
   await writeFile(paths.secrets, secretsRaw, { mode: 0o600 });
   return { configRaw, secretsRaw };
+}
+
+async function writeVersion3State(root: string): Promise<{
+  configRaw: string;
+  secretsRaw: string;
+  installationId: string;
+}> {
+  const paths = statePaths(root);
+  await mkdir(root, { recursive: true });
+  const installationId = '00000000-0000-4000-8000-000000000403';
+  const configRaw = YAML.stringify({ ...defaultConfig(installationId), version: 3 });
+  const secretsRaw = YAML.stringify({ ...defaultSecrets(), version: 3 });
+  await writeFile(paths.config, configRaw, { mode: 0o600 });
+  await writeFile(paths.secrets, secretsRaw, { mode: 0o600 });
+  return { configRaw, secretsRaw, installationId };
 }
 
 async function writeLegacyComputerState(root: string): Promise<{

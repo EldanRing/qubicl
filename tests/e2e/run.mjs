@@ -58,15 +58,35 @@ try {
   const legacySecretsRaw = YAML.stringify({ version: 1, computers: {} });
   await writeFile(paths.config, legacyConfigRaw);
   await writeFile(paths.secrets, legacySecretsRaw, { mode: 0o600 });
-  const interruptedMigration = await execCli(['list'], {
+
+  const refusedLegacyRead = await execCli(['list'], { env }).then(() => undefined, (error) => error);
+  assert.match(refusedLegacyRead?.stderr ?? '', /State migration requires explicit qubicl setup or qubicl dashboard enable; this command did not change state/);
+  assert.equal(await readFile(paths.config, 'utf8'), legacyConfigRaw);
+  assert.equal(await readFile(paths.secrets, 'utf8'), legacySecretsRaw);
+  await assert.rejects(stat(paths.migration), { code: 'ENOENT' });
+
+  const interruptedMigration = await execCli(['setup', '--preset', 'workstation', '--gateway-port', `${legacyPort}`, '--no-create', '--yes', '--offline'], {
     env: { ...env, NODE_ENV: 'test', QUBICL_TEST_FAIL_MIGRATION_AFTER: 'config-written' },
   }).then(() => undefined, (error) => error);
   assert.match(interruptedMigration?.stderr ?? '', /Simulated state migration interruption after config-written/);
   assert.equal((await stat(paths.migration)).mode & 0o777, 0o600);
-  assert.equal(YAML.parse(await readFile(paths.config, 'utf8')).version, 3);
+  assert.equal(YAML.parse(await readFile(paths.config, 'utf8')).version, 4);
   assert.equal(YAML.parse(await readFile(paths.secrets, 'utf8')).version, 1);
-  await commandCli(['list']);
+  const interruptedConfigRaw = await readFile(paths.config, 'utf8');
+  const interruptedSecretsRaw = await readFile(paths.secrets, 'utf8');
+  const interruptedJournalRaw = await readFile(paths.migration, 'utf8');
+  const refusedPendingRead = await execCli(['list'], { env }).then(() => undefined, (error) => error);
+  assert.match(refusedPendingRead?.stderr ?? '', /State migration requires explicit qubicl setup or qubicl dashboard enable; this command did not change state/);
+  assert.equal(await readFile(paths.config, 'utf8'), interruptedConfigRaw);
+  assert.equal(await readFile(paths.secrets, 'utf8'), interruptedSecretsRaw);
+  assert.equal(await readFile(paths.migration, 'utf8'), interruptedJournalRaw);
+
+  const initializedPort = await freePort();
+  const explicitSetup = ['setup', '--preset', 'workstation', '--gateway-port', `${initializedPort}`, '--no-create', '--yes', '--offline'];
+  await commandCli(explicitSetup);
   await assert.rejects(stat(paths.migration), { code: 'ENOENT' });
+  assert.equal(YAML.parse(await readFile(paths.config, 'utf8')).version, 4);
+  assert.equal(YAML.parse(await readFile(paths.secrets, 'utf8')).version, 4);
   const migrationBackups = await readdir(paths.backups);
   assert.ok(migrationBackups.length >= 1);
   const firstBackup = join(paths.backups, migrationBackups[0]);
@@ -79,18 +99,20 @@ try {
   await writeFile(paths.secrets, await readFile(join(firstBackup, 'secrets.yaml'), 'utf8'), { mode: 0o600 });
   assert.equal(YAML.parse(await readFile(paths.config, 'utf8')).version, 1);
   assert.equal(YAML.parse(await readFile(paths.secrets, 'utf8')).version, 1);
-  await commandCli(['list']);
-  assert.equal(YAML.parse(await readFile(paths.config, 'utf8')).version, 3);
-  assert.equal(YAML.parse(await readFile(paths.secrets, 'utf8')).version, 3);
+  const refusedRollbackRead = await execCli(['list'], { env }).then(() => undefined, (error) => error);
+  assert.match(refusedRollbackRead?.stderr ?? '', /State migration requires explicit qubicl setup or qubicl dashboard enable; this command did not change state/);
+  assert.equal(await readFile(paths.config, 'utf8'), legacyConfigRaw);
+  assert.equal(await readFile(paths.secrets, 'utf8'), legacySecretsRaw);
+  await commandCli(explicitSetup);
+  assert.equal(YAML.parse(await readFile(paths.config, 'utf8')).version, 4);
+  assert.equal(YAML.parse(await readFile(paths.secrets, 'utf8')).version, 4);
   assert.ok((await readdir(paths.backups)).length >= 2);
 
   const state = await initializeState(paths);
   installationId = state.config.installationId;
-  assert.equal(state.config.version, 3);
-  assert.equal(state.config.gateway.port, legacyPort);
+  assert.equal(state.config.version, 4);
+  assert.equal(state.config.gateway.port, initializedPort);
   composePath = state.paths.compose;
-  const initializedPort = await freePort();
-  await commandCli(['setup', '--preset', 'workstation', '--gateway-port', `${initializedPort}`, '--no-create', '--yes', '--offline']);
   const initializedConfig = JSON.parse((await commandCli(['config', 'show'])).stdout);
   assert.equal(initializedConfig.gateway.port, initializedPort);
   assert.equal(initializedConfig.defaults.preset, 'workstation');

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -30,29 +30,29 @@ test('efficiency report partitions shared and unique layer bytes per platform', 
   const platform = report.platforms['linux/amd64'];
 
   assert.equal(report.schemaVersion, 2);
-  assert.deepEqual(Object.keys(report.images), ['gateway', 'file-system', 'browser', 'computer', 'workstation']);
+  assert.deepEqual(Object.keys(report.images), ['gateway', 'dashboard', 'file-system', 'browser', 'computer', 'workstation']);
   assert.deepEqual(platform.compressedLayerBytes, {
-    logical: 213,
-    deduplicated: 86,
+    logical: 217,
+    deduplicated: 90,
     shared: 57,
-    unique: 29,
+    unique: 33,
     duplicate: 127,
   });
   assert.deepEqual(platform.expandedLayerBytes, {
-    logical: 2130,
-    deduplicated: 860,
+    logical: 2170,
+    deduplicated: 900,
     shared: 570,
-    unique: 290,
+    unique: 330,
     duplicate: 1270,
   });
   assert.deepEqual(platform.images.browser.compressedLayerBytes, { total: 55, shared: 50, unique: 5 });
   assert.deepEqual(platform.images.computer.expandedLayerBytes, { total: 570, shared: 570, unique: 0 });
   assert.deepEqual(platform.packageCounts, {
-    logical: 20,
-    deduplicated: 7,
+    logical: 22,
+    deduplicated: 8,
     shared: 5,
-    unique: 2,
-    duplicate: 13,
+    unique: 3,
+    duplicate: 14,
   });
   assert.deepEqual(platform.images.gateway.packageCounts, { total: 2, shared: 1, unique: 1 });
   assert.deepEqual(platform.images.browser.packageCounts, { total: 4, shared: 4, unique: 0 });
@@ -139,10 +139,10 @@ test('archive inspection exposes opt-in layer measurements without changing defa
   assert.ok(amd64Layer);
   assert.equal(amd64.compressedLayers.length, 1);
   assert.deepEqual(amd64.compressedLayers[0].images, OCI_EFFICIENCY_IMAGE_NAMES);
-  assert.equal(amd64.compressedLayerBytes.logical, amd64Layer.compressedBytes * 5);
+  assert.equal(amd64.compressedLayerBytes.logical, amd64Layer.compressedBytes * 6);
   assert.equal(amd64.compressedLayerBytes.deduplicated, amd64Layer.compressedBytes);
   assert.equal(amd64.compressedLayerBytes.unique, 0);
-  assert.deepEqual(amd64.packageCounts, { logical: 10, deduplicated: 2, shared: 2, unique: 0, duplicate: 8 });
+  assert.deepEqual(amd64.packageCounts, { logical: 12, deduplicated: 2, shared: 2, unique: 0, duplicate: 10 });
   assert.equal(amd64.packages.some(({ name }: { name: string }) => name === 'sbom'), false,
     'BuildKit/Syft document-root packages are not counted as installed packages');
 
@@ -159,12 +159,78 @@ test('archive inspection exposes opt-in layer measurements without changing defa
   await assert.rejects(inspectOciArchive(oversized.archive), /between 1 and 4096 layers/);
 });
 
+test('dashboard OCI evidence binds embedded manifest bytes, labels and provenance', async (context) => {
+  const { inspectOciArchive } = await import(evidenceModule);
+  const manifest = Buffer.from('{"schemaVersion":1,"entrypoint":"/index.html","assets":[]}\n');
+  const assetManifestSha256 = createHash('sha256').update(manifest).digest('hex');
+  const temporary = await mkdtemp(join(tmpdir(), 'qubicl-dashboard-layer-'));
+  context.after(() => rm(temporary, { recursive: true, force: true }));
+  await mkdir(join(temporary, 'app'));
+  await writeFile(join(temporary, 'app', 'asset-manifest.json'), manifest);
+  const archive = join(temporary, 'layer.tar');
+  await exec('tar', ['-cf', archive, '-C', temporary, 'app']);
+  const layerTar = await readFile(archive);
+  const version = '0.5.0';
+  const revision = 'a'.repeat(40);
+  const source = 'https://github.com/example/qubicl';
+  const fixture = await createOciArchive(context, {
+    layerTar,
+    labels: {
+      'org.opencontainers.image.version': version,
+      'org.opencontainers.image.revision': revision,
+      'org.opencontainers.image.source': source,
+      'org.opencontainers.image.created': '2026-09-07T00:00:00Z',
+      'org.opencontainers.image.licenses': 'Apache-2.0',
+      'dev.qubicl.dashboard-protocol-version': '1',
+      'dev.qubicl.asset-manifest-sha256': assetManifestSha256,
+    },
+    buildArgs: {
+      'build-arg:QUBICL_VERSION': version,
+      'build-arg:QUBICL_REVISION': revision,
+      'build-arg:QUBICL_SOURCE': source,
+      'build-arg:QUBICL_ASSET_MANIFEST_SHA256': assetManifestSha256,
+    },
+  });
+
+  await assert.doesNotReject(() => inspectOciArchive(fixture.archive, {
+    expectedVersion: version,
+    expectedRevision: revision,
+    expectedSource: source,
+    expectedDashboardAssetManifestSha256: assetManifestSha256,
+    requireAttestations: true,
+  }));
+  await assert.rejects(() => inspectOciArchive(fixture.archive, {
+    expectedVersion: version,
+    expectedRevision: revision,
+    expectedSource: source,
+    expectedDashboardAssetManifestSha256: 'e'.repeat(64),
+    requireAttestations: true,
+  }), /wrong asset contract labels/);
+
+  const inspect = async (bytes: Buffer) => {
+    const candidate = await createOciArchive(context, { layerTar: bytes });
+    return inspectOciArchive(candidate.archive, { expectedDashboardAssetManifestSha256: assetManifestSha256 });
+  };
+  await writeFile(join(temporary, 'app', 'asset-manifest.json'), '{}');
+  await exec('tar', ['-cf', archive, '-C', temporary, 'app']);
+  await assert.rejects(inspect(await readFile(archive)), /different dashboard asset manifest/);
+  await exec('tar', ['-cf', archive, '-C', temporary, 'app/asset-manifest.json', 'app/asset-manifest.json']);
+  await assert.rejects(inspect(await readFile(archive)), /unique regular-file|duplicate dashboard/);
+  await rm(join(temporary, 'app', 'asset-manifest.json'));
+  await exec('tar', ['-cf', archive, '-C', temporary, 'app']);
+  await assert.rejects(inspect(await readFile(archive)), /does not embed/);
+  await symlink('/etc/passwd', join(temporary, 'app', 'asset-manifest.json'));
+  await exec('tar', ['-cf', archive, '-C', temporary, 'app']);
+  await assert.rejects(inspect(await readFile(archive)), /without links/);
+});
+
 function inspectionFixture(): Record<string, any> {
   const base = layer('base', 20, 200);
   const display = layer('display', 30, 300);
   const desktop = layer('desktop', 7, 70);
   const packageSets: Record<string, Array<ReturnType<typeof imagePackage>>> = {
     gateway: [imagePackage('alpine-base', '3.22'), imagePackage('node', '22.14.0')],
+    dashboard: [imagePackage('alpine-dashboard', '3.22'), imagePackage('node', '22.14.0')],
     'file-system': [imagePackage('debian-base', '13'), imagePackage('node', '22.14.0'), imagePackage('curl', '8.14.1')],
     browser: [imagePackage('debian-base', '13'), imagePackage('node', '22.14.0'), imagePackage('curl', '8.14.1'), imagePackage('chromium', '140.0')],
     computer: [imagePackage('debian-base', '13'), imagePackage('node', '22.14.0'), imagePackage('curl', '8.14.1'), imagePackage('chromium', '140.0'), imagePackage('xfce', '4.20')],
@@ -172,6 +238,7 @@ function inspectionFixture(): Record<string, any> {
   };
   return Object.fromEntries([
     ['gateway', [layer('gateway', 10, 100)]],
+    ['dashboard', [layer('dashboard', 4, 40)]],
     ['file-system', [base, layer('file-system', 3, 30)]],
     ['browser', [base, display, layer('browser', 5, 50)]],
     ['computer', [base, display, desktop]],
@@ -215,7 +282,17 @@ function layer(label: string, compressedBytes: number, expandedBytes: number) {
   };
 }
 
-async function createOciArchive(context: TestContext, { manifestLayerCount = 1 } = {}): Promise<{
+async function createOciArchive(context: TestContext, {
+  manifestLayerCount = 1,
+  labels = {},
+  buildArgs = {},
+  layerTar,
+}: {
+  manifestLayerCount?: number;
+  labels?: Record<string, string>;
+  buildArgs?: Record<string, string>;
+  layerTar?: Buffer;
+} = {}): Promise<{
   archive: string;
   layers: Record<string, ReturnType<typeof layer>>;
 }> {
@@ -229,7 +306,7 @@ async function createOciArchive(context: TestContext, { manifestLayerCount = 1 }
   const layers: Record<string, ReturnType<typeof layer>> = {};
   for (const architecture of ['amd64', 'arm64']) {
     const platform = `linux/${architecture}`;
-    const expanded = Buffer.from(`expanded-${architecture}-layer-content`);
+    const expanded = layerTar ?? Buffer.from(`expanded-${architecture}-layer-content`);
     const compressed = gzipSync(expanded);
     const layerDescriptor = await blob(layout, compressed, OCI_LAYER);
     const diffId = `sha256:${createHash('sha256').update(expanded).digest('hex')}`;
@@ -237,7 +314,7 @@ async function createOciArchive(context: TestContext, { manifestLayerCount = 1 }
       architecture,
       os: 'linux',
       rootfs: { type: 'layers', diff_ids: [diffId] },
-      config: {},
+      config: { Labels: labels },
     }, OCI_CONFIG);
     const manifest = await jsonBlob(layout, {
       schemaVersion: 2,
@@ -258,7 +335,7 @@ async function createOciArchive(context: TestContext, { manifestLayerCount = 1 }
             configSource: { path: 'Dockerfile' },
             request: {
               frontend: 'dockerfile.v0',
-              args: {},
+              args: buildArgs,
               locals: [{ name: 'context' }, { name: 'dockerfile' }],
             },
           },

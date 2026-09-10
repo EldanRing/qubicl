@@ -3,6 +3,7 @@ import { createReadStream, fstatSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   buildOpenTerminalOpenApi,
   isOpenTerminalImageTool,
@@ -14,7 +15,7 @@ import {
 import { QubiclError } from './errors.js';
 import type { ToolExecutor } from './executor.js';
 import { mapFileSystemError, type FileErrorContext } from './file-errors.js';
-import type { LeaseProof } from './lease.js';
+import type { LeaseActor, LeaseProof } from './lease.js';
 import { BoundedPathError, type BoundedFileSystem, type FileIdentity } from './bounded-files.js';
 import { OPEN_TERMINAL_ARCHIVE_LIMITS, type OpenTerminalArchive } from './open-terminal-archive.js';
 import {
@@ -65,6 +66,7 @@ export class OpenTerminalCompatibility {
   private readonly matchCache = new Map<string, { expires: number; proof: string; matches: { results: Array<Record<string, unknown>>; truncated: boolean } }>();
   private lease: LeaseProof | undefined;
   private acquiringLease: Promise<LeaseProof> | undefined;
+  private readonly leaseActor = new AsyncLocalStorage<LeaseActor>();
 
   constructor(
     private readonly executor: ToolExecutor,
@@ -81,7 +83,7 @@ export class OpenTerminalCompatibility {
     if (url.pathname !== PREFIX && !url.pathname.startsWith(`${PREFIX}/`)) return false;
     try {
       if (request.method !== 'GET') { this.matchCache.clear(); this.fileGeneration++; }
-      await this.dispatch(request, response, url);
+      await this.leaseActor.run(openTerminalLeaseActor(request), () => this.dispatch(request, response, url));
     } catch (error) {
       sendCompatibilityError(response, error instanceof BoundedPathError
         ? new QubiclError('path_outside_home', `Open Terminal compatibility is restricted to ${this.home}.`, 403)
@@ -669,7 +671,9 @@ export class OpenTerminalCompatibility {
 
   private async ensureLease(): Promise<LeaseProof> {
     if (this.lease) return this.lease;
-    this.acquiringLease ??= this.executor.call('acquire_lease', { durationSeconds: LEASE_SECONDS })
+    this.acquiringLease ??= this.executor.call('acquire_lease', { durationSeconds: LEASE_SECONDS }, {
+      leaseActor: this.leaseActor.getStore() ?? { protocol: 'open-terminal', untrustedLabel: 'Open Terminal client' },
+    })
       .then((value) => {
         const record = objectInput(value);
         const proof = {
@@ -911,6 +915,15 @@ function servedFilePath(path: string): string {
 function sessionKey(request: IncomingMessage): string {
   const value = request.headers['x-session-id'];
   return typeof value === 'string' && value.length > 0 && value.length <= 256 ? value : 'default';
+}
+
+function openTerminalLeaseActor(request: IncomingMessage): LeaseActor {
+  const raw = `Open Terminal session ${sessionKey(request)}`;
+  const normalized = [...raw].map((character) => {
+    const code = character.codePointAt(0)!;
+    return code <= 0x1f || code === 0x7f ? ' ' : character;
+  }).join('').replace(/\s+/gu, ' ').trim();
+  return { protocol: 'open-terminal', untrustedLabel: [...normalized].slice(0, 120).join('') };
 }
 
 function compatibilitySessionId(request: IncomingMessage): string | null {

@@ -1,3 +1,4 @@
+import { operationOutput } from './operation-context.js';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import {
@@ -548,7 +549,7 @@ function defaultDependencies(): GatewayCommandDependencies {
       finally { input.close(); }
     },
     interactive: Boolean(stdin.isTTY && stdout.isTTY),
-    write: (message) => console.log(message),
+    write: (message) => operationOutput('log', message),
   };
 }
 

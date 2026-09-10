@@ -100,3 +100,34 @@ State directories are real, private, user-owned paths. Setup rejects symlink com
   Desktop's host gateway and local listener.
 
 Use Qubicl for capable operator-supervised work, not deliberately hostile samples or mutually untrusted users on one host. Report vulnerabilities through [SECURITY.md](../SECURITY.md).
+
+
+## Native management boundary
+
+The dashboard uses a password-authenticated native host helper with
+host-level management authority. Its container is static-only: no host mounts,
+Docker socket, credentials, TLS keys or administrative forwarding. The helper
+checks catalog-bound asset manifests and asset paths, sizes, types and digests.
+The administrative origin is distinct from agent/viewer origins; remote direct
+HTTPS requires private interfaces and explicit client networks, a single exact
+administrator certificate identity, and a private key distinct from the gateway.
+The local recovery page remains authenticated; remote access fails closed.
+
+Passwords use asynchronous scrypt (N=131072, r=8, p=1), bounded inputs and one
+concurrent derivation. Local HTTP sessions use an explicit authorization token held only in browser
+memory; no ambient local cookie or persistent browser storage is used, and
+reload requires login. Remote HTTPS sessions use HttpOnly Secure cookies. Both
+use CSRF tokens, exact Host and Origin checks, fresh tokens on reauthentication,
+30-minute user inactivity and
+12-hour absolute expiry. Polling is not user activity. Sensitive management
+changes require reauthentication; browser sessions and copied TLS material can
+be revoked through host commands. This is one owner account, not multi-user RBAC.
+
+Administrative operations are closed typed requests with bounded inputs,
+expiring session-bound plans and final state/runtime/journal fingerprints. They
+never provide arbitrary CLI execution. Credential fields are write-only;
+process metadata excludes commands, cwd, output and lease proofs. Controller
+labels supplied by clients are untrusted display data, not identity or authority.
+Shared Open Terminal connections retain one fenced lease; per-chat folders do
+not create isolation or a scheduler. See [dashboard](dashboard.md) for limits and
+recovery, and [decision 0001](decisions/0001-host-owned-dashboard.md).

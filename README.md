@@ -32,6 +32,9 @@ Qubicl turns local Docker into observable computers for external AI agents.
 The agent stays in Codex, Claude, Open WebUI, Cursor, VS Code, or another MCP or
 OpenAPI client. Qubicl supplies the machine it works on.
 
+Qubicl 0.5 adds a [local management dashboard](docs/dashboard.md) with a native
+host helper, private administration, operation previews and recovery.
+
 ```text
 your model or agent
         │
@@ -49,7 +52,7 @@ your model or agent
 
 ## Why Qubicl
 
-| | |
+| Capability | What it gives you |
 | --- | --- |
 | **Bring your own model** | One computer works with any compatible client. Switch models without rebuilding the workspace. |
 | **See the work** | Watch the live desktop, take control, finish a task yourself, and hand the same session back. |
@@ -241,14 +244,19 @@ compromise, or another user who controls the host account. The default
 
 ## Release status
 
-Qubicl `0.1.x` is the initial public series. It is ready for real use, but its
-interfaces and state format may evolve before 1.0. Linux x64, Apple Silicon
-macOS with Docker Desktop, and Windows 11 x64 through Ubuntu 24.04 on WSL 2
-with Docker Desktop are directly tested for the first release. Linux ARM64,
-Intel macOS, Windows on ARM, and other WSL 2 distributions remain best-effort.
-Native Windows and WSL 1 are unsupported; Qubicl computers remain Linux
-containers on every host. The versioned [Platform support](docs/platforms.md)
-matrix is authoritative. Back up important computer homes before upgrades.
+Qubicl `0.5.x` is a public pre-1.0 series intended for real use, but its
+interfaces and state format may still evolve before 1.0. The supported-host
+policy covers Linux x64, Apple Silicon macOS with Docker Desktop, and Windows 11
+x64 through Ubuntu 24.04 on WSL 2 with Docker Desktop. Their directly tested
+classifications record historical v0.1.0 evidence baselines; they do not mean
+every current candidate repeats the full macOS and Windows matrices. The v0.5
+initial release uses Linux x64 for general platform acceptance and separately requires
+dashboard-specific native Linux x64, Apple Silicon macOS, and physical iPhone
+Safari evidence. Linux ARM64, Intel macOS, Windows on ARM, and other WSL 2
+distributions remain best-effort. Native Windows and WSL 1 are unsupported;
+Qubicl computers remain Linux containers on every host. The versioned
+[Platform support](docs/platforms.md) matrix is authoritative. Back up important
+computer homes before upgrades.
 
 ## Documentation
 

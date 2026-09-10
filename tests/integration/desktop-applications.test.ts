@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,8 +9,8 @@ import { ToolExecutor } from '@qubicl/control/executor';
 import { ProcessManager } from '@qubicl/control/processes';
 
 test('allowlisted desktop-session applications survive takeover while generic commands are fenced', async (context) => {
-  const root = await mkdtemp(join(tmpdir(), 'qubicl-desktop-applications-'));
-  const outside = await mkdtemp(join(tmpdir(), 'qubicl-desktop-outside-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'qubicl-desktop-applications-')));
+  const outside = await realpath(await mkdtemp(join(tmpdir(), 'qubicl-desktop-outside-')));
   context.after(async () => {
     await rm(root, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
@@ -83,7 +83,7 @@ test('allowlisted desktop-session applications survive takeover while generic co
   assert.equal(child.env.PATH, '/usr/local/bin:/usr/bin:/bin');
   assert.equal(child.env.QUBICL_INTERNAL_KEY, undefined);
   assert.equal(child.env.QUBICL_GATEWAY_CREDENTIAL, undefined);
-  assert.deepEqual(child.paths, [document]);
+  assert.deepEqual(child.paths, [await realpath(document)]);
   assert.equal(isAlive(child.pid), true);
 
   for (const extra of [

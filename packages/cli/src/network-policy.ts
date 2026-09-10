@@ -1,10 +1,10 @@
+import { operationOutput } from './operation-context.js';
 import { ConfigSchema, NetworkPolicySchema, NetworkProfileSchema, type ComputerConfig } from '@qubicl/core';
 import type { ParsedArgs } from './args.js';
 import { stringOption } from './args.js';
-import { containerStatus, ensureRuntimeImages, removeComputerRuntime, startComputerAfterGateway, startGateway, validateDocker, verifyGatewayCompatibility } from './docker.js';
+import { ensureRuntimeImages, validateDocker } from './docker.js';
 import { loadState, statePaths, withStateLock, type LoadedState } from './state.js';
 import { createStateTransaction, executeStateTransaction } from './transactions.js';
-import { usesUnifiedComputerRuntime } from './runtime.js';
 
 export async function networkCommand(args: ParsedArgs): Promise<void> {
   const action = required(args.positionals[0], 'network action');
@@ -14,7 +14,7 @@ export async function networkCommand(args: ParsedArgs): Promise<void> {
     const state = await loadState(paths);
     const computer = findComputer(state, name);
     if (action === 'show') {
-      console.log(JSON.stringify(computer.network ?? developerPolicy(), null, 2));
+      operationOutput('log', JSON.stringify(computer.network ?? developerPolicy(), null, 2));
       return;
     }
     if (action === 'set') {
@@ -27,7 +27,7 @@ export async function networkCommand(args: ParsedArgs): Promise<void> {
       });
       if (profile === 'custom' && !computer.network.allowDomains.length) throw new Error('The custom network profile requires --allow-domains.');
       await commitPolicyChange(state, computer);
-      console.log(`Network profile for ${computer.name}: ${profile}. Runtime root changes were recreated; /home remained durable.`);
+      operationOutput('log', `Network profile for ${computer.name}: ${profile}. Runtime root changes were recreated; /home remained durable.`);
       return;
     }
     if (action === 'approve') {
@@ -39,7 +39,7 @@ export async function networkCommand(args: ParsedArgs): Promise<void> {
       policy.temporaryApprovals.push({ domain, expiresAt: new Date(Date.now() + seconds * 1000).toISOString() });
       computer.network = NetworkPolicySchema.parse(policy);
       await commitPolicyChange(state, computer);
-      console.log(`Temporarily approved ${domain} for ${seconds} seconds on ${computer.name}.`);
+      operationOutput('log', `Temporarily approved ${domain} for ${seconds} seconds on ${computer.name}.`);
       return;
     }
     if (action === 'revoke') {
@@ -49,30 +49,29 @@ export async function networkCommand(args: ParsedArgs): Promise<void> {
       policy.temporaryApprovals = policy.temporaryApprovals.filter((entry) => entry.domain !== domain);
       computer.network = policy;
       await commitPolicyChange(state, computer);
-      console.log(before === policy.temporaryApprovals.length ? `No temporary approval existed for ${domain}.` : `Revoked temporary approval for ${domain}.`);
+      operationOutput('log', before === policy.temporaryApprovals.length ? `No temporary approval existed for ${domain}.` : `Revoked temporary approval for ${domain}.`);
       return;
     }
     throw new Error(`Unknown network action ${action}.`);
   });
 }
 
-async function commitPolicyChange(state: LoadedState, computer: ComputerConfig): Promise<void> {
+export async function commitPolicyChange(state: LoadedState, computer: ComputerConfig): Promise<void> {
   ConfigSchema.parse(state.config);
   await validateDocker();
-  const priorRuntime = await containerStatus(state, computer.id);
-  await ensureRuntimeImages(state, [computer], true);
-  await executeStateTransaction(state.paths, createStateTransaction('config', state), { includeRuntime: false });
-  // Split runtimes keep a fixed internal control network. Unified runtimes use
-  // their single per-computer network as the egress boundary, so changing its
-  // internal flag requires replacing that network with the container.
-  if (priorRuntime.status !== 'absent') await removeComputerRuntime(state, computer.id, {
-    preserveControlNetwork: !usesUnifiedComputerRuntime(computer),
-  });
-  if (priorRuntime.status === 'running' || priorRuntime.status === 'restarting') {
-    await startGateway(state);
-    await verifyGatewayCompatibility(state);
-    await startComputerAfterGateway(state, computer);
-  }
+  const { managedComputerRuntimeObservation } = await import('./docker.js');
+  const { requirePreservedRuntimeState } = await import('./lifecycle-update.js');
+  const observed = await managedComputerRuntimeObservation(state, computer);
+  const prior = requirePreservedRuntimeState(observed, `Computer ${computer.name}`);
+  if (prior !== 'absent') await ensureRuntimeImages(state, [computer], true);
+  await executeStateTransaction(state.paths, createStateTransaction('config', state, {
+    runtime: {
+      replaceIds: prior === 'running' ? [computer.id] : [],
+      replaceStoppedIds: prior === 'stopped' ? [computer.id] : [],
+      ...(prior === 'absent' ? {} : { computerRuntimeBindings: { [computer.id]: observed.containers } }),
+      startGateway: prior === 'running',
+    },
+  }));
 }
 
 function developerPolicy(): { profile: 'developer'; allowDomains: never[]; denyDomains: never[]; temporaryApprovals: never[] } {

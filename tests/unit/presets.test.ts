@@ -84,8 +84,11 @@ test('computer manifests reject a startup profile outside their compatibility co
 
 test('release catalogs require exact immutable platform identities and measured sizes', () => {
   const release = structuredClone(createDevelopmentCatalog('1.2.3', 'revision'));
+  assert.equal(release.schemaVersion, 2);
+  assert.equal(release.dashboard.protocolVersion, 1);
+  assert.match(release.dashboard.assetManifestSha256, /^[a-f0-9]{64}$/);
   release.development = false;
-  const images = [release.gateway, ...CURATED_PRESETS.map((preset) => release.presets[preset].image)];
+  const images = [release.gateway, release.dashboard.image, ...CURATED_PRESETS.map((preset) => release.presets[preset].image)];
   for (const [imageIndex, image] of images.entries()) {
     image.requested = `ghcr.io/eldanring/qubicl-${imageIndex}:1.2.3`;
     image.indexDigest = `sha256:${String(imageIndex + 1).padStart(64, '0')}`;
@@ -100,6 +103,14 @@ test('release catalogs require exact immutable platform identities and measured 
     }
   }
   assert.doesNotThrow(() => ImageCatalogSchema.parse(release));
+
+  const missingDashboard = structuredClone(release) as Partial<typeof release>;
+  delete missingDashboard.dashboard;
+  assert.throws(() => ImageCatalogSchema.parse(missingDashboard), /dashboard/);
+
+  const invalidAssetManifest = structuredClone(release);
+  invalidAssetManifest.dashboard.assetManifestSha256 = 'not-a-digest';
+  assert.throws(() => ImageCatalogSchema.parse(invalidAssetManifest), /assetManifestSha256/);
 
   const withoutDigest = structuredClone(release);
   delete withoutDigest.presets.browser.image.platforms['linux/amd64'].digest;

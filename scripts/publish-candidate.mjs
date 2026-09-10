@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,7 +32,11 @@ export function buildPublishPlan(candidate, catalog, candidateDirectory, release
     'v0.2 or later publication requires exact OCI efficiency evidence.');
   }
   const images = IMAGE_NAMES.map((name) => {
-    const image = name === 'gateway' ? catalog.gateway : catalog.presets[name].image;
+    const image = name === 'gateway'
+      ? catalog.gateway
+      : name === 'dashboard'
+        ? catalog.dashboard.image
+        : catalog.presets[name].image;
     const registry = parseGhcrReference(image.requested);
     return {
       name,
@@ -77,9 +81,14 @@ export function buildPublishPlan(candidate, catalog, candidateDirectory, release
 async function main(args) {
   if (args.includes('--help') || args.length === 0) {
     console.log(`Usage:
-  npm run release:publish -- --candidate /path/to/candidate --public-key KEY --signature SIGNATURE.json
+  npm run release:publish -- --candidate /path/to/candidate --public-key KEY --signature SIGNATURE.json \\
+    --release-set RELEASE_SET.json --release-set-signature RELEASE_SET_SIGNATURE.json \\
+    --acceptance ACCEPTANCE.json --acceptance-signature ACCEPTANCE_SIGNATURE.json
   QUBICL_RELEASE_APPROVAL=VERSION npm run release:publish -- \\
-    --candidate /path/to/candidate --public-key KEY --signature SIGNATURE.json --publish --yes
+    --candidate /path/to/candidate --public-key KEY --signature SIGNATURE.json \\
+    --release-set RELEASE_SET.json --release-set-signature RELEASE_SET_SIGNATURE.json \\
+    --acceptance ACCEPTANCE.json --acceptance-signature ACCEPTANCE_SIGNATURE.json \\
+    --publish --yes
 
 Without --publish, verify the candidate and print the exact publication plan.
 Publishing requires a clean checkout at the candidate revision, npm and GitHub
@@ -119,6 +128,11 @@ digests, creates vVERSION and an immutable GitHub release, then moves latest.`);
   const plan = buildPublishPlan(candidate, catalog, candidateDirectory, releaseEvidence);
   plan.releaseAssets.push(resolve(options.publicKey), resolve(options.signature));
   assert(new Set(plan.releaseAssets.map((path) => basename(path))).size === plan.releaseAssets.length, 'Release evidence and artifact filenames must be unique.');
+  const notes = resolve(root, 'release-notes', `${plan.tag}.md`);
+  const notesBody = await readFile(notes, 'utf8');
+  if (requiresReleaseNotesTrustAnchor(candidate.version)) {
+    assertReleaseNotesTrustAnchor(notesBody, signatureDocument.publicKeyFingerprint);
+  }
   await assertCheckout(candidate);
   await assertPublicHistory(candidate);
   if (!options.publish) {
@@ -151,6 +165,7 @@ digests, creates vVERSION and an immutable GitHub release, then moves latest.`);
     const rows = privatePackages.map(({ packageName, visibility }) => `- ${packageName} (${visibility}): https://github.com/users/${ghcrLogin}/packages/container/${encodeURIComponent(packageName)}/settings`);
     throw new Error(`GHCR packages must permit anonymous pulls before npm is published. GitHub creates command-line container packages as private and exposes visibility changes only in package settings. Change these packages to Public, then rerun the same release command:\n${rows.join('\n')}`);
   }
+  await assertAnonymousImagePulls(plan.images);
 
   const expectedIntegrity = await sri(plan.npmArchive);
   const publishedIntegrity = await npmIntegrity(plan.version);
@@ -159,8 +174,6 @@ digests, creates vVERSION and an immutable GitHub release, then moves latest.`);
   assert(await npmIntegrity(plan.version) === expectedIntegrity, 'Published npm integrity does not match the candidate tarball.');
 
   await ensureTag(plan.tag, plan.revision);
-  const notes = resolve(root, 'release-notes', `${plan.tag}.md`);
-  await readFile(notes);
   const releaseExists = await succeeds('gh', ['release', 'view', plan.tag]);
   if (!releaseExists) await run('gh', ['release', 'create', plan.tag, '--verify-tag', '--target', plan.revision, '--latest', '--title', `Qubicl ${plan.version}`, '--notes-file', notes, ...plan.releaseAssets]);
   await assertReleaseAssets(plan, notes);
@@ -216,7 +229,12 @@ async function assertPublicHistory(candidate) {
   const roots = (await capture('git', ['rev-list', '--max-parents=0', 'HEAD'])).split('\n').filter(Boolean);
   const mergeCommits = (await capture('git', ['rev-list', '--merges', 'HEAD'])).split('\n').filter(Boolean);
   const origin = await capture('git', ['remote', 'get-url', 'origin']);
-  assertPublicHistoryFacts({ branch, head, commitCount, roots, mergeCommits, origin }, candidate, policy);
+  const remoteMainRows = (await capture('git', ['ls-remote', '--refs', 'origin', `refs/heads/${policy.branch}`]))
+    .split('\n').filter(Boolean).map((line) => line.trim().split(/\s+/u));
+  const remoteMain = remoteMainRows.length === 1 && remoteMainRows[0]?.[1] === `refs/heads/${policy.branch}`
+    ? remoteMainRows[0][0]
+    : undefined;
+  assertPublicHistoryFacts({ branch, head, commitCount, roots, mergeCommits, origin, remoteMain }, candidate, policy);
   await run(process.execPath, ['scripts/public-source.mjs', 'check']);
 }
 
@@ -229,6 +247,32 @@ export function assertPublicHistoryFacts(facts, candidate, policy) {
   assert(Array.isArray(facts.mergeCommits) && facts.mergeCommits.length === 0,
     'Publication requires linear public history without merge commits.');
   assert(normalizeGitHubUrl(facts.origin) === normalizeGitHubUrl(candidate.source), 'The public origin does not match the candidate source repository.');
+  assert(facts.remoteMain === candidate.revision,
+    `Remote ${policy.branch} must already point to the reviewed candidate revision before publication.`);
+}
+
+export function assertReleaseNotesTrustAnchor(notes, fingerprint) {
+  assert(/^SHA256:[A-Za-z0-9_-]{43}$/u.test(fingerprint), 'The release signing key has an invalid fingerprint.');
+  const occurrences = notes.split(fingerprint).length - 1;
+  assert(occurrences === 1, 'Release notes must contain the exact release signing-key fingerprint once.');
+}
+
+export function buildSkopeoInspectArgs(reference, authfile) {
+  return ['inspect', ...(authfile ? ['--authfile', authfile] : []), '--raw', `docker://${reference}`];
+}
+
+async function assertAnonymousImagePulls(images) {
+  const temporary = await mkdtemp(join(tmpdir(), 'qubicl-anonymous-registry-'));
+  const authfile = join(temporary, 'auth.json');
+  try {
+    await writeFile(authfile, '{"auths":{}}\n', { mode: 0o600 });
+    for (const image of images) {
+      assert(await remoteImageDigest(image.versionReference, { authfile }) === image.indexDigest,
+        `Anonymous digest verification failed for ${image.versionReference}.`);
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 }
 
 async function loginGhcr() {
@@ -294,14 +338,21 @@ function normalizeGitHubUrl(value) {
   return `${value}`.replace(/^git\+/u, '').replace(/^git@github\.com:/u, 'https://github.com/').replace(/\.git$/u, '').replace(/\/$/u, '').toLowerCase();
 }
 
-async function remoteImageDigest(reference) {
+async function remoteImageDigest(reference, { authfile } = {}) {
   try {
-    const { stdout } = await exec('skopeo', ['inspect', '--raw', `docker://${reference}`], { cwd: root, encoding: 'buffer', maxBuffer: 50_000_000 });
+    const { stdout } = await exec('skopeo', buildSkopeoInspectArgs(reference, authfile), { cwd: root, encoding: 'buffer', maxBuffer: 50_000_000 });
     return `sha256:${createHash('sha256').update(stdout).digest('hex')}`;
   } catch (error) {
     if (/manifest unknown|name unknown|not found|404/iu.test(`${error?.stderr ?? ''}\n${error?.message ?? ''}`)) return undefined;
     throw error;
   }
+}
+
+function requiresReleaseNotesTrustAnchor(value) {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-|$)/u.exec(`${value}`);
+  if (!match) return false;
+  const [, major, minor] = match.map(Number);
+  return major > 0 || minor >= 5;
 }
 
 async function npmIntegrity(version) {

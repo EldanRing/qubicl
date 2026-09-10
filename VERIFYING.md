@@ -1,8 +1,8 @@
 # Verifying Qubicl artifacts
 
 Qubicl releases retain checksums, a candidate manifest, SBOMs, vulnerability
-summary, and exact image catalog. A detached project signature may also be
-published when the release notes identify its public-key fingerprint.
+summary, an exact image catalog, and detached project signatures. The release
+notes identify the Ed25519 public-key fingerprint used for those signatures.
 
 ## Local candidates
 
@@ -30,8 +30,8 @@ Do not rename, add, remove, regenerate, or extract files before verification. Th
 - proves that npm and native executable code embeds the candidate's exact catalog/versioned image references, contains no development system-image defaults, and matches the retained SPDX documents;
 - validates npm package/bin identity, native executable target and legal/readme payloads, and SPDX root/namespace version-source-revision identity;
 - compares the metafile-derived SPDX component inventories with `THIRD_PARTY_NOTICES.txt`, including bundled gateway/control dependencies and excluding test-only dependencies;
-- derives all five OCI archive checks from the manifest and validates both platforms, labels, preset manifests, SLSA provenance, and OCI SPDX attestations;
-- validates all ten Trivy reports, binds each report to the exact OCI archive,
+- derives all six OCI archive checks from the manifest and validates both platforms, labels, preset manifests, dashboard assets, SLSA provenance, and OCI SPDX attestations;
+- validates all twelve Trivy reports, binds each report to the exact OCI archive,
   index, platform manifest, config, layers, DiffIDs, scanner options, scanner
   version, and fresh vulnerability-database bytes, rejects builder-path
   disclosure, and recomputes `trivy-summary.json`; and
@@ -39,7 +39,11 @@ Do not rename, add, remove, regenerate, or extract files before verification. Th
   unexpired exception or `not_affected` applicability statement under the
   supported-release policy.
 
-A complete candidate contains gateway, file-system, browser, computer, and workstation OCI archives plus one Trivy report for each Linux amd64/arm64 image variant. Do not use the lower-level OCI inspector by hand as a substitute for the directory verifier; the directory verifier supplies its required version, revision, source, preset, and expected-manifest arguments.
+A complete candidate contains gateway, dashboard, file-system, browser,
+computer, and workstation OCI archives plus one Trivy report for each Linux
+amd64/arm64 image variant. Do not use the lower-level OCI inspector by hand as
+a substitute for the directory verifier; the directory verifier supplies its
+required version, revision, source, preset, and expected-manifest arguments.
 
 ## Client conformance acceptance
 
@@ -51,11 +55,13 @@ the validator checks its SHA-256 against the reviewed source revision before it
 examines any client result.
 
 Schema 4 separates real application runs from standards-level protocol probes.
-It requires exact installed versions for Codex, Claude Code, OpenCode, OpenClaw,
-Hermes Agent, Open WebUI, Claude Desktop, Cursor, and VS Code, plus independent
-MCP stdio, MCP HTTP, OpenAPI, and Open Terminal rows. Every row is exercised on
-the `workstation` preset and has its own tester, post-freeze UTC timestamp, and
-hashed evidence reference.
+The complete matrix covers exact installed versions for Codex, Claude Code,
+OpenCode, OpenClaw, Hermes Agent, Open WebUI, Claude Desktop, Cursor, and VS
+Code, plus independent MCP stdio, MCP HTTP, OpenAPI, and Open Terminal rows.
+The v0.2-v0.4 initial tier uses the Codex/Open WebUI subset and all four protocol
+rows; v0.5 requires the complete matrix for both tiers. Every required row is
+exercised on the `workstation` preset and has its own tester, post-freeze UTC
+timestamp, and hashed evidence reference.
 
 Each applicable discovery, transport, result-mode, screenshot, file, browser,
 and human-takeover surface also has a passing post-freeze result and hashed

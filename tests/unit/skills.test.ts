@@ -93,6 +93,9 @@ test('core materialization creates one editable canonical copy and four relative
   const computer = { skillPolicy: { enabledCatalogSkills: [CORE_SKILL_IDS[0]!] } } as ComputerConfig;
   try {
     await materializeCatalogSkills(computer, home);
+    const fresh = await listInstalledSkills(home, [CORE_SKILL_IDS[0]!]);
+    assert.equal(fresh.length, CORE_SKILL_IDS.length);
+    assert.equal(fresh.every(({ drift }) => drift === 'unchanged'), true, 'fresh core working copies match their reviewed catalog digests');
     const canonical = join(skillStorePaths(home).installed, 'plan');
     for (const root of ['.agents', '.claude', '.hermes', '.codex']) {
       const packageRoot = join(home, root, 'skills', 'plan');

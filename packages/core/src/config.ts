@@ -48,8 +48,8 @@ export const NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 export const DEFAULT_GATEWAY_PORT = 3211;
 export const DEFAULT_CPUS = 2;
 export const DEFAULT_MEMORY = '4g';
-export const STATE_FORMAT_VERSION = 3;
-export const TRANSACTION_FORMAT_VERSION = 3;
+export const STATE_FORMAT_VERSION = 4;
+export const TRANSACTION_FORMAT_VERSION = 4;
 export const DEFAULT_GATEWAY_IMAGE = process.env.QUBICL_DEFAULT_GATEWAY_IMAGE ?? PACKAGED_DEFAULT_GATEWAY_IMAGE;
 /** Kept for source compatibility; new code should use the workstation catalog entry. */
 export const DEFAULT_COMPUTER_IMAGE = process.env.QUBICL_DEFAULT_COMPUTER_IMAGE ?? PACKAGED_DEFAULT_COMPUTER_IMAGE;
@@ -262,13 +262,23 @@ export const LegacyConfigV2Schema = z.object({
 }).superRefine(validateConfigComputers);
 export type LegacyQubiclConfigV2 = z.infer<typeof LegacyConfigV2Schema>;
 
-export const ConfigSchema = z.strictObject({
-  version: z.literal(STATE_FORMAT_VERSION),
+const currentConfigFields = {
   installationId: z.uuid(),
   gateway: GatewayConfigSchema,
   defaults: ComputerDefaultsSchema,
   nextName: z.number().int().positive(),
   computers: z.array(ComputerConfigSchema),
+};
+
+export const LegacyConfigV3Schema = z.strictObject({
+  version: z.literal(3),
+  ...currentConfigFields,
+}).superRefine(validateConfigComputers);
+export type LegacyQubiclConfigV3 = z.infer<typeof LegacyConfigV3Schema>;
+
+export const ConfigSchema = z.strictObject({
+  version: z.literal(STATE_FORMAT_VERSION),
+  ...currentConfigFields,
 }).superRefine(validateConfigComputers);
 
 export type QubiclConfig = z.infer<typeof ConfigSchema>;
@@ -304,14 +314,16 @@ export const LegacySecretsV1Schema = z.object({ version: z.literal(1), ...comput
 export type LegacyQubiclSecretsV1 = z.infer<typeof LegacySecretsV1Schema>;
 export const LegacySecretsV2Schema = z.object({ version: z.literal(2), ...computerSecretFields });
 export type LegacyQubiclSecretsV2 = z.infer<typeof LegacySecretsV2Schema>;
-export const SecretsSchema = z.object({ version: z.literal(STATE_FORMAT_VERSION), ...secretFields });
+export const LegacySecretsV3Schema = z.strictObject({ version: z.literal(3), ...secretFields });
+export type LegacyQubiclSecretsV3 = z.infer<typeof LegacySecretsV3Schema>;
+export const SecretsSchema = z.strictObject({ version: z.literal(STATE_FORMAT_VERSION), ...secretFields });
 export type QubiclSecrets = z.infer<typeof SecretsSchema>;
 
 export const StateMigrationSchema = z.strictObject({
-  version: z.literal(2),
+  version: z.literal(3),
   id: z.uuid(),
   createdAt: z.iso.datetime(),
-  sourceVersion: z.union([z.literal(1), z.literal(2)]),
+  sourceVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   targetVersion: z.literal(STATE_FORMAT_VERSION),
   backupName: z.string().regex(/^[a-zA-Z0-9._-]+$/),
   config: ConfigSchema,
@@ -328,6 +340,27 @@ export const StateMigrationSchema = z.strictObject({
   validateGatewayExposureSecret(migration.config.gateway.exposure, migration.secrets.gateway?.tls, ['secrets', 'gateway', 'tls'], context);
 });
 export type StateMigration = z.infer<typeof StateMigrationSchema>;
+
+export const LegacyStateMigrationV3Schema = z.strictObject({
+  version: z.literal(2),
+  id: z.uuid(),
+  createdAt: z.iso.datetime(),
+  sourceVersion: z.union([z.literal(1), z.literal(2)]),
+  targetVersion: z.literal(3),
+  backupName: z.string().regex(/^[a-zA-Z0-9._-]+$/),
+  config: LegacyConfigV3Schema,
+  secrets: LegacySecretsV3Schema,
+}).superRefine((migration, context) => {
+  const { missingSecrets, orphanSecrets } = stateComputerIdMismatch(migration.config, migration.secrets);
+  if (missingSecrets.length || orphanSecrets.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['secrets', 'computers'],
+      message: `must exactly match config computer IDs; missing: ${missingSecrets.join(', ') || 'none'}; orphan: ${orphanSecrets.join(', ') || 'none'}`,
+    });
+  }
+  validateGatewayExposureSecret(migration.config.gateway.exposure, migration.secrets.gateway?.tls, ['secrets', 'gateway', 'tls'], context);
+});
 
 export const LegacyStateMigrationV2Schema = z.strictObject({
   version: z.literal(1),
@@ -542,6 +575,16 @@ export const LegacyStateTransactionV2Schema = z.strictObject({
   trash: z.array(LegacyTrashTransactionEntrySchema),
 }).superRefine(validateStateTransaction);
 
+export const LegacyStateTransactionV3Schema = z.strictObject({
+  version: z.literal(3),
+  operation: TransactionOperationSchema,
+  ...transactionBase,
+  config: LegacyConfigV3Schema,
+  secrets: LegacySecretsV3Schema,
+  active: z.array(ActiveTransactionEntrySchema),
+  trash: z.array(TrashTransactionEntrySchema),
+}).superRefine(validateStateTransaction);
+
 export const StateTransactionSchema = z.strictObject({
   version: z.literal(TRANSACTION_FORMAT_VERSION),
   operation: TransactionOperationSchema,
@@ -654,9 +697,32 @@ export function migrateSecretsV1(secrets: LegacyQubiclSecretsV1): QubiclSecrets 
   return SecretsSchema.parse({ version: STATE_FORMAT_VERSION, computers: secrets.computers });
 }
 
+export function migrateConfigV3(config: LegacyQubiclConfigV3): QubiclConfig {
+  const { version: _version, ...fields } = LegacyConfigV3Schema.parse(config);
+  return ConfigSchema.parse({ version: STATE_FORMAT_VERSION, ...fields });
+}
+
+export function migrateSecretsV3(secrets: LegacyQubiclSecretsV3): QubiclSecrets {
+  const { version: _version, ...fields } = LegacySecretsV3Schema.parse(secrets);
+  return SecretsSchema.parse({ version: STATE_FORMAT_VERSION, ...fields });
+}
+
 export function parseStateTransactionDocument(value: unknown): { transaction: StateTransaction; migrated: boolean; sourceVersion?: number } {
   const current = StateTransactionSchema.safeParse(value);
   if (current.success) return { transaction: current.data, migrated: false };
+  const v3 = LegacyStateTransactionV3Schema.safeParse(value);
+  if (v3.success) {
+    return {
+      transaction: StateTransactionSchema.parse({
+        ...v3.data,
+        version: TRANSACTION_FORMAT_VERSION,
+        config: migrateConfigV3(v3.data.config),
+        secrets: migrateSecretsV3(v3.data.secrets),
+      }),
+      migrated: true,
+      sourceVersion: 3,
+    };
+  }
   const v2 = LegacyStateTransactionV2Schema.safeParse(value);
   if (v2.success) return { transaction: migrateLegacyTransaction(v2.data, 2), migrated: true, sourceVersion: 2 };
   const v1 = LegacyStateTransactionV1Schema.safeParse(value);
@@ -767,10 +833,10 @@ export interface ManifestReconciliation {
   defaultsChanged: boolean;
 }
 
-export function defaultConfig(): QubiclConfig {
+export function defaultConfig(installationId: string = randomUUID()): QubiclConfig {
   return ConfigSchema.parse({
     version: STATE_FORMAT_VERSION,
-    installationId: randomUUID(),
+    installationId,
     gateway: { port: DEFAULT_GATEWAY_PORT, image: catalogImageIdentity(IMAGE_CATALOG.gateway) },
     defaults: presetDefaults('workstation'),
     nextName: 1,

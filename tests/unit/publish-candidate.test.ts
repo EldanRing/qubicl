@@ -19,11 +19,12 @@ test('candidate publication plan uses exact versioned artifacts before latest al
     modes: { images: true, scans: true, exactArtifactAcceptance: true, binaryOnly: false },
   }, {
     gateway: image('gateway'),
+    dashboard: { image: image('dashboard') },
     presets: Object.fromEntries(['file-system', 'browser', 'computer', 'workstation'].map((name) => [name, { image: image(name) }])),
   }, '/candidate');
   assert.equal(plan.tag, 'v0.1.0');
   assert.equal(plan.npmArchive, '/candidate/qubicl-cli-0.1.0.tgz');
-  assert.equal(plan.images.length, 5);
+  assert.equal(plan.images.length, 6);
   assert.equal(plan.images[0]?.versionReference, 'ghcr.io/example/qubicl-gateway:0.1.0');
   assert.equal(plan.images[0]?.latestReference, 'ghcr.io/example/qubicl-gateway:latest');
   assert.deepEqual(plan.images[0]?.registry, { owner: 'example', packageName: 'qubicl-gateway' });
@@ -112,6 +113,7 @@ test('v0.2 publication retains candidate-bound image-efficiency evidence', async
   };
   const catalog = {
     gateway: image('gateway'),
+    dashboard: { image: image('dashboard') },
     presets: Object.fromEntries(['file-system', 'browser', 'computer', 'workstation'].map((name) => [name, { image: image(name) }])),
   };
   assert.throws(() => buildPublishPlan({ ...candidate, imageEfficiency: undefined }, catalog, '/candidate', releaseEvidence),
@@ -147,6 +149,22 @@ test('existing GitHub release metadata rejects stale or surplus assets', async (
   assert.throws(() => assertReleaseMetadata({ ...release, assets: [...release.assets, { name: 'surprise.bin' }] }, expected), /extra assets/);
 });
 
+test('publisher binds the reviewed release notes to the exact signing key', async () => {
+  const { assertReleaseNotesTrustAnchor } = await import(moduleUrl);
+  const fingerprint = `SHA256:${'a'.repeat(43)}`;
+  assert.doesNotThrow(() => assertReleaseNotesTrustAnchor(`Trust ${fingerprint}.\n`, fingerprint));
+  assert.throws(() => assertReleaseNotesTrustAnchor('No trust anchor.\n', fingerprint), /exact release signing-key fingerprint/);
+  assert.throws(() => assertReleaseNotesTrustAnchor(`${fingerprint}\n${fingerprint}\n`, fingerprint), /exact release signing-key fingerprint/);
+  assert.throws(() => assertReleaseNotesTrustAnchor('irrelevant', 'wrong'), /invalid fingerprint/);
+});
+
+test('anonymous registry checks use an explicit isolated auth file', async () => {
+  const { buildSkopeoInspectArgs } = await import(moduleUrl);
+  assert.deepEqual(buildSkopeoInspectArgs('ghcr.io/example/qubicl:0.5.0', '/tmp/anonymous.json'), [
+    'inspect', '--authfile', '/tmp/anonymous.json', '--raw', 'docker://ghcr.io/example/qubicl:0.5.0',
+  ]);
+});
+
 test('publisher accepts linear descendants of the trusted public root and rejects detached or merged ancestry', async () => {
   const { assertPublicHistoryFacts } = await import(moduleUrl);
   const revision = 'a'.repeat(40);
@@ -155,26 +173,30 @@ test('publisher accepts linear descendants of the trusted public root and reject
   const policy = { branch: 'main', trustedRootCommit };
   assert.doesNotThrow(() => assertPublicHistoryFacts({
     branch: 'main', head: revision, commitCount: 19, roots: [trustedRootCommit], mergeCommits: [],
-    origin: 'https://github.com/example/qubicl.git',
+    origin: 'https://github.com/example/qubicl.git', remoteMain: revision,
   }, candidate, policy));
   assert.throws(() => assertPublicHistoryFacts({
     branch: 'main', head: revision, commitCount: 31, roots: ['c'.repeat(40)], mergeCommits: [],
-    origin: 'https://github.com/example/qubicl.git',
+    origin: 'https://github.com/example/qubicl.git', remoteMain: revision,
   }, candidate, policy), /trusted public root/);
   assert.throws(() => assertPublicHistoryFacts({
     branch: 'main', head: revision, commitCount: 20, roots: [trustedRootCommit], mergeCommits: ['c'.repeat(40)],
-    origin: 'https://github.com/example/qubicl.git',
+    origin: 'https://github.com/example/qubicl.git', remoteMain: revision,
   }, candidate, policy), /without merge commits/);
   assert.throws(() => assertPublicHistoryFacts({
     branch: 'main', head: 'c'.repeat(40), commitCount: 19, roots: [trustedRootCommit], mergeCommits: [],
-    origin: 'https://github.com/example/qubicl.git',
+    origin: 'https://github.com/example/qubicl.git', remoteMain: revision,
   }, candidate, policy), /candidate revision/);
   assert.throws(() => assertPublicHistoryFacts({
     branch: 'release', head: revision, commitCount: 19, roots: [trustedRootCommit], mergeCommits: [],
-    origin: 'https://github.com/example/qubicl.git',
+    origin: 'https://github.com/example/qubicl.git', remoteMain: revision,
   }, candidate, policy), /run from main/);
   assert.throws(() => assertPublicHistoryFacts({
     branch: 'main', head: revision, commitCount: 19, roots: [trustedRootCommit], mergeCommits: [],
-    origin: 'https://github.com/other/qubicl.git',
+    origin: 'https://github.com/other/qubicl.git', remoteMain: revision,
   }, candidate, policy), /origin/);
+  assert.throws(() => assertPublicHistoryFacts({
+    branch: 'main', head: revision, commitCount: 19, roots: [trustedRootCommit], mergeCommits: [],
+    origin: 'https://github.com/example/qubicl.git', remoteMain: 'c'.repeat(40),
+  }, candidate, policy), /Remote main must already point/);
 });

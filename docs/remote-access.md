@@ -137,3 +137,13 @@ instead of claiming success.
 
 Read the complete [security model](security-model.md) and verify the host
 firewall before making an interface reachable from an untrusted network.
+
+
+## Separate administrator origin
+
+The [dashboard](dashboard.md) has its own private direct HTTPS
+listener. Gateway exposure does not enable administration. Use distinct DNS
+names, private keys and non-overlapping certificates: browser cookies are not
+isolated by ports. Remote viewer/preview links still require gateway TLS, while
+administrative passwords and sessions terminate only at the native helper.
+`dashboard revoke` and `gateway revoke` intentionally revoke different listeners.

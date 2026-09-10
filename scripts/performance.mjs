@@ -26,6 +26,7 @@ const version = await repeated(process.execPath, [cli, 'version'], iterations);
 const packed = await packageMeasurement();
 const images = {
   gateway: await imageMeasurement(catalog.gateway),
+  dashboard: await imageMeasurement(catalog.dashboard.image),
   ...Object.fromEntries(await Promise.all(CURATED_PRESETS.map(async (preset) => [
     preset,
     await imageMeasurement(catalog.presets[preset].image),
@@ -279,6 +280,7 @@ function evaluateBudgets(report) {
   // headroom without allowing a materially larger dependency graph to land.
   if (report.cli.help.maxRssKiB) checks.push(budget('CLI help max RSS KiB', report.cli.help.maxRssKiB.max, 104 * 1024));
   if (report.images.gateway.downloadBytes !== null) checks.push(budget('gateway download bytes', report.images.gateway.downloadBytes, 65_000_000));
+  if (report.images.dashboard.downloadBytes !== null) checks.push(budget('dashboard download bytes', report.images.dashboard.downloadBytes, 65_000_000));
   // The universal local web service, source skill catalog, and common CLI utilities
   // are present in every image. Browser adds Chromium, OCR, and its smaller
   // document closure; computer adds XFCE, SSH, and the full document closure;

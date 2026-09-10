@@ -48,7 +48,7 @@ test('config show and set manage validated defaults without hand-editing YAML', 
   }
 });
 
-test('an interrupted config transaction rolls forward on the next command', async () => {
+test('read-only config inspection preserves interrupted transactions until explicit recovery', async () => {
   const root = await mkdtemp(join(tmpdir(), 'qubicl-cli-config-recovery-'));
   const env = { ...process.env, QUBICL_HOME: root };
   try {
@@ -59,6 +59,14 @@ test('an interrupted config transaction rolls forward on the next command', asyn
     assert.match(interrupted?.stderr ?? '', /Simulated transaction interruption/);
     assert.equal((await stat(join(root, 'transaction.yaml'))).isFile(), true);
 
+    const shown = await exec('node', [cli, 'config', 'show'], { env });
+    assert.equal(JSON.parse(shown.stdout).defaults.memory, '7g');
+    assert.equal((await stat(join(root, 'transaction.yaml'))).isFile(), true);
+    for (const arguments_ of [['backup', 'verify', 'missing'], ['token', 'show', 'missing'], ['secret', 'list', 'missing']]) {
+      await assert.rejects(exec('node', [cli, ...arguments_], { env }));
+      assert.equal((await stat(join(root, 'transaction.yaml'))).isFile(), true, `${arguments_.join(' ')} must not recover before validating its target`);
+    }
+    await exec('node', [cli, 'recover', '--yes'], { env });
     const recovered = await exec('node', [cli, 'config', 'show'], { env });
     assert.equal(JSON.parse(recovered.stdout).defaults.memory, '7g');
     await assert.rejects(stat(join(root, 'transaction.yaml')), { code: 'ENOENT' });

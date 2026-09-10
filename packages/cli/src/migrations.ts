@@ -8,17 +8,22 @@ import {
   ConfigSchema,
   LegacyConfigV1Schema,
   LegacyConfigV2Schema,
+  LegacyConfigV3Schema,
   LegacyStateMigrationV2Schema,
+  LegacyStateMigrationV3Schema,
   LegacySecretsV1Schema,
   LegacySecretsV2Schema,
+  LegacySecretsV3Schema,
   SecretsSchema,
   STATE_FORMAT_VERSION,
   StateMigrationSchema,
   assertStateComputerIdsMatch,
   migrateConfigV1,
   migrateConfigV2,
+  migrateConfigV3,
   migrateSecretsV1,
   migrateSecretsV2,
+  migrateSecretsV3,
   type StateMigration,
 } from '@qubicl/core';
 import {
@@ -81,17 +86,26 @@ export async function inspectStateFormat(paths: StatePaths): Promise<StateFormat
       assertStateComputerIdsMatch(config, secrets);
       return { status: 'current', detail: `state format ${STATE_FORMAT_VERSION}` };
     }
-    if (configVersion === 1 || configVersion === 2) {
+    if (configVersion === 1 || configVersion === 2 || configVersion === 3) {
       if (configVersion === 1) {
         const config = LegacyConfigV1Schema.parse(configValue);
         const secrets = LegacySecretsV1Schema.parse(secretsValue);
         assertStateComputerIdsMatch(config, secrets);
-      } else {
+      } else if (configVersion === 2) {
         const config = LegacyConfigV2Schema.parse(configValue);
         const secrets = LegacySecretsV2Schema.parse(secretsValue);
         assertStateComputerIdsMatch(config, secrets);
+      } else {
+        const config = LegacyConfigV3Schema.parse(configValue);
+        const secrets = LegacySecretsV3Schema.parse(secretsValue);
+        assertStateComputerIdsMatch(config, secrets);
       }
-      return { status: 'legacy', detail: `state format ${configVersion} will migrate to ${STATE_FORMAT_VERSION} before the next state command` };
+      return {
+        status: 'legacy',
+        detail: configVersion === 3
+          ? `state format 3 requires explicit setup migration to ${STATE_FORMAT_VERSION}`
+          : `state format ${configVersion} will migrate to ${STATE_FORMAT_VERSION} during explicit setup`,
+      };
     }
     const relation = configVersion > STATE_FORMAT_VERSION ? 'newer than' : 'unsupported by';
     return { status: 'invalid', detail: `state format ${configVersion} is ${relation} this Qubicl build (current format ${STATE_FORMAT_VERSION})` };
@@ -120,20 +134,30 @@ export async function ensureCurrentState(paths: StatePaths, options: StateMigrat
   if (configVersion > STATE_FORMAT_VERSION) {
     throw new Error(`State format ${configVersion} is newer than this Qubicl build supports (${STATE_FORMAT_VERSION}); use a matching or newer Qubicl version.`);
   }
-  if (configVersion !== 1 && configVersion !== 2) throw new Error(`State format ${configVersion} cannot be migrated by this Qubicl build.`);
+  if (configVersion !== 1 && configVersion !== 2 && configVersion !== 3) {
+    throw new Error(`State format ${configVersion} cannot be migrated by this Qubicl build.`);
+  }
 
-  const id = configVersion === 2 ? LegacyConfigV2Schema.parse(configValue).installationId : randomUUID();
+  const id = configVersion === 1
+    ? randomUUID()
+    : configVersion === 2
+      ? LegacyConfigV2Schema.parse(configValue).installationId
+      : LegacyConfigV3Schema.parse(configValue).installationId;
   const migratedConfig = configVersion === 1
     ? migrateConfigV1(LegacyConfigV1Schema.parse(configValue), id)
-    : migrateConfigV2(LegacyConfigV2Schema.parse(configValue));
+    : configVersion === 2
+      ? migrateConfigV2(LegacyConfigV2Schema.parse(configValue))
+      : migrateConfigV3(LegacyConfigV3Schema.parse(configValue));
   const migratedSecrets = configVersion === 1
     ? migrateSecretsV1(LegacySecretsV1Schema.parse(secretsValue))
-    : migrateSecretsV2(LegacySecretsV2Schema.parse(secretsValue));
+    : configVersion === 2
+      ? migrateSecretsV2(LegacySecretsV2Schema.parse(secretsValue))
+      : migrateSecretsV3(LegacySecretsV3Schema.parse(secretsValue));
   assertStateComputerIdsMatch(migratedConfig, migratedSecrets);
   await validateMigrationDurableState(paths, migratedConfig);
   const metadataFiles = await metadataBackupFiles(paths, migratedConfig.computers.map(({ id }) => id));
   const migration = StateMigrationSchema.parse({
-    version: 2,
+    version: 3,
     id,
     createdAt: new Date().toISOString(),
     sourceVersion: configVersion,
@@ -229,17 +253,30 @@ async function readMigration(paths: StatePaths): Promise<StateMigration | undefi
   const value = YAML.parse(await readFile(paths.migration, 'utf8')) as unknown;
   const current = StateMigrationSchema.safeParse(value);
   if (current.success) return current.data;
-  const legacy = LegacyStateMigrationV2Schema.safeParse(value);
-  if (!legacy.success) throw current.error;
+  const legacyV3 = LegacyStateMigrationV3Schema.safeParse(value);
+  if (legacyV3.success) {
+    return StateMigrationSchema.parse({
+      version: 3,
+      id: legacyV3.data.id,
+      createdAt: legacyV3.data.createdAt,
+      sourceVersion: legacyV3.data.sourceVersion,
+      targetVersion: STATE_FORMAT_VERSION,
+      backupName: legacyV3.data.backupName,
+      config: migrateConfigV3(legacyV3.data.config),
+      secrets: migrateSecretsV3(legacyV3.data.secrets),
+    });
+  }
+  const legacyV2 = LegacyStateMigrationV2Schema.safeParse(value);
+  if (!legacyV2.success) throw current.error;
   const upgraded = StateMigrationSchema.parse({
-    version: 2,
-    id: legacy.data.id,
-    createdAt: legacy.data.createdAt,
-    sourceVersion: legacy.data.sourceVersion,
+    version: 3,
+    id: legacyV2.data.id,
+    createdAt: legacyV2.data.createdAt,
+    sourceVersion: legacyV2.data.sourceVersion,
     targetVersion: STATE_FORMAT_VERSION,
-    backupName: legacy.data.backupName,
-    config: migrateConfigV2(legacy.data.config),
-    secrets: migrateSecretsV2(legacy.data.secrets),
+    backupName: legacyV2.data.backupName,
+    config: migrateConfigV2(legacyV2.data.config),
+    secrets: migrateSecretsV2(legacyV2.data.secrets),
   });
   return upgraded;
 }

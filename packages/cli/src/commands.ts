@@ -1,3 +1,6 @@
+import { inHostOperation } from './operation-context.js';
+import type { ManagementRequest } from './dashboard/contracts.js';
+import { operationOutput } from './operation-context.js';
 import { access, lstat, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
@@ -21,6 +24,7 @@ import {
   ToolProfileSchema,
   SUPPORTED_NODE_RANGE,
   assertValidName,
+  toolsForCapabilities,
   gatewayExposureRuntime,
   gatewayExposureRuntimeId,
   parseManifestDocument,
@@ -64,13 +68,10 @@ import {
   reconcileRuntimeImageContracts,
   portAvailable,
   run,
-  startComputer,
   startComputerPreservingRuntimeAfterGateway,
   startGateway,
   validateDocker,
   verifyGatewayCompatibility,
-  waitForGatewayComputer,
-  waitForHealthy,
 } from './docker.js';
 import { serveMcpBridge } from './mcp.js';
 import { ensureCurrentState, inspectStateFormat, recoverStateMigration } from './migrations.js';
@@ -97,7 +98,7 @@ import { upgradedComputer } from './upgrade.js';
 import { setupCommand } from './setup.js';
 import { checkViewerHealth } from './viewer-health.js';
 import { networkCommand } from './network-policy.js';
-import { secretCommand } from './secret-broker.js';
+import { secretCommand, manageBrokerCredential } from './secret-broker.js';
 import { sshCommand } from './ssh-access.js';
 import { backupCommand, checkpointCommand, cloneCommand } from './backups.js';
 import { devcontainerCommand } from './devcontainer.js';
@@ -134,8 +135,29 @@ import {
 
 export async function execute(command: string | undefined, args: ParsedArgs): Promise<void> {
   validateInvocation(command, args);
+  if (!flag(args, 'help') && cliRequiresInstallationLock(command, args)) {
+    const paths = statePaths();
+    return inHostOperation(paths.root, () => withStateLock(paths, () => executeUnlocked(command, args)), false);
+  }
+  return executeUnlocked(command, args);
+}
+
+function cliRequiresInstallationLock(command: string | undefined, args: ParsedArgs): boolean {
+  if (!command || ['help', 'version', 'image', 'doctor', 'dashboard', 'mcp', 'logs', 'view', 'connect', 'list', 'status', 'inspect', 'export'].includes(command)) return false;
+  if (command === 'config') return args.positionals[0] === 'set';
+  if (command === 'gateway') return args.positionals[0] !== 'status';
+  if (command === 'network') return args.positionals[0] !== 'show';
+  if (command === 'backup') return !['list', 'verify'].includes(args.positionals[0] ?? '');
+  if (command === 'token') return args.positionals[0] !== 'show';
+  if (command === 'secret') return args.positionals[0] !== 'list';
+  if (command === 'cleanup') return flag(args, 'yes');
+  return true;
+}
+
+async function executeUnlocked(command: string | undefined, args: ParsedArgs): Promise<void> {
+  validateInvocation(command, args);
   if (flag(args, 'help')) {
-    console.log(helpText);
+    operationOutput('log', helpText);
     return;
   }
   await prepareStateBeforeCommand(command, args);
@@ -143,10 +165,10 @@ export async function execute(command: string | undefined, args: ParsedArgs): Pr
   switch (command) {
     case undefined:
     case 'help':
-      console.log(helpText);
+      operationOutput('log', helpText);
       return;
     case 'version':
-      console.log(versionSummary());
+      operationOutput('log', versionSummary());
       return;
     case 'setup': return setupCommand(args);
     case 'config': return config(args);
@@ -160,6 +182,16 @@ export async function execute(command: string | undefined, args: ParsedArgs): Pr
     case 'inspect': return inspect(required(args.positionals[0], 'computer name'));
     case 'logs': return logs(args.positionals[0]);
     case 'doctor': return doctor(args);
+    case 'recover': {
+      const paths = statePaths();
+      if (!flag(args, 'yes')) {
+        if (!stdin.isTTY) throw new Error('Reviewed journal recovery requires --yes in non-interactive use.');
+        const prompt = createInterface({ input: stdin, output: stdout });
+        try { if ((await prompt.question('Resume recorded state, backup, and upgrade recovery? Type recover: ')).trim() !== 'recover') throw new Error('Recovery cancelled.'); } finally { prompt.close(); }
+      }
+      await inHostOperation(paths.root, () => withStateLock(paths, () => executeHostManagementRequest(paths.root, { operation: 'recovery.resume' })));
+      operationOutput('log', 'Recorded recovery completed. Review status before starting new work.'); return;
+    }
     case 'repair': return repair(args);
     case 'start': return start(required(args.positionals[0], 'computer name'));
     case 'stop': return stop(required(args.positionals[0], 'computer name'));
@@ -199,6 +231,7 @@ export async function execute(command: string | undefined, args: ParsedArgs): Pr
     );
     case 'token': return token(args);
     case 'image': return image(args);
+    case 'dashboard': return (await import('./dashboard/command.js')).dashboardCommand(args);
     case 'export': return exportManifest(stringOption(args, 'output') ?? 'qubicl.yaml');
     case 'apply': return applyManifest(required(args.positionals[0], 'manifest path'), flag(args, 'dry-run'), flag(args, 'prune'));
     default: throw new Error(`Unknown command ${command}. Run qubicl help.`);
@@ -237,7 +270,7 @@ async function config(args: ParsedArgs): Promise<void> {
       || requested.memory !== undefined;
     if (!changesManagedConfig) {
       const preferences = await writeUpdateNotificationPreference(requested.updateNotifications!, paths);
-      console.log(JSON.stringify({ localPreferences: preferences }, null, 2));
+      operationOutput('log', JSON.stringify({ localPreferences: preferences }, null, 2));
       return;
     }
     const prior = structuredClone(state.config);
@@ -304,7 +337,7 @@ async function printConfig(state: LoadedState): Promise<void> {
   ]);
   const catalogEntry = state.config.defaults.preset === 'custom' ? undefined : IMAGE_CATALOG.presets[state.config.defaults.preset];
   const catalogDrift = catalogEntry ? catalogEntry.manifestSha256 !== state.config.defaults.image.manifestSha256 : false;
-  console.log(JSON.stringify({ gateway: state.config.gateway, defaults: state.config.defaults, localPreferences, drift: { gateway: gatewayDrift, defaultImage: defaultDrift, catalog: catalogDrift } }, null, 2));
+  operationOutput('log', JSON.stringify({ gateway: state.config.gateway, defaults: state.config.defaults, localPreferences, drift: { gateway: gatewayDrift, defaultImage: defaultDrift, catalog: catalogDrift } }, null, 2));
 }
 
 async function up(): Promise<void> {
@@ -326,7 +359,9 @@ async function up(): Promise<void> {
       await startComputerPreservingRuntimeAfterGateway(state, computer);
     }
     await synchronizeStartedSkillPolicies(state, state.config.computers);
-    console.log(`Started Qubicl with ${state.config.computers.length} computer${state.config.computers.length === 1 ? '' : 's'}.`);
+    const dashboard = await import('./dashboard/runtime.js');
+    if ((await dashboard.readDashboardConfiguration(paths.root))?.enabled) await dashboard.setDashboardRunning(paths.root, true);
+    operationOutput('log', `Started Qubicl with ${state.config.computers.length} computer${state.config.computers.length === 1 ? '' : 's'}.`);
   });
 }
 
@@ -335,7 +370,8 @@ async function down(): Promise<void> {
   await withStateLock(paths, async () => {
     const state = await loadState(paths);
     await compose(state, ['stop']);
-    console.log('Stopped Qubicl. Persistent homes were left intact.');
+    await (await import('./dashboard/runtime.js')).setDashboardRunning(paths.root, false);
+    operationOutput('log', 'Stopped Qubicl. Persistent homes were left intact.');
   });
 }
 
@@ -372,7 +408,7 @@ async function create(args: ParsedArgs): Promise<void> {
     defaults = ComputerDefaultsSchema.parse({ ...defaults, ...(cpus === undefined ? {} : { cpus }), ...(normalizedMemory === undefined ? {} : { memory: normalizedMemory }) });
     const recommendation = PRESET_DEFINITIONS[defaults.compatibility];
     if (defaults.cpus < recommendation.cpus || memoryBytes(defaults.memory) < memoryBytes(recommendation.memory)) {
-      console.warn(`Warning: resources are below the tested ${defaults.compatibility} recommendation (${recommendation.cpus} CPU / ${recommendation.memory}).`);
+      operationOutput('warn', `Warning: resources are below the tested ${defaults.compatibility} recommendation (${recommendation.cpus} CPU / ${recommendation.memory}).`);
     }
     const policies = await creationPolicySelection(
       { capabilities: defaults.capabilities, compatibility: defaults.compatibility },
@@ -382,7 +418,7 @@ async function create(args: ParsedArgs): Promise<void> {
     );
     const computer = addConfiguredComputer(state, args.positionals[0], defaults, policies);
     const nonCoreSkills = computer.skillPolicy?.enabledCatalogSkills.filter((id) => !(CORE_SKILL_IDS as readonly string[]).includes(id)) ?? [];
-    if (nonCoreSkills.length) console.warn('Warning: imported skills are operator-reviewed but best-effort; verify their declared tools and commands before use.');
+    if (nonCoreSkills.length) operationOutput('warn', 'Warning: imported skills are operator-reviewed but best-effort; verify their declared tools and commands before use.');
     const startNow = !flag(args, 'no-start');
     // Creating one computer must not depend on an unrelated stopped
     // computer's pinned image still being available.
@@ -393,8 +429,8 @@ async function create(args: ParsedArgs): Promise<void> {
     }));
     if (startNow) await synchronizeStartedSkillPolicies(state, [computer]);
     const result = buildComputerConnectionResult(state.config.gateway.port, computer, startNow, state.config.gateway.exposure);
-    if (flag(args, 'json')) console.log(JSON.stringify(result, null, 2));
-    else printComputerHandoff(result, console.log);
+    if (flag(args, 'json')) operationOutput('log', JSON.stringify(result, null, 2));
+    else printComputerHandoff(result, (message) => operationOutput('log', message));
   });
 }
 
@@ -470,7 +506,7 @@ async function upgradeComputer(args: ParsedArgs): Promise<void> {
     const replacement = upgradedComputer(current, imageDefaults);
     const recommendation = PRESET_DEFINITIONS[replacement.compatibility];
     if (replacement.cpus < recommendation.cpus || memoryBytes(replacement.memory) < memoryBytes(recommendation.memory)) {
-      console.warn(`Warning: preserved resources are below the tested ${replacement.compatibility} recommendation (${recommendation.cpus} CPU / ${recommendation.memory}).`);
+      operationOutput('warn', `Warning: preserved resources are below the tested ${replacement.compatibility} recommendation (${recommendation.cpus} CPU / ${recommendation.memory}).`);
     }
     const currentComputerObservation = await managedComputerRuntimeObservation(state, current);
     const currentRuntime = requirePreservedRuntimeState(
@@ -501,8 +537,8 @@ async function upgradeComputer(args: ParsedArgs): Promise<void> {
       ),
     }));
     if (reviewedRuntime === 'running') await synchronizeStartedSkillPolicies(state, [replacement]);
-    console.log(`Upgraded ${replacement.name} to ${replacement.image.resolved}.`);
-    console.log(`Computer ID, token, resources, policy, and durable home are unchanged. Runtime state was preserved as ${reviewedRuntime}.`);
+    operationOutput('log', `Upgraded ${replacement.name} to ${replacement.image.resolved}.`);
+    operationOutput('log', `Computer ID, token, resources, policy, and durable home are unchanged. Runtime state was preserved as ${reviewedRuntime}.`);
   });
 }
 
@@ -510,12 +546,12 @@ async function list(args: ParsedArgs): Promise<void> {
   const state = await loadState();
   const rows = await Promise.all(state.config.computers.map(async (computer) => ({ computer, runtime: await containerStatus(state, computer.id), imageDrift: await imageDrift(computer.image, true) })));
   if (flag(args, 'json')) {
-    console.log(JSON.stringify(rows.map(({ computer, runtime, imageDrift: drift }) => ({ ...computer, runtime, imageDrift: drift })), null, 2));
+    operationOutput('log', JSON.stringify(rows.map(({ computer, runtime, imageDrift: drift }) => ({ ...computer, runtime, imageDrift: drift })), null, 2));
     return;
   }
-  if (!rows.length) { console.log('No Qubicl computers.'); return; }
-  console.log('NAME\tSTATUS\tHEALTH\tPRESET\tCOMPATIBILITY\tDRIFT\tID\tIMAGE');
-  for (const { computer, runtime, imageDrift: drift } of rows) console.log(`${computer.name}\t${runtime.status}\t${runtime.health ?? '-'}\t${computer.preset}\t${computer.compatibility}\t${drift.drifted ? 'yes' : 'no'}\t${computer.id}\t${computer.image.resolved}`);
+  if (!rows.length) { operationOutput('log', 'No Qubicl computers.'); return; }
+  operationOutput('log', 'NAME\tSTATUS\tHEALTH\tPRESET\tCOMPATIBILITY\tDRIFT\tID\tIMAGE');
+  for (const { computer, runtime, imageDrift: drift } of rows) operationOutput('log', `${computer.name}\t${runtime.status}\t${runtime.health ?? '-'}\t${computer.preset}\t${computer.compatibility}\t${drift.drifted ? 'yes' : 'no'}\t${computer.id}\t${computer.image.resolved}`);
 }
 
 async function status(name?: string): Promise<void> {
@@ -525,7 +561,7 @@ async function status(name?: string): Promise<void> {
   if (name) {
     const computer = findComputer(state, name);
     const update = updates.rows.find(({ key }) => key === `computer:${computer.id}`);
-    console.log(JSON.stringify({
+    operationOutput('log', JSON.stringify({
       qubicl: QUBICL_BUILD,
       ...computer,
       resourceEnvelope: computerResourceEnvelope(computer),
@@ -550,7 +586,7 @@ async function status(name?: string): Promise<void> {
     imageDrift: await imageDrift(computer.image, true),
     ...(await containerStatus(state, computer.id)),
   })));
-  console.log(JSON.stringify({
+  operationOutput('log', JSON.stringify({
     qubicl: QUBICL_BUILD,
     updates,
     gateway: {
@@ -567,7 +603,7 @@ async function inspect(name: string): Promise<void> {
   const state = await loadState();
   const computer = findComputer(state, name);
   const runtime = await docker(['inspect', computerContainerName(state, computer)], { allowFailure: true });
-  console.log(JSON.stringify(redactSecrets({ config: computer, imageDrift: await imageDrift(computer.image, true), endpoints: applicableEndpoints(state, computer), runtime: runtime ? JSON.parse(runtime) : null }), null, 2));
+  operationOutput('log', JSON.stringify(redactSecrets({ config: computer, imageDrift: await imageDrift(computer.image, true), endpoints: applicableEndpoints(state, computer), runtime: runtime ? JSON.parse(runtime) : null }), null, 2));
 }
 
 async function logs(name?: string): Promise<void> {
@@ -795,10 +831,10 @@ async function doctor(args: ParsedArgs): Promise<void> {
     if (!check.repair && repair) check.repair = repair;
   }
   if (flag(args, 'json')) {
-    console.log(JSON.stringify({ ok: !checks.some(({ status }) => status === 'fail'), warnings: checks.filter(({ status }) => status === 'warning').length, checks }, null, 2));
+    operationOutput('log', JSON.stringify({ ok: !checks.some(({ status }) => status === 'fail'), warnings: checks.filter(({ status }) => status === 'warning').length, checks }, null, 2));
   } else {
     for (const check of checks) {
-      console.log(`${check.status === 'warning' ? 'WARN' : check.status === 'fail' ? 'FAIL' : 'ok'}\t${check.check}\t${check.detail}${check.repair ? `\trepair: ${check.repair}` : ''}`);
+      operationOutput('log', `${check.status === 'warning' ? 'WARN' : check.status === 'fail' ? 'FAIL' : 'ok'}\t${check.check}\t${check.detail}${check.repair ? `\trepair: ${check.repair}` : ''}`);
     }
   }
   if (checks.some(({ status }) => status === 'fail')) throw new Error('One or more doctor checks failed.');
@@ -872,7 +908,7 @@ async function repair(args: ParsedArgs): Promise<void> {
         },
       },
     }), 0o600);
-    console.log(`Repairing ${computer.name}. This scans its durable home once and can be safely re-run if interrupted.`);
+    operationOutput('log', `Repairing ${computer.name}. This scans its durable home once and can be safely re-run if interrupted.`);
     try {
       await docker([
         'compose',
@@ -884,7 +920,7 @@ async function repair(args: ParsedArgs): Promise<void> {
       ], { inherit: true });
       await durableRemove(repairCompose);
       await durableRemove(journal);
-      console.log(`Repaired ${computer.name}. Start it with qubicl start ${computer.name}.`);
+      operationOutput('log', `Repaired ${computer.name}. Start it with qubicl start ${computer.name}.`);
     } catch (error) {
       await durableRemove(repairCompose).catch(() => undefined);
       throw new Error(`Ownership repair did not finish. Its journal remains at ${journal}; re-run the same command to resume safely. ${message(error)}`);
@@ -896,14 +932,10 @@ async function start(name: string): Promise<void> {
   const paths = statePaths();
   await withStateLock(paths, async () => {
     const state = await loadState(paths);
-    await validateDocker();
     const computer = findComputer(state, name);
-    const runtime = await containerStatus(state, computer.id);
-    await ensureRuntimeImages(state, runtime.status === 'absent' ? [computer] : []);
-    await renderRuntime(state);
-    await startComputer(state, computer);
-    await synchronizeStartedSkillPolicies(state, [computer]);
-    console.log(`Started ${computer.name}.`);
+    const { startManagedComputer } = await import('./lifecycle-operations.js');
+    await startManagedComputer(state, computer);
+    operationOutput('log', `Started ${computer.name}.`);
   });
 }
 
@@ -912,11 +944,9 @@ async function stop(name: string): Promise<void> {
   await withStateLock(paths, async () => {
     const state = await loadState(paths);
     const computer = findComputer(state, name);
-    const runtime = await containerStatus(state, computer.id);
-    if (runtime.status === 'absent') throw new Error(`Computer ${computer.name} has no retained runtime to stop.`);
-    const containers = await existingComputerRuntimeContainers(state, computer);
-    await docker(['stop', ...containers]);
-    console.log(`Stopped ${computer.name}. Its home remains durable; root changes are not guaranteed.`);
+    const { stopManagedComputer } = await import('./lifecycle-operations.js');
+    await stopManagedComputer(state, computer);
+    operationOutput('log', `Stopped ${computer.name}. Its home remains durable.`);
   });
 }
 
@@ -925,36 +955,10 @@ async function restart(name: string): Promise<void> {
   await withStateLock(paths, async () => {
     const state = await loadState(paths);
     const computer = findComputer(state, name);
-    const runtime = await containerStatus(state, computer.id);
-    if (runtime.status === 'absent') {
-      throw new Error(`Computer ${computer.name} has no retained runtime to restart. Use qubicl start ${computer.name}; recreating it requires its exact pinned image ${computer.image.resolved}.`);
-    }
-    // Docker can restart an existing container from its retained snapshot even
-    // when its original image object can no longer be used to recreate it.
-    await ensureRuntimeImages(state, []);
-    await renderRuntime(state);
-    await startGateway(state);
-    await verifyGatewayCompatibility(state);
-    const expected = computerRuntimeContainerNames(state, computer);
-    const existing = await existingComputerRuntimeContainers(state, computer);
-    if (existing.length === expected.length) await docker(['restart', ...existing]);
-    else await compose(state, ['up', '--detach', computerServiceName(state, computer)]);
-    try { await docker(['network', 'connect', controlNetwork(state.config.installationId, computer.id, state.paths.root), gatewayContainerName(state.config.installationId, state.paths.root)]); } catch (error) {
-      if (!message(error).includes('already exists in network')) throw error;
-    }
-    await waitForHealthy(state, computer.id);
-    await waitForGatewayComputer(state, computer.id);
-    await releaseHumanControlThroughGateway(state, computer);
-    console.log(`Restarted ${computer.name}.`);
+    const { restartManagedComputer } = await import('./lifecycle-operations.js');
+    await restartManagedComputer(state, computer);
+    operationOutput('log', `Restarted ${computer.name}.`);
   });
-}
-
-async function existingComputerRuntimeContainers(state: LoadedState, computer: ComputerConfig): Promise<string[]> {
-  const results: string[] = [];
-  for (const name of computerRuntimeContainerNames(state, computer)) {
-    if (await docker(['inspect', '--format', '{{.Id}}', name], { allowFailure: true })) results.push(name);
-  }
-  return results;
 }
 
 async function control(args: ParsedArgs): Promise<void> {
@@ -966,22 +970,13 @@ async function control(args: ParsedArgs): Promise<void> {
     const state = await loadState(paths);
     const computer = findComputer(state, name);
     await releaseHumanControlThroughGateway(state, computer);
-    console.log(`Released human control of ${computer.name}. Agents may acquire a fresh lease.`);
+    operationOutput('log', `Released human control of ${computer.name}. Agents may acquire a fresh lease.`);
   });
 }
 
 async function releaseHumanControlThroughGateway(state: LoadedState, computer: ComputerConfig): Promise<void> {
-  const secret = state.secrets.computers[computer.id];
-  if (!secret) throw new Error(`Missing secret material for ${computer.name}.`);
-  const response = await fetch(
-    `http://127.0.0.1:${state.config.gateway.port}/computers/${computer.id}/operator/human-control/release`,
-    { method: 'POST', headers: { authorization: `Bearer ${secret.token}` } },
-  ).catch((error: unknown) => {
-    throw new Error(`Could not reach the Qubicl gateway to release human control: ${message(error)}`);
-  });
-  if (response.ok) return;
-  const detail = await response.json().catch(() => undefined) as { error?: { message?: string } } | undefined;
-  throw new Error(detail?.error?.message ?? `Gateway returned HTTP ${response.status} while releasing human control.`);
+  const { releaseComputerHumanControl } = await import('./lifecycle-operations.js');
+  return releaseComputerHumanControl(state, computer);
 }
 
 async function renameComputer(oldName: string, newName: string): Promise<void> {
@@ -1022,7 +1017,7 @@ async function renameComputer(oldName: string, newName: string): Promise<void> {
       },
     }));
     if (friendlyRuntime) await migrateLegacyRuntime(state);
-    console.log(`Renamed ${oldName} to ${newName}. ID, routes, token, and home are unchanged.`);
+    operationOutput('log', `Renamed ${oldName} to ${newName}. ID, routes, token, and home are unchanged.`);
   });
 }
 
@@ -1040,7 +1035,7 @@ async function deleteComputer(name: string): Promise<void> {
       trash: [metadata],
       runtime: { removeIds: [computer.id] },
     }));
-    console.log(`Moved ${computer.name} to recoverable trash and invalidated its token.`);
+    operationOutput('log', `Moved ${computer.name} to recoverable trash and invalidated its token.`);
   });
 }
 
@@ -1061,7 +1056,7 @@ async function restoreComputer(name: string): Promise<void> {
       runtime: { ensureImages: false, startIds: [computer.id] },
     }));
     await synchronizeStartedSkillPolicies(state, [computer]);
-    console.log(`Restored ${computer.name} with the same ID, route, and home and a new token.`);
+    operationOutput('log', `Restored ${computer.name} with the same ID, route, and home and a new token.`);
     printConnection(state, computer);
   });
 }
@@ -1081,7 +1076,7 @@ async function purge(name: string, yes: boolean): Promise<void> {
     }
     await rm(found.directory, { recursive: true, force: false });
     await rm(join(state.paths.audits, `${found.metadata.id}.jsonl`), { force: true });
-    console.log(`Permanently purged ${found.metadata.name}. This cannot be recovered by Qubicl.`);
+    operationOutput('log', `Permanently purged ${found.metadata.name}. This cannot be recovered by Qubicl.`);
   });
 }
 
@@ -1098,7 +1093,7 @@ async function view(name: string, noOpen: boolean, accessValue?: string): Promis
   const value = await response.json() as { url?: string; error?: { message?: string } };
   if (!response.ok || !value.url) throw new Error(value.error?.message ?? `Gateway returned ${response.status}.`);
   const url = `${selected.origin}${value.url}`;
-  console.log(url);
+  operationOutput('log', url);
   if (!noOpen) await openBrowser(url);
 }
 
@@ -1133,9 +1128,9 @@ async function connectClient(
     throw new Error('--access remote requires an HTTP or OpenAPI connection; token-free stdio remains local.');
   }
   const instructions = connectionInstructions(snippet);
-  for (const line of instructions.before) console.error(line);
-  console.log(snippet.content);
-  for (const line of instructions.after) console.error(line);
+  for (const line of instructions.before) operationOutput('error', line);
+  operationOutput('log', snippet.content);
+  for (const line of instructions.after) operationOutput('error', line);
 }
 
 async function mcp(name: string, profile: import('@qubicl/core').ToolProfile, resultMode: import('@qubicl/core').McpResultMode): Promise<void> {
@@ -1149,13 +1144,13 @@ async function token(args: ParsedArgs): Promise<void> {
   await withStateLock(paths, async () => {
     const state = await loadState(paths);
     const computer = findComputer(state, name);
-    if (action === 'show') { console.log(state.secrets.computers[computer.id]!.token); return; }
+    if (action === 'show') { operationOutput('log', state.secrets.computers[computer.id]!.token); return; }
     if (action !== 'rotate') throw new Error('Token action must be show or rotate.');
     state.secrets.computers[computer.id]!.token = newSecret().token;
     await executeStateTransaction(paths, createStateTransaction('token-rotate', state, {
       runtime: { verifyTokenIds: [computer.id] },
     }));
-    console.log(state.secrets.computers[computer.id]!.token);
+    operationOutput('log', state.secrets.computers[computer.id]!.token);
   });
 }
 
@@ -1184,7 +1179,7 @@ async function exportManifest(output: string): Promise<void> {
     })),
   };
   await writeFile(resolve(output), YAML.stringify(manifest));
-  console.log(`Exported secret-free manifest to ${resolve(output)}.`);
+  operationOutput('log', `Exported secret-free manifest to ${resolve(output)}.`);
 }
 
 async function applyManifest(path: string, dryRun: boolean, prune: boolean): Promise<void> {
@@ -1195,7 +1190,7 @@ async function applyManifest(path: string, dryRun: boolean, prune: boolean): Pro
     const { manifest, migrated } = parseManifestDocument(document, state.config);
     const reconciliation = reconcileManifest(state.config, manifest, prune);
     const deletes = reconciliation.trashes;
-    console.log(JSON.stringify({ manifestMigratedFromV1: migrated, create: reconciliation.creates.map(({ name }) => name), update: reconciliation.updates.map(({ name }) => name), trash: deletes.map(({ name }) => name), gateway: reconciliation.gatewayChanged ? manifest.gateway : 'unchanged', defaults: reconciliation.defaultsChanged ? manifest.defaults : 'unchanged' }, null, 2));
+    operationOutput('log', JSON.stringify({ manifestMigratedFromV1: migrated, create: reconciliation.creates.map(({ name }) => name), update: reconciliation.updates.map(({ name }) => name), trash: deletes.map(({ name }) => name), gateway: reconciliation.gatewayChanged ? manifest.gateway : 'unchanged', defaults: reconciliation.defaultsChanged ? manifest.defaults : 'unchanged' }, null, 2));
     if (dryRun) return;
     await validateDocker();
 
@@ -1244,17 +1239,38 @@ async function applyManifest(path: string, dryRun: boolean, prune: boolean): Pro
 }
 
 async function prepareStateBeforeCommand(command: string | undefined, args: ParsedArgs): Promise<void> {
-  if (!command || ['help', 'version', 'image', 'doctor'].includes(command)) return;
+  if (!command || ['help', 'version', 'image', 'doctor', 'dashboard', 'recover'].includes(command)) return;
   const paths = statePaths();
+  const initialFormat = await inspectStateFormat(paths);
+  if (command !== 'setup' && ['legacy', 'migration-pending'].includes(initialFormat.status)) throw new Error('State migration requires explicit qubicl setup or qubicl dashboard enable; this command did not change state.');
   const notificationPreferenceOnly = command === 'config'
     && args.positionals[0] === 'set'
     && args.options.has('update-notifications')
     && [...args.options.keys()].every((name) => name === 'update-notifications');
-  const readOnlyLifecycle = command === 'status'
+  const readOnlyLifecycle = ['list', 'inspect', 'logs', 'connect', 'export', 'view', 'mcp'].includes(command)
+    || (command === 'config' && args.positionals[0] !== 'set')
+    || (command === 'backup' && ['list', 'verify'].includes(args.positionals[0] ?? ''))
+    || (command === 'network' && args.positionals[0] === 'show')
+    || (command === 'token' && args.positionals[0] === 'show')
+    || (command === 'secret' && args.positionals[0] === 'list')
+    || command === 'status'
     || command === 'cleanup'
     || (command === 'upgrade' && flag(args, 'all'))
     || (command === 'gateway' && args.positionals[0] === 'status')
     || notificationPreferenceOnly;
+  if (initialFormat.status === 'current') {
+    const readOnly = readOnlyLifecycle && !(command === 'cleanup' && flag(args, 'yes')) && !(command === 'upgrade' && flag(args, 'yes'));
+    if (!readOnly) {
+      const state = await loadState(paths);
+      const { inspectPendingBackupCreation } = await import('./backups.js');
+      const { inspectPendingUpgradeAll } = await import('./lifecycle-command.js');
+      const { inspectPendingComputerLifecycle } = await import('./lifecycle-operations.js');
+      const pendingBackup = await inspectPendingBackupCreation(state);
+      const pendingUpgrade = await inspectPendingUpgradeAll(state);
+      if (await inspectPendingComputerLifecycle(state)) throw new Error('A computer lifecycle journal requires explicit qubicl recover before new mutations.');
+      if ((pendingBackup && command !== 'backup') || (pendingUpgrade && !(command === 'upgrade' && flag(args, 'all') && flag(args, 'yes')))) throw new Error('A backup or upgrade journal requires explicit qubicl recover before unrelated mutations.');
+    }
+  }
   if (readOnlyLifecycle) {
     const format = await inspectStateFormat(paths);
     if (format.status !== 'current') {
@@ -1262,7 +1278,12 @@ async function prepareStateBeforeCommand(command: string | undefined, args: Pars
     }
     return;
   }
-  if (command === 'setup' && (await inspectStateFormat(paths)).status === 'uninitialized') return;
+  if (command === 'setup' && initialFormat.status === 'uninitialized') return;
+  if (command === 'setup' && ['legacy', 'migration-pending'].includes(initialFormat.status) && !flag(args, 'yes')) {
+    if (!stdin.isTTY) throw new Error('State format migration requires reviewed setup --yes.');
+    const prompt = createInterface({ input: stdin, output: stdout });
+    try { if ((await prompt.question('Back up and migrate state to format 4? Older CLIs will refuse the new state. Type yes: ')).trim() !== 'yes') throw new Error('Migration cancelled.'); } finally { prompt.close(); }
+  }
   const requiresRuntime = new Set([
     'setup', 'up', 'down', 'create', 'upgrade', 'start', 'stop', 'restart', 'control', 'rename', 'delete', 'restore', 'purge', 'repair', 'apply',
     'browser', 'network', 'secret', 'ssh', 'backup', 'checkpoint', 'clone', 'devcontainer', 'cleanup', 'skills', 'tools', 'gateway',
@@ -1352,7 +1373,7 @@ function parseGatewayAccess(value: string | undefined): 'local' | 'remote' {
 }
 
 function printConnection(state: LoadedState, computer: ComputerConfig, running = true): void {
-  console.log(JSON.stringify(buildComputerConnectionResult(state.config.gateway.port, computer, running, state.config.gateway.exposure), null, 2));
+  operationOutput('log', JSON.stringify(buildComputerConnectionResult(state.config.gateway.port, computer, running, state.config.gateway.exposure), null, 2));
 }
 
 async function openBrowser(url: string): Promise<void> {
@@ -1837,6 +1858,7 @@ interface InvocationRule {
 const invocationRules: Record<string, InvocationRule> = {
   help: { minPositionals: 0, maxPositionals: 0 },
   version: { minPositionals: 0, maxPositionals: 0 },
+  dashboard: { minPositionals: 0, maxPositionals: 3, options: ['yes', 'offline', 'foreground', 'port', 'asset-port', 'bind', 'hostname', 'cert', 'key', 'allow-networks', 'json'] },
   setup: { minPositionals: 0, maxPositionals: 0, options: ['preset', 'image', 'cpus', 'memory', 'gateway-port', 'create', 'no-create', 'no-start', 'offline', 'allow-unsupported-resources', 'verbose', 'no-clear', 'yes', 'json'] },
   config: { minPositionals: 1, maxPositionals: 1, options: ['gateway-port', 'default-preset', 'default-image', 'default-cpus', 'default-memory', 'update-notifications'] },
   gateway: { minPositionals: 1, maxPositionals: 1, options: ['bind', 'port', 'hostname', 'cert', 'key', 'allow-networks', 'trusted-origins', 'preview-domain', 'client-ca', 'all-interfaces', 'allow-all-clients', 'yes', 'json'] },
@@ -1848,6 +1870,7 @@ const invocationRules: Record<string, InvocationRule> = {
   status: { minPositionals: 0, maxPositionals: 1 },
   inspect: { minPositionals: 1, maxPositionals: 1 },
   logs: { minPositionals: 0, maxPositionals: 1 },
+  recover: { minPositionals: 0, maxPositionals: 0, options: ['yes'] },
   doctor: { minPositionals: 0, maxPositionals: 0, options: ['json'] },
   repair: { minPositionals: 2, maxPositionals: 2, options: ['yes'] },
   start: { minPositionals: 1, maxPositionals: 1 },
@@ -1913,6 +1936,9 @@ Usage: qubicl <command> [arguments]
                  [--client-ca FILE] [--all-interfaces] [--allow-all-clients] [--yes]
   gateway status [--json] | gateway revoke [--yes]
                                          Manage the optional TLS-only remote listener
+  dashboard enable [--foreground] | disable|start|stop|restart|status|open|serve
+  dashboard expose --bind ADDRESS --hostname NAME --cert FILE --key FILE --allow-networks CIDR
+  dashboard revoke | dashboard password reset | dashboard sessions revoke-all [--yes]
   up | down                              Start or stop all resources
   create [name] [--preset id | --image ref] [--cpus n] [--memory 4g]
                 [--skills core|none|ids] [--tools full|names]
@@ -1923,6 +1949,7 @@ Usage: qubicl <command> [arguments]
   upgrade --all [--offline] [--yes]      Preview exact gateway/default/curated targets, then confirm a deterministic roll-forward upgrade
   list [--json] | status [name] | inspect <name>
                                          Inspect runtime state
+  recover [--yes]                       Resume only validated recorded recovery
   logs [name] | doctor [--json]          Diagnose Qubicl with repair guidance
   repair ownership <name> [--yes]        Explicitly repair an imported or moved durable home
   start|stop|restart <name>              Manage one computer
@@ -1989,3 +2016,101 @@ Usage: qubicl <command> [arguments]
   image build <tag> <directory>          Build a custom computer image
   export [--output qubicl.yaml]          Export a secret-free manifest
   apply <file> [--dry-run] [--prune]     Reconcile a manifest`;
+
+/** Shared command application entry: strict web requests select only enumerated host operations. */
+export async function executeHostManagementRequest(root: string, request: ManagementRequest): Promise<void> {
+  return inHostOperation(root, async () => {
+    const input = request.input ?? {};
+    const text = (key: string): string => {
+      if (typeof input[key] !== 'string' || !input[key]) throw new Error(`${key} is required.`);
+      return input[key];
+    };
+    const target = request.target ?? '';
+    const state = ['setup', 'dashboard.restart', 'dashboard.revoke', 'recovery.resume'].includes(request.operation) ? undefined : await loadState();
+    const computer = state?.config.computers.find(({ id, name }) => id === target || name === target);
+    const name = computer?.name ?? target;
+    const args = (positionals: string[], options: Record<string, string | boolean | number | undefined> = {}): ParsedArgs => ({
+      positionals, options: new Map(Object.entries(options).filter((entry): entry is [string, string | boolean | number] => entry[1] !== undefined).map(([key, value]) => [key, typeof value === 'number' ? String(value) : value])),
+    });
+    switch (request.operation) {
+      case 'setup': return setupCommand(args([], { preset: text('preset'), cpus: input.cpus as number | undefined, memory: input.memory as string | undefined, 'gateway-port': input.gatewayPort as number | undefined, ...(input.createName ? { create: String(input.createName) } : { 'no-create': true }), yes: true }));
+      case 'computer.create': return create(args([text('name')], { preset: text('preset'), cpus: input.cpus as number | undefined, memory: input.memory as string | undefined, yes: true }));
+      case 'computer.start': return start(name);
+      case 'computer.stop': return stop(name);
+      case 'computer.restart': return restart(name);
+      case 'computer.rename': return renameComputer(name, text('name'));
+      case 'computer.delete': return deleteComputer(name);
+      case 'computer.restore': return restoreComputer(target);
+      case 'computer.upgrade': return upgradeComputer(args([name], { preset: input.preset as string | undefined }));
+      case 'upgrade.all': return upgradeAllCommand(args([], { all: true, yes: true }));
+      case 'computers.stop': for (const item of state!.config.computers) { const { managedComputerRuntimeObservation } = await import('./docker.js'); if ((await managedComputerRuntimeObservation(state!, item)).group !== 'absent') await stop(item.name); } return;
+      case 'gateway.start': await validateDocker(); await ensureRuntimeImages(state!, []); await renderRuntime(state!); await startGateway(state!); await verifyGatewayCompatibility(state!); return;
+      case 'gateway.restart': {
+        const { managedGatewayRuntimeObservation } = await import('./docker.js');
+        const observed = await managedGatewayRuntimeObservation(state!);
+        if (observed.group !== 'complete') throw new Error('Gateway runtime must be complete and owned before restarting.');
+        await docker(['restart', ...observed.containers.map(({ id }) => id)]);
+        await verifyGatewayCompatibility(state!); return;
+      }
+      case 'gateway.revoke': return gatewayCommand(args(['revoke'], { yes: true }));
+      case 'control.release': return releaseHumanControlThroughGateway(state!, requireManagementComputer(computer));
+      case 'tools.set': {
+        if (!Array.isArray(input.ids) || !input.ids.every((id) => typeof id === 'string')) throw new Error('Select enabled IDs.');
+        const maximum = toolsForCapabilities(requireManagementComputer(computer).capabilities);
+        const selected = new Set(input.ids);
+        if (input.ids.some((id) => !maximum.includes(id as never))) throw new Error('Tool selection exceeds computer capabilities.');
+        return toolsCommand(args([name], { profile: 'full', disable: maximum.filter((id) => !selected.has(id)).join(','), yes: true }));
+      }
+      case 'skills.set': {
+        if (!Array.isArray(input.ids) || !input.ids.every((id) => typeof id === 'string')) throw new Error('Select enabled IDs.');
+        return skillsCommand(args([name], { profile: 'none', enable: input.ids.join(','), yes: true }));
+      }
+      case 'skill.import': return skillsCommand(args([name, 'import', text('url')], { ref: text('commit'), yes: true }));
+      case 'skill.update': return skillsCommand(args([name, 'update', text('id'), text('url')], { ref: text('commit'), yes: true }));
+      case 'skill.reset': case 'skill.remove': case 'skill.restore': return skillsCommand(args([name, request.operation.slice(6), text('id')], { yes: true }));
+      case 'network.set': return networkCommand(args(['set', name, text('profile')], { 'allow-domains': Array.isArray(input.allowDomains) ? input.allowDomains.join(',') : '', 'deny-domains': Array.isArray(input.denyDomains) ? input.denyDomains.join(',') : '' }));
+      case 'network.approve': return networkCommand(args(['approve', name, text('domain')], { duration: input.duration as number | undefined }));
+      case 'network.revoke': return networkCommand(args(['revoke', name, text('domain')]));
+      case 'credential.add': case 'credential.replace': case 'credential.remove': return manageBrokerCredential(state!, requireManagementComputer(computer), request.operation.slice(11) as 'add' | 'replace' | 'remove', input);
+      case 'token.rotate': return token(args(['rotate', name]));
+      case 'checkpoint.create': return checkpointCommand(args([name], input.consistency === 'stopped' ? { stopped: true } : { quiesce: true }));
+      case 'backup.create': return backupCommand(args(['create', name], { ...(input.consistency === 'stopped' ? { stopped: true } : { quiesce: true }) }));
+      case 'backup.verify': return backupCommand(args(['verify', target]));
+      case 'backup.restore': return backupCommand(args(['restore', target, text('name')]));
+      case 'backup.prune': return backupCommand(args(['prune', computer!.id], { keep: input.keep as number, yes: true }));
+      case 'computer.clone': return cloneCommand(args([name, text('name')], { 'no-start': true }));
+      case 'computer.resources': {
+        const current = requireManagementComputer(computer);
+        const host = await validateDocker();
+        if (input.cpus !== undefined) { validateCpu(Number(input.cpus), host.cpus); current.cpus = Number(input.cpus); }
+        if (input.memory !== undefined) current.memory = validateMemory(String(input.memory), host.memoryBytes);
+        const { commitPolicyChange } = await import('./network-policy.js');
+        return commitPolicyChange(state!, current);
+      }
+      case 'process.stop': case 'preview.revoke': {
+        const { HostManagementBackend } = await import('./dashboard/application.js');
+        const suffix = request.operation === 'process.stop' ? '/processes/stop' : '/previews/revoke';
+        await new HostManagementBackend(root).operator(state!, requireManagementComputer(computer).id, suffix, 'POST', input); return;
+      }
+      case 'recovery.resume': {
+        await recoverStateMigration(statePaths()); await recoverPendingTransaction(statePaths());
+        if ((await inspectStateFormat(statePaths())).status === 'current') {
+          const { recoverPendingBackupCreation } = await import('./backups.js');
+          const { recoverPendingUpgradeAll } = await import('./lifecycle-command.js');
+          const { recoverPendingComputerLifecycle } = await import('./lifecycle-operations.js');
+          await recoverPendingBackupCreation(await loadState()); await recoverPendingComputerLifecycle(await loadState()); await recoverPendingUpgradeAll(await loadState());
+        }
+        return;
+      }
+      case 'dashboard.restart': case 'dashboard.revoke': {
+        const dashboard = await import('./dashboard/runtime.js');
+        if (request.operation === 'dashboard.restart') { const config = await dashboard.readDashboardConfiguration(root); if (!config) throw new Error('Dashboard is not enabled.'); await dashboard.startDashboardAtCurrentCatalog(root, config, false, true); return; }
+        const config = await dashboard.readDashboardConfiguration(root);
+        if (config) { delete config.remote; await dashboard.saveDashboardConfiguration(root, config); }
+        return;
+      }
+    }
+  });
+}
+
+function requireManagementComputer(value: ComputerConfig | undefined): ComputerConfig { if (!value) throw new Error('Computer was not found.'); return value; }

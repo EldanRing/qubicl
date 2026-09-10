@@ -142,7 +142,7 @@ export async function materializeSkills(computer: ComputerConfig, homeRoot: stri
     }
     if (existing.kind !== 'core' || existing.name !== skill.name) throw new Error(`Skill registry entry ${skill.id} conflicts with the packaged core skill.`);
     try {
-      const inspected = await inspectEditableSkill(target);
+      const inspected = await inspectCoreWorkingCopy(target);
       if (existing.baselineSha256 === inspected.sha256 && existing.baselineSha256 !== skill.sha256) {
         await atomicReplace(source, target);
         registry.packages[skill.id] = { ...existing, description: skill.description, baselineSha256: skill.sha256, updatedAt: new Date().toISOString(), source: { type: 'core', catalogSha256: skill.sha256 }, security: { scannerVersion: CONTENT_SECURITY_SCANNER_VERSION, findings: skill.security.findings } };
@@ -394,6 +394,12 @@ export async function inspectEditableSkill(root: string): Promise<{ sha256: stri
   return digestEntries(entries);
 }
 
+async function inspectCoreWorkingCopy(root: string): Promise<{ sha256: string; findings: SkillSecurityFinding[] }> {
+  const entries = await enumeratePackage(root);
+  entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  return digestEntries(entries);
+}
+
 async function inspectImport(root: string, expectedName: string): Promise<{ name: string; description: string; sha256: string; findings: SkillSecurityFinding[]; detectedRequirements: { tools: string[]; commands: string[]; environment: string[]; urls: string[] }; snapshot: PackageEntry[] }> {
   const entries = await enumeratePackage(root);
   const skillFile = entries.find(({ path }) => path === 'SKILL.md');
@@ -505,7 +511,9 @@ async function skillStatuses(paths: ReturnType<typeof skillStorePaths>, registry
   for (const skill of Object.values(registry.packages)) {
     const resourceRoot = join(paths.installed, skill.name);
     try {
-      const inspected = await inspectEditableSkill(resourceRoot);
+      const inspected = skill.kind === 'core'
+        ? await inspectCoreWorkingCopy(resourceRoot)
+        : await inspectEditableSkill(resourceRoot);
       result.push({ ...skill, enabled: enabled.has(skill.id), resourceRoot, currentSha256: inspected.sha256, drift: inspected.sha256 === skill.baselineSha256 ? 'unchanged' : 'modified', resetAvailable: skill.kind === 'core' || await pathExists(join(paths.importedBaselines, skill.name)) });
     } catch (error) {
       result.push({ ...skill, enabled: enabled.has(skill.id), resourceRoot, currentSha256: null, drift: isNotFound(error) ? 'missing' : 'corrupt', resetAvailable: skill.kind === 'core' || await pathExists(join(paths.importedBaselines, skill.name)) });

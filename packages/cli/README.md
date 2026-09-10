@@ -31,6 +31,10 @@ Qubicl turns local Docker into observable computers for external AI agents.
 The agent stays in Codex, Claude, Open WebUI, Cursor, VS Code, or another MCP or
 OpenAPI client. Qubicl supplies the machine it works on.
 
+Qubicl 0.5 adds a [local management dashboard](https://github.com/EldanRing/qubicl/blob/main/docs/dashboard.md)
+with a native host helper, private administration, operation previews and
+recovery.
+
 ```text
 your model or agent
         │
@@ -48,7 +52,7 @@ your model or agent
 
 ## Why Qubicl
 
-| | |
+| Capability | What it gives you |
 | --- | --- |
 | **Bring your own model** | One computer works with any compatible client. Switch models without rebuilding the workspace. |
 | **See the work** | Watch the live desktop, take control, finish a task yourself, and hand the same session back. |
@@ -60,11 +64,12 @@ your model or agent
 ## Quick start
 
 Requirements: Node.js 22 or 24, Docker Engine 24.0 or Docker Desktop 4.29+, and
-Docker Compose 2.24+. Directly tested hosts are Linux x64, Apple Silicon
+Docker Compose 2.24+. The supported-host policy covers Linux x64, Apple Silicon
 macOS with Docker Desktop, and Windows 11 x64 through Ubuntu 24.04 on WSL 2
-with Docker Desktop. Linux ARM64, Intel macOS, Windows on ARM, and other WSL 2
-distributions are best-effort. Native Windows and WSL 1 are unsupported;
-Qubicl computers remain Linux containers on every host. See the versioned
+with Docker Desktop. Their directly tested classifications record historical
+v0.1.0 evidence baselines. Linux ARM64, Intel macOS, Windows on ARM, and other
+WSL 2 distributions are best-effort. Native Windows and WSL 1 are unsupported; Qubicl
+computers remain Linux containers on every host. See the versioned
 [Platform support](https://github.com/EldanRing/qubicl/blob/main/docs/platforms.md)
 matrix before installing on a best-effort host.
 
@@ -182,12 +187,15 @@ operator-supervised workloads, not a VM boundary against hostile code.
 Read the complete [security model](https://github.com/EldanRing/qubicl/blob/main/docs/security-model.md)
 before relying on the boundary.
 
-Qubicl `0.1.x` is the initial public series. Interfaces and state formats may
-evolve before 1.0. Linux x64, Apple Silicon macOS with Docker Desktop, and
-Windows 11 x64 through Ubuntu 24.04 on WSL 2 with Docker Desktop are directly
-tested. Linux ARM64, Intel macOS, Windows on ARM, and other WSL 2 distributions
-remain best-effort. Native Windows and WSL 1 are unsupported; Qubicl computers
-remain Linux containers on every host. Read the
+Qubicl `0.5.x` is a public pre-1.0 series. Interfaces and state formats may
+still evolve before 1.0. The matrix's directly tested Linux x64, Apple Silicon
+macOS, and Windows/WSL rows describe historical v0.1.0 baselines, not general
+testing of every current candidate. The v0.5 initial release uses Linux x64 for general
+platform acceptance and separately requires dashboard-specific native Linux
+x64, Apple Silicon macOS, and physical iPhone Safari evidence. Linux ARM64,
+Intel macOS, Windows on ARM, and other WSL 2 distributions remain best-effort.
+Native Windows and WSL 1 are unsupported; Qubicl computers remain Linux
+containers on every host. Read the
 [platform matrix](https://github.com/EldanRing/qubicl/blob/main/docs/platforms.md)
 and [WSL guide](https://github.com/EldanRing/qubicl/blob/main/docs/wsl.md) for
 the exact boundaries. Back up important computer homes before upgrades.

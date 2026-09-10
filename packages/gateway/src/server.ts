@@ -418,6 +418,24 @@ export class Gateway {
       this.proxy(request, response, route, '/_qubicl/operator/policy/reload', false, undefined, surface);
       return;
     }
+    if (suffix.startsWith('/operator/management/')) {
+      if (!this.requireOperator(request, response, route)) return;
+      const routes: Record<string, string> = {
+        'GET /operator/management/status': '/_qubicl/operator/management/status',
+        'GET /operator/management/processes': '/_qubicl/operator/management/processes',
+        'GET /operator/management/previews': '/_qubicl/operator/management/previews',
+        'POST /operator/management/processes/stop': '/_qubicl/operator/management/processes/stop',
+        'POST /operator/management/previews/revoke': '/_qubicl/operator/management/previews/revoke',
+        'POST /operator/management/previews/open': '/_qubicl/operator/management/previews/open',
+      };
+      const target = routes[`${request.method} ${suffix}`];
+      if (!target) {
+        sendJson(response, 404, { error: { code: 'not_found', message: 'Operator management route not found.' } });
+        return;
+      }
+      this.proxy(request, response, route, target, false, undefined, surface);
+      return;
+    }
     if (!this.requireBearer(request, response, route, surface)) return;
     if (request.method === 'POST' && suffix === '/operator/human-control/release') {
       this.proxy(request, response, route, '/_qubicl/human/release', false, () => this.setControllingSession(id, undefined), surface);
@@ -586,9 +604,11 @@ export class Gateway {
           : previewCookies;
         if (cookies.length) responseHeaders['set-cookie'] = cookies;
       }
-      if (previewProxy && surface.kind === 'external' && previewCookies && hasQueryParameter(incoming.url, 'token')) {
+      const shouldScrubPreviewCredential = hasQueryParameter(incoming.url, 'ticket')
+        || (surface.kind === 'external' && hasQueryParameter(incoming.url, 'token'));
+      if (previewProxy && previewCookies && shouldScrubPreviewCredential) {
         backend.resume();
-        responseHeaders.location = withoutQueryParameter(incoming.url ?? '/', 'token');
+        responseHeaders.location = withoutQueryParameter(withoutQueryParameter(incoming.url ?? '/', 'token'), 'ticket');
         responseHeaders['content-length'] = '0';
         responseHeaders['cache-control'] = 'no-store';
         responseHeaders['referrer-policy'] = 'no-referrer';

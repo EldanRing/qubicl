@@ -1,24 +1,32 @@
 # Support
 
-Qubicl `0.1.x` is an initial public release series. Fixes and support are
-best-effort while interfaces and state formats settle before 1.0.
+Qubicl `0.5.x` is a public pre-1.0 release series. Interfaces and state formats
+may still evolve before 1.0.
 
-## Platform status for 0.1
+## Platform status for 0.5
 
 | Component | Supported range |
 | --- | --- |
-| Directly validated host | Linux x64 with glibc 2.28 or newer |
-| Best-effort hosts | Linux ARM64; macOS 13+ on Intel or Apple silicon |
+| Supported host policy | Linux x64; Apple Silicon macOS; Windows 11 x64 through Ubuntu 24.04 on WSL 2 |
+| Historical v0.1.0 directly tested baselines | Linux x64; Apple Silicon macOS; Windows 11 x64 through Ubuntu 24.04 on WSL 2 |
+| v0.5 initial release evidence | Linux x64 general platform acceptance; dashboard-specific native Linux x64 and Apple Silicon macOS; physical iPhone Safari |
+| Best-effort hosts | Linux ARM64; Intel macOS; Windows on ARM through WSL 2; other current WSL 2 distributions |
 | Container runtime | Docker Engine 24.0 or newer, or Docker Desktop 4.29 or newer |
 | Compose | Docker Compose 2.24 or newer through `docker compose` |
 | npm CLI | Node.js `^22.14.0 || ^24.0.0` |
 | Native CLI | Version-matched Qubicl binary; no host Node.js required |
 
-Windows, musl-only Linux distributions, 32-bit systems, remote Docker contexts, Podman, and alternative Compose implementations are outside the 1.0 support contract. Newer major Node.js lines remain unsupported until the package engine range and local release matrix include them.
+Native Windows, WSL 1, musl-only Linux distributions, 32-bit systems, remote
+Docker contexts, Podman, and alternative Compose implementations are outside
+the current support contract. Newer major Node.js lines remain unsupported
+until the package engine range and local release matrix include them.
 
-Best-effort targets are supported by the product contract and release images,
-but absence of maintainer-controlled hardware does not block a pre-1.0 release.
-Platform-specific defects may take longer to reproduce and fix.
+Best-effort targets have compatible release artifacts or documented paths, but
+do not carry a directly tested claim. Platform-specific defects may take longer
+to reproduce and fix. The v0.1.0 baseline labels do not claim that the current
+v0.5 candidate repeated general macOS or Windows/WSL acceptance. Its macOS and
+iPhone evidence is limited to the dashboard-specific rows. The versioned
+[platform matrix](conformance/platform-support-v1.json) is authoritative.
 
 ## Getting help
 

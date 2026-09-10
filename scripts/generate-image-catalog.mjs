@@ -1,4 +1,5 @@
-import { writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import {
   CURATED_PRESETS,
@@ -11,17 +12,21 @@ import { inspectOciArchive } from './oci-evidence.mjs';
 
 const options = parseArgs(process.argv.slice(2));
 const platforms = ['linux/amd64', 'linux/arm64'];
-const imageNames = ['gateway', ...CURATED_PRESETS];
+const imageNames = ['gateway', 'dashboard', ...CURATED_PRESETS];
 const measurements = {};
+const dashboardAssetManifestSha256 = createHash('sha256')
+  .update(await readFile(options.dashboardManifest))
+  .digest('hex');
 
 for (const name of imageNames) {
-  const preset = name === 'gateway' ? undefined : name;
+  const preset = CURATED_PRESETS.includes(name) ? name : undefined;
   measurements[name] = await inspectOciArchive(join(options.directory, `qubicl-${name}.oci.tar`), {
     expectedVersion: options.version,
     expectedRevision: options.revision,
     expectedSource: options.source,
     expectedPreset: preset,
     expectedManifest: preset ? buildComputerManifest(preset, options.version, options.revision) : undefined,
+    expectedDashboardAssetManifestSha256: name === 'dashboard' ? dashboardAssetManifestSha256 : undefined,
     requireAttestations: true,
   });
 }
@@ -49,13 +54,18 @@ const imageEntry = (name) => {
 };
 
 const catalog = ImageCatalogSchema.parse({
-  schemaVersion: 1,
+  schemaVersion: 2,
   releaseVersion: options.version,
   development: false,
   source: options.source,
   revision: options.revision,
   supportedPlatforms: platforms,
   gateway: imageEntry('gateway'),
+  dashboard: {
+    protocolVersion: 1,
+    assetManifestSha256: dashboardAssetManifestSha256,
+    image: imageEntry('dashboard'),
+  },
   presets: Object.fromEntries(CURATED_PRESETS.map((preset) => {
     const definition = PRESET_DEFINITIONS[preset];
     return [preset, {
@@ -81,7 +91,7 @@ console.log(JSON.stringify({ ok: true, output: options.output, catalog }, null, 
 
 function parseArgs(args) {
   const result = {};
-  const allowed = new Set(['directory', 'output', 'version', 'revision', 'source', 'owner']);
+  const allowed = new Set(['directory', 'output', 'version', 'revision', 'source', 'owner', 'dashboard-manifest']);
   for (let index = 0; index < args.length; index += 2) {
     const option = args[index];
     const value = args[index + 1];
@@ -94,6 +104,8 @@ function parseArgs(args) {
   for (const key of allowed) assert(result[key], `Missing required --${key}.`);
   result.directory = resolve(result.directory);
   result.output = resolve(result.output);
+  result.dashboardManifest = resolve(result['dashboard-manifest']);
+  delete result['dashboard-manifest'];
   result.owner = result.owner.toLowerCase();
   assert(/^[a-z0-9](?:[a-z0-9-]{0,38})$/.test(result.owner), `Invalid registry owner ${result.owner}.`);
   return result;

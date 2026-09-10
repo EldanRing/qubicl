@@ -2,7 +2,8 @@
 
 ## Supported versions
 
-Published `0.1.x` releases receive security fixes on a best-effort basis. The
+The latest stable minor release line receives security fixes on a best-effort
+basis. Older minor lines are not maintained concurrently. The
 `main` branch may change without notice. Pre-1.0 releases do not promise API or
 state-format stability across minor versions.
 

@@ -6,6 +6,7 @@ import type {
   CompatibilityProcessOutput,
   CompatibilityProcessSummary,
   CompatibilityStatusOptions,
+  ManagementProcessSummary,
   ProcessOutputMode,
   ProcessResult,
   StopSignal,
@@ -67,6 +68,16 @@ export class RemoteProcessManager {
   }
   async count(): Promise<number> {
     return (await this.status()).managedProcesses;
+  }
+  async listForManagement(): Promise<ManagementProcessSummary[]> {
+    const value = await this.request<unknown>('/v1/process/management-list', undefined, 'GET');
+    if (!Array.isArray(value)) throw invalidRunnerResult(false);
+    return value.map((entry) => managementProcessSummary(entry));
+  }
+  async stopForManagement(id: string): Promise<{ id: string; status: 'stopped' }> {
+    const value = await this.request<unknown>('/v1/process/management-stop', { id }, 'POST', true);
+    if (!isRecord(value) || value.id !== id || value.status !== 'stopped') throw invalidRunnerResult(true);
+    return { id, status: 'stopped' };
   }
   status(): Promise<RemoteProcessStatus> { return this.request('/v1/status', undefined, 'GET'); }
   private request<T>(path: string, body?: unknown, method = 'POST', ambiguousOnFailure = false): Promise<T> {
@@ -260,6 +271,21 @@ function compatibilitySummary(value: unknown, ambiguous = false): CompatibilityP
     throw invalidRunnerResult(ambiguous);
   }
   return value as unknown as CompatibilityProcessSummary;
+}
+
+function managementProcessSummary(value: unknown): ManagementProcessSummary {
+  if (!isRecord(value)
+    || typeof value.id !== 'string'
+    || !['running', 'exited', 'signaled', 'timed-out', 'stopped'].includes(String(value.status))
+    || typeof value.startedAt !== 'string'
+    || !(value.finishedAt === undefined || typeof value.finishedAt === 'string')
+    || value.owner !== 'agent'
+    || !Number.isSafeInteger(value.ownerGeneration)
+    || (value.ownerGeneration as number) < 1
+    || Object.keys(value).some((key) => !['id', 'status', 'startedAt', 'finishedAt', 'owner', 'ownerGeneration'].includes(key))) {
+    throw invalidRunnerResult(false);
+  }
+  return value as unknown as ManagementProcessSummary;
 }
 
 function invalidRunnerResult(ambiguous: boolean): QubiclError {

@@ -25,6 +25,7 @@ interface PortPublication extends PublicationBase {
 interface FilePublication extends PublicationBase {
   kind: 'file';
   root: string;
+  entryPath: string;
   source: FilePreviewSource;
 }
 
@@ -52,10 +53,27 @@ export interface PreviewAccess {
   remoteBaseUrl?: string;
 }
 
+export interface ManagementPreviewSummary {
+  id: string;
+  kind: 'port' | 'file';
+  status: 'published';
+  createdAt: string;
+  expiresAt: string;
+  port?: number;
+}
+
+export interface ManagementPreviewTicket {
+  path: string;
+  expiresAt: string;
+}
+
 export type PreviewAccessSource = () => PreviewAccess;
 
 const MAX_FILE_PREVIEW_BYTES = 20_000_000;
 const MAX_FILE_PUBLICATIONS = 64;
+const MAX_MANAGEMENT_TICKETS = 128;
+const MAX_MANAGEMENT_SESSIONS = 256;
+const MANAGEMENT_TICKET_TTL_MS = 60_000;
 const FILE_PREVIEW_CSP = [
   'sandbox',
   "default-src 'none'",
@@ -76,6 +94,8 @@ const FILE_PREVIEW_CSP = [
 
 export class PreviewManager {
   private readonly publications = new Map<string, Publication>();
+  private readonly managementTickets = new Map<string, { publicationId: string; access: 'local' | 'remote'; expiresAt: number }>();
+  private readonly managementSessions = new Map<string, { publicationId: string; expiresAt: number }>();
 
   constructor(
     private readonly ports: PortSource,
@@ -109,6 +129,43 @@ export class PreviewManager {
         url: this.externalPath(publication.id, access.publicBaseUrl),
         ...(access.remoteBaseUrl ? { remoteUrl: this.remotePath(publication.id, access.remoteBaseUrl) } : {}),
       }));
+  }
+
+  listForManagement(): ManagementPreviewSummary[] {
+    this.prune();
+    return [...this.publications.values()]
+      .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.id.localeCompare(right.id))
+      .map((publication) => ({
+        id: publication.id,
+        kind: publication.kind,
+        status: 'published',
+        createdAt: publication.createdAt,
+        expiresAt: publication.expiresAt,
+        ...(publication.kind === 'port' ? { port: publication.port } : {}),
+      }));
+  }
+
+  openForManagement(id: string, access: 'local' | 'remote'): ManagementPreviewTicket {
+    this.prune();
+    const publication = this.publications.get(id);
+    if (!publication) throw new QubiclError('preview_not_found', `Published preview ${id} was not found.`, 404);
+    const previewAccess = this.previewAccess();
+    const base = access === 'local' ? previewAccess.publicBaseUrl : previewAccess.remoteBaseUrl;
+    if (!base) throw new QubiclError('preview_not_exposed', 'Remote preview access is not configured.', 409);
+    const token = randomBytes(32).toString('base64url');
+    const expiresAt = Math.min(Date.parse(publication.expiresAt), Date.now() + MANAGEMENT_TICKET_TTL_MS);
+    if (this.managementTickets.size >= MAX_MANAGEMENT_TICKETS) this.managementTickets.delete(this.managementTickets.keys().next().value!);
+    this.managementTickets.set(digest(token), { publicationId: id, access, expiresAt });
+    const suffix = publication.kind === 'file' ? publication.entryPath : '';
+    const target = new URL(`${base.replace(/\/$/u, '')}/${id}/${suffix}`);
+    target.searchParams.set('ticket', token);
+    return { path: `${target.pathname}${target.search}`, expiresAt: new Date(expiresAt).toISOString() };
+  }
+
+  revokeForManagement(id: string): { id: string; status: 'revoked' } {
+    this.prune();
+    if (!this.unpublish(id)) throw new QubiclError('preview_not_found', `Published preview ${id} was not found.`, 404);
+    return { id, status: 'revoked' };
   }
 
   async publish(port: number, expiresInSeconds: number): Promise<Record<string, unknown>> {
@@ -167,6 +224,7 @@ export class PreviewManager {
       kind: 'file',
       id,
       root,
+      entryPath: encodePreviewPath(relativePath),
       source,
       tokenHash: digest(token),
       createdAt: now.toISOString(),
@@ -174,7 +232,7 @@ export class PreviewManager {
     };
     this.publications.set(id, publication);
     const access = this.previewAccess();
-    const suffix = encodePreviewPath(relativePath);
+    const suffix = publication.entryPath;
     return {
       id,
       createdAt: publication.createdAt,
@@ -186,8 +244,16 @@ export class PreviewManager {
     };
   }
 
-  unpublish(id: string): boolean { return this.publications.delete(id); }
-  clear(): void { this.publications.clear(); }
+  unpublish(id: string): boolean {
+    const removed = this.publications.delete(id);
+    if (removed) this.clearManagementAccess(id);
+    return removed;
+  }
+  clear(): void {
+    this.publications.clear();
+    this.managementTickets.clear();
+    this.managementSessions.clear();
+  }
 
   handle(request: IncomingMessage, response: ServerResponse, url: URL): boolean {
     const match = url.pathname.match(/^\/_qubicl\/previews\/([A-Za-z0-9_-]{16})(\/.*)?$/u);
@@ -195,24 +261,26 @@ export class PreviewManager {
     this.prune();
     const publication = this.publications.get(match[1]!);
     const token = url.searchParams.get('token') ?? previewCookie(request, match[1]!);
-    if (!publication || !token || !constantDigestMatch(token, publication.tokenHash)) {
+    const managementToken = publication ? this.redeemManagementTicket(request, url, publication) : undefined;
+    if (!publication || (!managementToken && (!token || !this.validPreviewToken(publication, token)))) {
       json(response, 401, { error: { code: 'invalid_preview', message: 'This preview link is invalid, unpublished, or expired.' } });
       return true;
     }
-    const settingCookie = url.searchParams.has('token');
-    if (settingCookie) url.searchParams.delete('token');
+    const settingCookie = managementToken ?? (url.searchParams.has('token') ? token : undefined);
+    url.searchParams.delete('token');
+    url.searchParams.delete('ticket');
     if (publication.kind === 'file') {
       void this.serveFile(
         request,
         response,
         publication,
         match[2] ?? '/',
-        settingCookie ? token : undefined,
+        settingCookie,
       ).catch(() => json(response, 404, {
         error: { code: 'file_preview_unavailable', message: 'The isolated file preview is unavailable.' },
       }));
     } else {
-      this.proxy(request, response, publication, `${match[2] ?? '/'}${url.search}`, settingCookie ? token : undefined);
+      this.proxy(request, response, publication, `${match[2] ?? '/'}${url.search}`, settingCookie);
     }
     return true;
   }
@@ -232,7 +300,7 @@ export class PreviewManager {
     this.prune();
     const publication = this.publications.get(match[1]!);
     const token = url.searchParams.get('token') ?? previewCookie(request, match[1]!);
-    if (!publication || !token || !constantDigestMatch(token, publication.tokenHash)) {
+    if (!publication || !token || !this.validPreviewToken(publication, token)) {
       socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       return true;
     }
@@ -359,7 +427,46 @@ export class PreviewManager {
   }
   private prune(): void {
     const now = Date.now();
-    for (const [id, publication] of this.publications) if (Date.parse(publication.expiresAt) <= now) this.publications.delete(id);
+    for (const [id, publication] of this.publications) {
+      if (Date.parse(publication.expiresAt) <= now) {
+        this.publications.delete(id);
+        this.clearManagementAccess(id);
+      }
+    }
+    for (const [hash, ticket] of this.managementTickets) {
+      if (ticket.expiresAt <= now || !this.publications.has(ticket.publicationId)) this.managementTickets.delete(hash);
+    }
+    for (const [hash, session] of this.managementSessions) {
+      if (session.expiresAt <= now || !this.publications.has(session.publicationId)) this.managementSessions.delete(hash);
+    }
+  }
+
+  private validPreviewToken(publication: Publication, token: string): boolean {
+    if (constantDigestMatch(token, publication.tokenHash)) return true;
+    const session = this.managementSessions.get(digest(token));
+    return session?.publicationId === publication.id && session.expiresAt > Date.now();
+  }
+
+  private redeemManagementTicket(request: IncomingMessage, url: URL, publication: Publication): string | undefined {
+    const token = url.searchParams.get('ticket');
+    if (!token || !/^[A-Za-z0-9_-]{43}$/u.test(token)) return undefined;
+    const hash = digest(token);
+    const ticket = this.managementTickets.get(hash);
+    if (!ticket || ticket.publicationId !== publication.id || ticket.expiresAt <= Date.now()
+      || request.headers['x-qubicl-access-surface'] !== ticket.access) return undefined;
+    this.managementTickets.delete(hash);
+    const cookieToken = randomBytes(32).toString('base64url');
+    if (this.managementSessions.size >= MAX_MANAGEMENT_SESSIONS) this.managementSessions.delete(this.managementSessions.keys().next().value!);
+    this.managementSessions.set(digest(cookieToken), {
+      publicationId: publication.id,
+      expiresAt: Date.parse(publication.expiresAt),
+    });
+    return cookieToken;
+  }
+
+  private clearManagementAccess(publicationId: string): void {
+    for (const [hash, ticket] of this.managementTickets) if (ticket.publicationId === publicationId) this.managementTickets.delete(hash);
+    for (const [hash, session] of this.managementSessions) if (session.publicationId === publicationId) this.managementSessions.delete(hash);
   }
 
   private pruneFilePublications(): void {

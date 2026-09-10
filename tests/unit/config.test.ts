@@ -28,7 +28,7 @@ function computer(config: ReturnType<typeof defaultConfig>, id: string, name: st
 test('configuration validation rejects unsafe names and limits', () => {
   const config = defaultConfig();
   assert.equal(ConfigSchema.parse(config).gateway.port, 3211);
-  assert.equal(config.version, 3);
+  assert.equal(config.version, 4);
   assert.throws(() => assertValidName('Bad Name'));
   assert.throws(() => ConfigSchema.parse({ ...config, gateway: { ...config.gateway, port: 70000 } }));
   const duplicate = computer(config, '00000000-0000-4000-8000-000000000001', 'same');
@@ -86,11 +86,11 @@ test('config, secrets, and migration journals require the same computer IDs', ()
   assert.throws(() => assertStateComputerIdsMatch(config, secrets), /missing secrets.*000000000001.*orphan secrets.*000000000002/);
 
   const migration = {
-    version: 2,
+    version: 3,
     id: '00000000-0000-4000-8000-000000000003',
     createdAt: '2026-08-19T12:00:00.000Z',
     sourceVersion: 2,
-    targetVersion: 3,
+    targetVersion: 4,
     backupName: 'backup-v2',
     config,
     secrets,

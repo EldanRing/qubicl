@@ -30,6 +30,13 @@ test('candidate catalog identity rejects stale version, revision, and source', a
     revision: 'abc123',
     source: 'https://github.com/example/qubicl',
   }), /source/);
+  const dashboardDrift = structuredClone(catalog) as Record<string, any>;
+  dashboardDrift.dashboard.assetManifestSha256 = 'invalid';
+  assert.throws(() => assertCatalogIdentity(dashboardDrift, {
+    version: '1.2.3',
+    revision: 'abc123',
+    source: 'https://github.com/example/qubicl',
+  }), /asset-manifest digest/);
 });
 
 test('candidate verification facts stay bound to one clean reviewed revision', async () => {
@@ -324,13 +331,18 @@ function catalogFixture(): Record<string, unknown> {
     },
   });
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     releaseVersion: '1.2.3',
     development: false,
     source: 'https://github.com/example/qubicl',
     revision: 'abc123',
     supportedPlatforms: ['linux/amd64', 'linux/arm64'],
     gateway: image('gateway'),
+    dashboard: {
+      protocolVersion: 1,
+      assetManifestSha256: 'e'.repeat(64),
+      image: image('dashboard'),
+    },
     presets: Object.fromEntries(['file-system', 'browser', 'computer', 'workstation'].map((name) => [
       name,
       { manifestSha256: 'd'.repeat(64), image: image(name) },
@@ -339,7 +351,7 @@ function catalogFixture(): Record<string, unknown> {
 }
 
 function reportFixtures(): Array<{ name: string; document: Record<string, any> }> {
-  return ['gateway', 'file-system', 'browser', 'computer', 'workstation'].flatMap((image) =>
+  return ['gateway', 'dashboard', 'file-system', 'browser', 'computer', 'workstation'].flatMap((image) =>
     ['amd64', 'arm64'].map((architecture) => ({
       name: `trivy-${image}-linux-${architecture}.json`,
       document: {

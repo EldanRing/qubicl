@@ -138,7 +138,7 @@ function fixture(): { catalog: ImageCatalog; config: QubiclConfig } {
     createdAt: '2026-08-27T00:00:00.000Z',
   });
   const config = ConfigSchema.parse({
-    version: 3,
+    version: 4,
     installationId: '00000000-0000-4000-8000-000000000000',
     gateway: {
       port: 3211,

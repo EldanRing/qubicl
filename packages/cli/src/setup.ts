@@ -1,3 +1,4 @@
+import { operationQuiet } from './operation-context.js';
 import { stdin, stderr, stdout } from 'node:process';
 import {
   CAPABILITY_CONTRACT_VERSION,
@@ -83,9 +84,9 @@ export async function setupCommand(args: ParsedArgs, injectedPrompt?: SetupPromp
   const existing = await optionalState(paths);
   const snapshot = snapshotSetup(existing?.config);
   const json = flag(args, 'json');
-  const interactive = !json && (Boolean(injectedPrompt) || stdin.isTTY);
+  const interactive = !operationQuiet() && !json && (Boolean(injectedPrompt) || stdin.isTTY);
   const output = json ? stderr : stdout;
-  const write = (message: string) => output.write(`${message}\n`);
+  const write = (message: string) => { if (!operationQuiet()) output.write(`${message}\n`); };
   const verbose = flag(args, 'verbose');
   const prompt = injectedPrompt ?? (interactive ? new ReadlineSetupPrompt(output, !flag(args, 'no-clear') && !verbose) : undefined);
   const progress: { stage: 'review' | 'acquisition' | 'transaction' | 'complete' } = { stage: 'review' };
@@ -181,7 +182,7 @@ export async function setupCommand(args: ParsedArgs, injectedPrompt?: SetupPromp
       }
       phase(write, 'saving configuration');
       await prepareStateDirectories(paths);
-      const state: LoadedState = current ?? { paths, config: defaultConfig(), secrets: defaultSecrets() };
+      const state: LoadedState = current ?? { paths, config: defaultConfig((await (await import('./dashboard/runtime.js')).readDashboardConfiguration(paths.root))?.installationId), secrets: defaultSecrets() };
       state.config.gateway = {
         port: plan.gateway.port,
         image: gatewayIdentity,
@@ -221,7 +222,7 @@ export async function setupCommand(args: ParsedArgs, injectedPrompt?: SetupPromp
     });
 
     phase(write, 'complete');
-    if (json) stdout.write(`${JSON.stringify(result)}\n`);
+    if (json && !operationQuiet()) stdout.write(`${JSON.stringify(result)}\n`);
     else printHandoff(result, write);
   } catch (error) {
     if (error instanceof SetupCancelledError) {

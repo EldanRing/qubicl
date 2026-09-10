@@ -102,6 +102,7 @@ interface ManagedProcess {
   outputDescriptorPath: string;
   outputIdentity: OutputIdentity;
   outputFile: number;
+  outputFileClosed: boolean;
   fullOutputBytes: number;
   outputFileTruncated: boolean;
   journal: JournalRecord[];
@@ -163,6 +164,16 @@ export interface CompatibilityProcessOutput extends CompatibilityProcessSummary 
   output: Array<{ type: 'stdout' | 'stderr'; data: string }>;
   truncated: boolean;
   next_offset: number;
+}
+
+/** Safe host-operator metadata. It deliberately excludes commands, paths, output, and lease proofs. */
+export interface ManagementProcessSummary {
+  id: string;
+  status: 'running' | 'exited' | 'signaled' | 'timed-out' | 'stopped';
+  startedAt: string;
+  finishedAt?: string;
+  owner: 'agent';
+  ownerGeneration: number;
 }
 
 export interface CompatibilityStatusOptions {
@@ -379,6 +390,23 @@ export class ProcessManager {
     return [...this.processes.values()].filter((managed) => !managed.completed).length;
   }
 
+  listForManagement(): ManagementProcessSummary[] {
+    return [...this.processes.values()]
+      .sort((left, right) => left.startedAt - right.startedAt || left.id.localeCompare(right.id))
+      .map((managed) => managementSummary(managed));
+  }
+
+  async stopForManagement(id: string): Promise<{ id: string; status: 'stopped' }> {
+    const managed = this.processes.get(id);
+    if (!managed) throw new QubiclError('process_not_found', `Managed process ${id} was not found.`, 404);
+    if (!managed.completed) await this.terminate(managed, 'SIGTERM', 'stop');
+    if (!managed.completed) {
+      throw new QubiclError('process_fencing_failed', `Could not confirm termination of managed process ${id}; its tracking record was retained.`, 500);
+    }
+    await this.discard(managed, false);
+    return { id, status: 'stopped' };
+  }
+
   retainedOutputBytes(): number {
     return this.retainedBytes;
   }
@@ -492,6 +520,7 @@ export class ProcessManager {
       outputDescriptorPath,
       outputIdentity,
       outputFile,
+      outputFileClosed: false,
       fullOutputBytes: 0,
       outputFileTruncated: false,
       journal: [],
@@ -564,7 +593,7 @@ export class ProcessManager {
   }
 
   private appendJournal(managed: ManagedProcess, type: JournalRecord['type'], chunk: Buffer, final = false): void {
-    if (managed.outputFileTruncated) return;
+    if (managed.outputFileTruncated || managed.outputFileClosed) return;
     if (!managed.compatibilitySession) {
       if (!final) this.appendJournalBytes(managed, type, chunk, false);
       return;
@@ -815,7 +844,7 @@ export class ProcessManager {
     managed.finishedAt = Date.now();
     if (managed.timeoutTimer) clearTimeout(managed.timeoutTimer);
     if (managed.lifetimeTimer) clearTimeout(managed.lifetimeTimer);
-    try { closeSync(managed.outputFile); } catch { /* already closed */ }
+    closeOutputDescriptor(managed);
     this.notify(managed);
     managed.outputCleanupTimer = setTimeout(
       () => this.cleanupOutput(managed),
@@ -858,7 +887,7 @@ export class ProcessManager {
     managed.journal = [];
     this.notify(managed);
     this.processes.delete(managed.id);
-    try { closeSync(managed.outputFile); } catch { /* already closed */ }
+    closeOutputDescriptor(managed);
     if (!preserveOutput) {
       if (managed.outputCleanupTimer) clearTimeout(managed.outputCleanupTimer);
       this.cleanupOutput(managed);
@@ -1091,6 +1120,33 @@ function compatibilitySummary(managed: ManagedProcess): CompatibilityProcessSumm
     session_id: managed.sessionId,
     started_at: managed.startedAt / 1000,
     finished_at: managed.finishedAt === null ? null : managed.finishedAt / 1000,
+  };
+}
+
+function closeOutputDescriptor(managed: ManagedProcess): void {
+  if (managed.outputFileClosed) return;
+  // Invalidate before closing: the OS can reuse this number for another request.
+  managed.outputFileClosed = true;
+  try { closeSync(managed.outputFile); } catch { /* never retry a potentially reused descriptor */ }
+}
+
+function managementSummary(managed: ManagedProcess): ManagementProcessSummary {
+  const status: ManagementProcessSummary['status'] = !managed.completed
+    ? 'running'
+    : managed.timedOut
+      ? 'timed-out'
+      : managed.terminationReason !== null
+        ? 'stopped'
+        : managed.signal !== null
+          ? 'signaled'
+          : 'exited';
+  return {
+    id: managed.id,
+    status,
+    startedAt: new Date(managed.startedAt).toISOString(),
+    ...(managed.finishedAt === null ? {} : { finishedAt: new Date(managed.finishedAt).toISOString() }),
+    owner: 'agent',
+    ownerGeneration: managed.owner.generation,
   };
 }
 

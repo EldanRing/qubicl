@@ -7,6 +7,13 @@ import test from 'node:test';
 
 const root = process.cwd();
 const moduleUrl = pathToFileURL(join(root, 'scripts', 'artifact-evidence.mjs')).href;
+const buildMetadataUrl = pathToFileURL(join(root, 'scripts', 'build-metadata.mjs')).href;
+
+test('native binary evidence rejects embedded private build paths', async () => {
+  const { assertNativeBinaryPrivacy } = await import(moduleUrl);
+  assert.doesNotThrow(() => assertNativeBinaryPrivacy(Buffer.from('portable binary bytes'), ['/private/build']));
+  assert.throws(() => assertNativeBinaryPrivacy(Buffer.from('prefix /private/build/qubicl.cjs suffix'), ['/private/build']), /embeds a private build path/);
+});
 
 test('npm publication manifest is exactly the reviewed source manifest', async () => {
   const { assertNpmPublicationManifest } = await import(moduleUrl);
@@ -30,6 +37,22 @@ test('npm publication manifest is exactly the reviewed source manifest', async (
   }
 });
 
+test('generated artifact evidence separates the first-party dashboard from third-party notices', async () => {
+  const { assertSbomEvidence } = await import(moduleUrl);
+  const { buildMetadata } = await import(buildMetadataUrl);
+  const metadata = await buildMetadata(root);
+  await assert.doesNotReject(() => assertSbomEvidence(
+    join(root, 'packages', 'cli', 'dist', 'SBOM.spdx.json'),
+    join(root, 'packages', 'cli', 'dist', 'THIRD_PARTY_NOTICES.txt'),
+    {
+      version: metadata.version,
+      revision: metadata.revision,
+      source: 'https://github.com/EldanRing/qubicl',
+      artifactKind: 'npm-application',
+    },
+  ));
+});
+
 test('compiled candidate evidence permits only explicit legacy development image identifiers', async () => {
   const { assertCompiledCandidateRefs } = await import(moduleUrl);
   const temporary = await mkdtemp(join(tmpdir(), 'qubicl-artifact-evidence-'));
@@ -41,6 +64,10 @@ test('compiled candidate evidence permits only explicit legacy development image
     catalog.gateway.requested,
     catalog.gateway.indexDigest,
     ...Object.values(catalog.gateway.platforms).flatMap((variant) => [variant.resolved, variant.digest]),
+    catalog.dashboard.assetManifestSha256,
+    catalog.dashboard.image.requested,
+    catalog.dashboard.image.indexDigest,
+    ...Object.values(catalog.dashboard.image.platforms).flatMap((variant) => [variant.resolved, variant.digest]),
     ...Object.values(catalog.presets).flatMap((preset) => [
       preset.manifestSha256,
       preset.image.requested,
@@ -62,6 +89,13 @@ test('compiled candidate evidence permits only explicit legacy development image
       revision: 'a'.repeat(40),
       artifact: 'fixture',
     }), /development system-image reference for gateway/);
+
+    await writeFile(artifact, [...required, 'qubicl/dashboard:dev'].join('\n'));
+    await assert.rejects(() => assertCompiledCandidateRefs(artifact, catalog, {
+      version: '0.1.0',
+      revision: 'a'.repeat(40),
+      artifact: 'fixture',
+    }), /development system-image reference for dashboard/);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -85,6 +119,11 @@ function catalogFixture() {
   };
   return {
     gateway: image('gateway'),
+    dashboard: {
+      protocolVersion: 1,
+      assetManifestSha256: 'e'.repeat(64),
+      image: image('dashboard'),
+    },
     presets: Object.fromEntries(['file-system', 'browser', 'computer', 'workstation'].map((name) => [name, {
       manifestSha256: 'f'.repeat(64),
       image: image(name),

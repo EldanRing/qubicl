@@ -6,6 +6,7 @@ export const OCI_EFFICIENCY_REPORT_NAME = 'oci-efficiency.json';
 export const OCI_EFFICIENCY_MAX_REPORT_BYTES = 64 * 1024 * 1024;
 export const OCI_EFFICIENCY_IMAGE_NAMES = [
   'gateway',
+  'dashboard',
   'file-system',
   'browser',
   'computer',

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { access, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, parse, resolve } from 'node:path';
 import { createServer } from 'node:net';
@@ -868,6 +868,8 @@ export async function buildSystemImages(presets: readonly Preset[] = ['file-syst
   if (!IMAGE_CATALOG.development) {
     throw new Error('Image build-system is available only in a Qubicl source-development build. Release images are obtained from the exact signed catalog.');
   }
+  const dashboardManifest = createHash('sha256').update(await readFile(join(imageAssetsPath(), 'dashboard', 'asset-manifest.json'))).digest('hex');
+  await buildBundledImage('dashboard', IMAGE_CATALOG.dashboard.image.requested, undefined, dashboardManifest, stderr);
   await buildBundledGateway(IMAGE_CATALOG.gateway.requested, stderr);
   await inspectGatewayImage(IMAGE_CATALOG.gateway.requested, IMAGE_CATALOG.gateway.requested, VIEWER_AUTHENTICATION_HEADER_V1);
   for (const preset of presets) {
@@ -886,7 +888,7 @@ async function buildBundledPreset(preset: Preset, tag: string, stderr: boolean):
   await buildBundledImage('computer', tag, preset, contract.manifestSha256, stderr, contract.capabilities);
 }
 
-async function buildBundledImage(kind: 'gateway' | 'computer', tag: string, target?: Preset, expectedManifest?: string, stderr = false, capabilities?: readonly string[]): Promise<void> {
+async function buildBundledImage(kind: 'gateway' | 'computer' | 'dashboard', tag: string, target?: Preset, expectedManifest?: string, stderr = false, capabilities?: readonly string[]): Promise<void> {
   const assets = imageAssetsPath();
   await access(assets);
   const args = [
@@ -908,7 +910,7 @@ async function buildBundledImage(kind: 'gateway' | 'computer', tag: string, targ
     args.push('--build-arg', `QUBICL_CONTRACT_COMPATIBILITY=${target}`);
     args.push('--build-arg', `QUBICL_CONTRACT_CAPABILITIES=${capabilities?.join(',') ?? ''}`);
   }
-  if (expectedManifest) args.push('--build-arg', `QUBICL_MANIFEST_SHA256=${expectedManifest}`);
+  if (expectedManifest) args.push('--build-arg', `${kind === 'dashboard' ? 'QUBICL_ASSET_MANIFEST_SHA256' : 'QUBICL_MANIFEST_SHA256'}=${expectedManifest}`);
   args.push('--tag', tag, join(assets, kind));
   await docker(args, stderr ? { stderr: true } : { inherit: true });
 }
@@ -2174,6 +2176,7 @@ export async function gatewayStatus(state: LoadedState): Promise<{ status: strin
 
 export interface ManagedRuntimeGroupObservation {
   status: string;
+  health?: string;
   group: 'complete' | 'absent' | 'partial' | 'inconsistent';
   containers: RuntimeContainerBinding[];
 }
@@ -2267,6 +2270,7 @@ export async function managedComputerRuntimeObservation(
   const actualInventory = await labeledComputerRuntimeInventory(state, computer.id, adapter);
   const actualByName = new Map(actualInventory.map((binding) => [binding.name, binding]));
   const containers: RuntimeContainerBinding[] = [];
+  const healthStates: string[] = [];
   for (const inventory of actualInventory) {
     const inspection = await adapter.inspectContainer(inventory.id, inventory.name);
     if (!inspection) throw new Error(`Managed runtime container ${inventory.name} disappeared during immutable-ID inspection.`);
@@ -2275,6 +2279,7 @@ export async function managedComputerRuntimeObservation(
       return { status: inspection.State!.Status!, group: 'inconsistent', containers: [] };
     }
     assertExpectedComputerRuntimeInspection(state, computer, inventory.name, expectedRole, inspection);
+    if (inspection.State?.Health?.Status) healthStates.push(inspection.State.Health.Status);
     containers.push(runtimeBinding(inspection, inventory.name));
   }
   for (const name of expectedRoles.keys()) {
@@ -2290,7 +2295,8 @@ export async function managedComputerRuntimeObservation(
   if (new Set(containers.map(({ status }) => status)).size !== 1) {
     return { status: primaryStatus, group: 'inconsistent', containers };
   }
-  return { status: primaryStatus, group: 'complete', containers };
+  const health = healthStates.includes('unhealthy') ? 'unhealthy' : healthStates.includes('starting') ? 'starting' : healthStates.length && healthStates.every((value) => value === 'healthy') ? 'healthy' : undefined;
+  return { status: primaryStatus, group: 'complete', containers, ...(health ? { health } : {}) };
 }
 
 /** Read-only gateway ownership/status observation for upgrade planning. */
@@ -2386,7 +2392,10 @@ export async function removeComputerRuntimeForLifecycleReplacement(
 ): Promise<void> {
   if (sourceBinding.length === 0) {
     const target = await managedComputerRuntimeObservation(state, computer, adapter);
-    if (target.group === 'absent') return;
+    if (target.group === 'absent') {
+      await removeComputerReplacementNetworks(state, computer, adapter);
+      return;
+    }
     const desired = requireStopped ? 'stopped' : 'running';
     if ((target.group === 'complete' || target.group === 'partial')
       && Boolean(computer.image.contentId)
@@ -2407,6 +2416,30 @@ export async function removeComputerRuntimeForLifecycleReplacement(
   );
   if (transition.sourceIds.length) {
     await adapter.docker(['rm', ...(requireStopped ? [] : ['--force']), ...transition.sourceIds]);
+  }
+  if (transition.targetIds.length === 0) {
+    await removeComputerReplacementNetworks(state, computer, adapter);
+  }
+}
+
+async function removeComputerReplacementNetworks(
+  state: LoadedState,
+  computer: ComputerConfig,
+  adapter: ManagedRuntimeObservationAdapter,
+): Promise<void> {
+  const control = controlNetwork(state.config.installationId, computer.id, state.paths.root);
+  if (await adapter.docker(['network', 'inspect', '--format', '{{.Id}}', control], { allowFailure: true })) {
+    // The gateway attachment is created outside Compose. Detach it before
+    // Compose reconciles policy-dependent network options for the replacement.
+    await adapter.docker([
+      'network', 'disconnect', '--force', control,
+      gatewayContainerName(state.config.installationId, state.paths.root),
+    ], { allowFailure: true });
+    await adapter.docker(['network', 'rm', control]);
+  }
+  const workspace = workspaceNetwork(state.config.installationId, computer.id, state.paths.root);
+  if (await adapter.docker(['network', 'inspect', '--format', '{{.Id}}', workspace], { allowFailure: true })) {
+    await adapter.docker(['network', 'rm', workspace]);
   }
 }
 
@@ -2647,7 +2680,7 @@ async function inspectComputerRuntimeTransition(
   sourceBinding: readonly RuntimeContainerBinding[],
   desired: 'running' | 'stopped',
   adapter: ManagedRuntimeObservationAdapter,
-): Promise<{ sourceIds: string[] }> {
+): Promise<{ sourceIds: string[]; targetIds: string[] }> {
   if (new Set(sourceBinding.map(({ id }) => id)).size !== sourceBinding.length
     || new Set(sourceBinding.map(({ name }) => name)).size !== sourceBinding.length) {
     throw new Error(`Reviewed runtime binding for ${computer.name} contains duplicate identities.`);
@@ -2657,6 +2690,7 @@ async function inspectComputerRuntimeTransition(
   const inventory = await labeledComputerRuntimeInventory(state, computer.id, adapter);
   const inventoryNames = new Set(inventory.map(({ name }) => name));
   const sourceIds: string[] = [];
+  const targetIds: string[] = [];
   for (const item of inventory) {
     const inspection = await adapter.inspectContainer(item.id, item.name);
     if (!inspection) throw new Error(`Managed runtime ${item.name} disappeared during transition inspection.`);
@@ -2687,6 +2721,7 @@ async function inspectComputerRuntimeTransition(
       || !allowedTransitionStatus(observed.status, desired, true)) {
       throw new Error(`Runtime transition container ${item.name} is not the exact owned target runtime.`);
     }
+    targetIds.push(item.id);
   }
   for (const name of new Set([...sourceBinding.map(({ name }) => name), ...targetRoles.keys()])) {
     if (inventoryNames.has(name)) continue;
@@ -2697,7 +2732,7 @@ async function inspectComputerRuntimeTransition(
   // A missing source member is safe only after the journal exists: removal may
   // have completed partially. Remaining reviewed source IDs are removed by
   // immutable ID; verified target members are retained for idempotent Compose.
-  return { sourceIds: sourceIds.sort() };
+  return { sourceIds: sourceIds.sort(), targetIds: targetIds.sort() };
 }
 
 function assertStoppedReplacementStatus(status: string, subject: string): void {

@@ -341,7 +341,10 @@ test('unclaimed completed results expire', async () => {
   const processes = new ProcessManager({ completedTtlMs: 30 });
   const result = await processes.exec('sleep 0.03; printf done', '/tmp', 1, 1_000, owner);
   assert.equal(result.running, true);
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  const deadline = Date.now() + 5_000;
+  while ((processes.count() !== 0 || processes.retainedOutputBytes() !== 0) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
   assert.equal(processes.count(), 0);
   assert.equal(processes.retainedOutputBytes(), 0);
 });

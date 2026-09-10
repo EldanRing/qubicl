@@ -360,17 +360,19 @@ export const PresetCatalogEntrySchema = z.strictObject({
 });
 
 export const ImageCatalogSchema = z.strictObject({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(2),
   releaseVersion: z.string().min(1),
   development: z.boolean(),
   source: z.string().url(),
   revision: z.string().min(1),
   supportedPlatforms: z.array(DockerPlatformSchema).min(1),
   gateway: CatalogImageSchema,
+  dashboard: z.strictObject({ protocolVersion: z.literal(1), assetManifestSha256: z.string().regex(/^[a-f0-9]{64}$/), image: CatalogImageSchema }),
   presets: z.record(PresetSchema, PresetCatalogEntrySchema),
 }).superRefine((catalog, context) => {
   for (const platform of catalog.supportedPlatforms) {
     validateCatalogImage(catalog.gateway, platform, catalog.development, ['gateway'], context);
+    validateCatalogImage(catalog.dashboard.image, platform, catalog.development, ['dashboard', 'image'], context);
     for (const preset of CURATED_PRESETS) {
       const entry = catalog.presets[preset];
       if (!entry) {
@@ -455,13 +457,14 @@ export function createDevelopmentCatalog(version = 'development', revision = 'un
     }];
   }));
   return ImageCatalogSchema.parse({
-    schemaVersion: 1,
+    schemaVersion: 2,
     releaseVersion: version,
     development: true,
     source: 'https://github.com/EldanRing/qubicl',
     revision,
     supportedPlatforms: platforms,
     gateway: image('qubicl/gateway:dev'),
+    dashboard: { protocolVersion: 1, assetManifestSha256: '0'.repeat(64), image: image('qubicl/dashboard:dev') },
     presets,
   });
 }

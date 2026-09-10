@@ -17,7 +17,7 @@ The repository pins npm 10.9.3 through `packageManager`/`devEngines`. `.nvmrc` p
 
 Use `npm run build` when bundled artifacts are needed. `npm run test:unit` runs all unit tests after type compilation. These commands are alternatives selected for the changed surface, not prerequisites to repeat before `npm run check`.
 
-`npm run check` performs strict TypeScript, Oxlint, unit/integration tests with coverage floors, and a high-severity npm audit. `npm run performance -- --no-build` reuses the existing bundle and records no build timing; use it only after verifying the bundle matches the source under measurement. The default `npm run performance` includes build timing and checks package/CLI/all-five-image size budgets; add `-- --runtime` for one controlled four-preset startup/workload/60-second-idle run.
+`npm run check` performs strict TypeScript, Oxlint, unit/integration tests with coverage floors, and a high-severity npm audit. `npm run performance -- --no-build` reuses the existing bundle and records no build timing; use it only after verifying the bundle matches the source under measurement. The default `npm run performance` includes build timing and checks package/CLI/all-six-image size budgets; add `-- --runtime` for one controlled four-preset startup/workload/60-second-idle run.
 
 Run `npm run tokens:audit` to print exact compact tool-definition bytes for every preset and static profile. The command fails if the lease-transparent full `workstation` catalog reaches the 26,000-byte regression ceiling, including skills and native web research. Set `QUBICL_TOKEN_METRICS=1` on a control service or stdio bridge to log size-only per-tool result/catalog events to stderr without logging tool arguments or result content.
 
@@ -53,7 +53,7 @@ Build all local development targets once:
 npm run images:build
 ```
 
-Use this full image build for acceptance that needs all presets. Focused source or documentation changes do not automatically require rebuilding every image. The command rebuilds the gateway and all four preset images from the current checkout, then validates each preset's exact capability contract. If setup reports that a local `:dev` manifest digest does not match the catalog, rerun `npm run images:build` from the repository root before retrying setup.
+Use this full image build for acceptance that needs all presets. Focused source or documentation changes do not automatically require rebuilding every image. The command rebuilds the gateway, isolated dashboard, and all four preset images from the current checkout, then validates the dashboard asset contract and each preset's exact capability contract. If setup reports that a local `:dev` manifest digest does not match the catalog, rerun `npm run images:build` from the repository root before retrying setup.
 
 The artifact harness covers state v1/v2 migration and recovery, sole `setup` onboarding, no-start/no-empty-gateway behavior, all four capability/startup profiles, custom derivation from every baseline, offline behavior, secret-free output, MCP/OpenAPI parity, viewer takeover, lifecycle continuity, persistence, and isolation:
 
@@ -97,10 +97,14 @@ are sufficient and avoid publishing local network topology.
 
 ## Secret and dependency review
 
-Release checks require a locally installed, checksum-verified Gitleaks 8.30.1 (or separately reviewed compatible version):
+Release checks require a locally installed, checksum-verified Gitleaks 8.30.1,
+or a separately reviewed compatible build. The v0.5 candidate tooling also
+requires Trivy 0.74.0 and rejects a different scanner version. Confirm both
+executables before starting candidate work:
 
 ```sh
 gitleaks version
+trivy --version
 npm run scan:secrets
 ```
 
@@ -147,8 +151,10 @@ npm run candidate:release
 ```
 
 Its schema-2 release set contains the complete Linux x64 candidate. Publication
-still requires signed schema-4 Codex, Open WebUI, protocol, Linux lifecycle, and
-native-Linux remote-access evidence from the frozen bytes.
+still requires signed schema-4 Linux lifecycle and native-Linux remote-access
+evidence from the frozen bytes. Beginning with v0.5, it also requires all nine
+clients, all four protocols, and the complete Linux/macOS/iPhone dashboard
+matrix described below.
 
 For the strict full-matrix supported-release policy:
 
@@ -156,7 +162,7 @@ For the strict full-matrix supported-release policy:
 npm run candidate:local
 ```
 
-The builder creates five multi-architecture OCI archives (gateway plus four
+The builder creates six multi-architecture OCI archives (gateway, dashboard, and four
 presets), checks contracts/provenance/SBOM, and scans independently filtered
 amd64 and arm64 OCI views. Each retained Trivy report must match the selected
 manifest, configuration, compressed layers, and rootfs diff IDs. The builder
@@ -166,10 +172,10 @@ only for v0.1 candidate evidence. For v0.2 and later, it also writes a mandatory
 `oci-efficiency.json` report from the exact archives and embedded SPDX
 attestations. The report accounts for logical, deduplicated, shared, unique, and
 duplicate compressed/expanded layer bytes and package identities across all
-five images on both platforms. Verification regenerates it rather than trusting
+six images on both platforms. Verification regenerates it rather than trusting
 editable summary data. The builder then generates exact digest/size catalog
 data and builds/tests the npm and native artifacts against those exact bytes.
-To reduce local candidate latency without overwhelming Docker, the five BuildKit
+To reduce local candidate latency without overwhelming Docker, the six BuildKit
 image jobs run with a fixed limit of two. Exact-artifact acceptance remains
 serial because those lifecycle-heavy runs share the Docker daemon; each run
 still receives a disjoint port range and unique temporary image tags. Concurrent
@@ -231,3 +237,43 @@ The command refuses paths outside its candidate/package/SBOM/native allowlist, t
 - Preserve localhost, local-Docker, one-home, capability, privilege, and network boundaries.
 - Update tests/docs with public behavior.
 - Do not add hosted workflows or register a development machine as a runner.
+
+
+## Dashboard development and v0.5 acceptance
+
+`npm run build` typechecks and bundles the static dashboard, asset server, and
+host helper. `node scripts/build-dashboard.mjs` builds only the static package;
+no Docker daemon is required. The normal bundle includes the frontend manifest,
+image context, notices and dependency evidence in npm/native artifacts. Image
+catalog schema 2 binds the sixth image to its exact asset-manifest digest.
+
+Focused dashboard tests use disposable files and loopback/mock servers. They do
+not install services or mutate managed Docker state. A complete candidate now
+requires twelve architecture-specific image scan reports. For v0.5, even the
+initial release tier requires all nine client profiles, four protocol profiles,
+and retained Linux, macOS and real iPhone dashboard evidence with OS/browser
+versions. Source browser mocks do not satisfy these physical acceptance rows.
+
+Each dashboard row records `qubiclVersion` matching the release set, exact
+`osVersion` and `browserVersion`, and the normal `passed`, `testedBy`, `testedAt`
+and hashed `evidence` fields. Native rows qualify the helper on the tested host;
+they do not extend the release tier's general platform support matrix.
+
+| Dashboard row | Required identities |
+| --- | --- |
+| `linux` | `platform: linux`, `deviceClass: desktop`, `architecture: x64`, `serviceManager: systemd-user`, `serviceIdentifier: org.qubicl.dashboard.<16hex>.service` |
+| `macos` | `platform: macos`, `deviceClass: desktop`, `architecture: arm64`, `serviceManager: launch-agent`, `serviceIdentifier: org.qubicl.dashboard.<16hex>` |
+| `iphone` | `platform: ios`, `deviceClass: phone`, `browserName: safari`, an iPhone `deviceModel`, and `physicalDevice: true` |
+
+Native rows also record `tlsHostname`, `tlsProtocol` (`TLSv1.2` or `TLSv1.3`)
+and `certificateFingerprint256` (`sha256:<64 lowercase hex digits>`). Their
+checks include `helperServicePassed`, `tlsPassed`
+and `physicalRebootPassed`, plus keyboard navigation and all six common UI
+checks. The iPhone row requires touch navigation and `physicalDevicePassed`
+alongside the common checks. The initial tier's Linux platform row must also
+pass its physical reboot check. Missing or false qualification results fail
+acceptance; retain the actual service, TLS and reboot observations in the
+referenced evidence rather than filling fields from source tests.
+
+See [dashboard operations](dashboard.md) and the
+[host-management decision](decisions/0001-host-owned-dashboard.md).

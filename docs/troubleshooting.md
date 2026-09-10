@@ -230,3 +230,20 @@ Review the doctor JSON before sharing it and include only the fields needed to
 reproduce the failure. Qubicl does not upload reports automatically.
 
 Remove bearer tokens, `secrets.yaml`, viewer tickets, private URLs/data, home contents, and unrelated host paths. Security reports use the private process in [SECURITY.md](../SECURITY.md), not a public issue.
+
+
+## Dashboard and interrupted operations
+
+If `qubicl-admin.localhost` does not resolve to loopback, add a local mapping
+using your operating system's normal hosts/DNS tools. Qubicl will not substitute
+a gateway hostname. If a user service is unavailable, use `qubicl dashboard
+serve` in a local terminal. Start Docker yourself when needed. The helper's
+embedded authenticated local recovery page can inspect status and review
+recorded recovery while the frontend is unavailable.
+
+Use `qubicl recover` for recorded state, lifecycle, backup and upgrade recovery. It does not
+replay an arbitrary previous browser request. Inspect Operations and current
+state before preparing a replacement request for an unconfirmed result. Reset a
+forgotten password with `qubicl dashboard password reset` at the local terminal;
+use `qubicl dashboard sessions revoke-all` to invalidate administrator sessions.
+See [dashboard operations](dashboard.md) for TLS, startup and supported-host limits.

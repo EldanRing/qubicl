@@ -8,7 +8,7 @@ Qubicl has one durable computer boundary: the bind-mounted `/home`.
 | --- | --- | --- |
 | Files under `/home` | Yes | Host path: `~/.qubicl/computers/<uuid>/home`. |
 | Chromium profile | Yes | Cookies, site data, preferences, history, and sessions live under the computer's `/home`; the viewer identifies the profile as durable. |
-| UUID, name, preset, capabilities, exact image identity, CPU, memory | Yes | State format 3 in protected host configuration. |
+| UUID, name, preset, capabilities, exact image identity, CPU, memory | Yes | State format 4 in protected host configuration. |
 | External token/internal credentials | Until rotation/delete | Raw values exist only in mode-`0600` host state. |
 | Optional remote-gateway exposure | Until revoked | Host-local bind, TLS identity metadata, trusted origins, and network policy are durable; copied certificate and key material remain in protected host state. |
 | Runtime roots and system packages | No guarantee | Recreation discards them. Use a custom image. |
@@ -128,3 +128,43 @@ qubicl backup prune research --keep 5 --yes
 ```
 
 `--stopped` requires the source computer to be stopped. Optional `--encrypt --passphrase-file FILE` uses a local passphrase without persisting it in Qubicl state. Archives have checksummed manifests, explicit retention, and contain only the durable home—not runtime roots, credentials, or gateway TLS state. Verification and restore copy the exact archive through a no-follow, size-bounded descriptor, validate its complete regular-file/directory/confined-link graph, repeat the metadata and byte identity checks during extraction, and no-follow walk the staged tree before promotion. Traversal, duplicate or canonically aliased paths, cycles, special or sparse entries, unsafe permissions, and over-budget metadata or expansion fail closed. Migration snapshots are not backups of computer homes, and secret-free `export` intentionally omits credentials, gateway exposure, and file contents. A separate private backup of the complete state root is still required for disaster recovery of computer identities, tokens, policies, SSH keys, remote-gateway TLS material, and trash.
+
+
+## State format 4 and management recovery
+
+Migration to format 4 requires explicit setup/dashboard-enable approval and
+retains protected checksummed prior state under `backups`. An old CLI must not
+write migrated state; it refuses the newer format. Dashboard schema-1 documents
+are independent of the core schema. Preserve their password verifier and TLS
+material when protecting a full offline state copy.
+
+Backup creation writes `runtime/backup-create.json` before pausing exact
+container IDs and stages the archive before publication. Recovery resumes only
+those verified identities and discards incomplete captures. Upgrade-all writes
+`runtime/upgrade-all.json` before acquisition, records completed checkpoints,
+and validates the original catalog/platform/targets and pending container
+bindings before continuing. Start, stop and restart write
+`runtime/computer-lifecycle.json` before changing computer containers. Recovery
+of retained groups requires the same immutable container identities, including
+when only part of a group reached the requested state. Run
+`qubicl recover` to review and resume recorded recovery. Unrelated mutations
+are blocked while these journals require attention. Read-only backup listing
+and verification do not resume paused computers.
+
+Global `up` and `down` remain retry-based Compose operations; they do not have
+a single project-wide lifecycle journal or atomic rollback. If an individual
+computer journal is pending, recover it explicitly before retrying a global
+operation. Durable homes are preserved across these operations.
+
+Dashboard acceptance receipts do not contain request bodies, passwords or
+credential values. A browser disconnect leaves accepted work running. A helper
+restart never blindly replays a request: recorded effects require recovery and
+an unjournaled interrupted result remains unconfirmed. Recovery preserves the
+history of that distinction. The dashboard retains the newest 500 terminal
+operation records and preserves unresolved recovery records.
+
+Home archives are not full-installation exports. For host loss, retain a
+protected offline copy of core config/secrets, dashboard state, durable homes,
+backup/migration evidence and pending journals. Reinstall a compatible CLI and
+review restored identities before starting resources. Do not merge arbitrary
+old/new journals or downgrade a migrated live state directory.

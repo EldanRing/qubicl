@@ -144,6 +144,12 @@ async function handleExecutor(
     case 'POST /v1/process/terminate-owner':
       send(response, 200, await processes.terminateOwner(body.owner === undefined ? undefined : proof(body.owner)));
       return;
+    case 'GET /v1/process/management-list':
+      send(response, 200, processes.listForManagement());
+      return;
+    case 'POST /v1/process/management-stop':
+      send(response, 200, await processes.stopForManagement(processId(body.id)));
+      return;
     case 'GET /v1/ports':
       send(response, 200, { ports: await discoverListeningPorts(requiredIdentity('QUBICL_HOST_UID')) });
       return;
@@ -255,6 +261,11 @@ function browserMethod(value: unknown): BrowserMethod {
 function string(value: unknown, name: string): string {
   if (typeof value !== 'string') throw new QubiclError('invalid_arguments', `${name} must be a string.`);
   return value;
+}
+function processId(value: unknown): string {
+  const id = string(value, 'id');
+  if (!/^[A-Za-z0-9_-]{16}$/u.test(id)) throw new QubiclError('invalid_arguments', 'id must be a managed process identifier.');
+  return id;
 }
 function stringArray(value: unknown, name: string): string[] {
   if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) throw new QubiclError('invalid_arguments', `${name} must be an array of strings.`);

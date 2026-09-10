@@ -8,13 +8,23 @@ export type LeaseProof = z.infer<typeof LeaseProofSchema>;
 type Lease = LeaseProof & {
   expiresAt: number;
   durationMs: number;
+  actor?: LeaseActor;
 };
+
+export type LeaseActorProtocol = 'mcp' | 'openapi' | 'open-terminal';
+
+/** Display-only caller attribution. The label is supplied by the client and must never authorize an action. */
+export interface LeaseActor {
+  protocol: LeaseActorProtocol;
+  untrustedLabel: string;
+}
 
 export interface LeaseSnapshot {
   epoch: string;
   generation: number;
   controller: 'none' | 'agent' | 'human';
   expiresAt?: string;
+  actor?: LeaseActor;
 }
 
 export interface LeaseRevocationReport {
@@ -50,10 +60,11 @@ export class LeaseManager {
       controller: this.human ? 'human' : this.lease ? 'agent' : 'none',
     };
     if (this.lease) base.expiresAt = new Date(this.lease.expiresAt).toISOString();
+    if (this.lease?.actor) base.actor = { ...this.lease.actor };
     return base;
   }
 
-  acquire(durationSeconds: number): LeaseProof & { expiresAt: string } {
+  acquire(durationSeconds: number, actor?: LeaseActor): LeaseProof & { expiresAt: string } {
     this.expireIfNeeded();
     if (this.revocation) throw new QubiclError('lease_transition', 'The previous controller is still being fenced; retry shortly.', 409);
     if (this.human) throw new QubiclError('human_control_active', 'A human currently controls this computer.', 409);
@@ -66,6 +77,7 @@ export class LeaseManager {
       epoch: this._epoch,
       expiresAt: Date.now() + durationMs,
       durationMs,
+      ...(actor ? { actor: validateLeaseActor(actor) } : {}),
     };
     this.armTimer();
     return this.publicLease(this.lease);
@@ -228,4 +240,18 @@ export class LeaseManager {
 
 function sameProof(left: LeaseProof, right: LeaseProof): boolean {
   return left.id === right.id && left.generation === right.generation && left.epoch === right.epoch;
+}
+
+function validateLeaseActor(actor: LeaseActor): LeaseActor {
+  if (!['mcp', 'openapi', 'open-terminal'].includes(actor.protocol)
+    || typeof actor.untrustedLabel !== 'string'
+    || actor.untrustedLabel.length < 1
+    || actor.untrustedLabel.length > 120
+    || [...actor.untrustedLabel].some((character) => {
+      const code = character.codePointAt(0)!;
+      return code <= 0x1f || code === 0x7f;
+    })) {
+    throw new QubiclError('invalid_arguments', 'Lease actor attribution is invalid.', 400);
+  }
+  return { protocol: actor.protocol, untrustedLabel: actor.untrustedLabel };
 }

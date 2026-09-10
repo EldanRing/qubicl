@@ -8,12 +8,13 @@ import type { z } from 'zod';
 import { QubiclError } from './errors.js';
 import { creationTime, mapFileSystemError, type FileErrorContext } from './file-errors.js';
 import { DesktopApplicationManager } from './desktop-applications.js';
-import { LeaseManager, type LeaseProof } from './lease.js';
+import { LeaseManager, type LeaseActor, type LeaseProof } from './lease.js';
 import {
   ProcessManager,
   type CompatibilityProcessOutput,
   type CompatibilityProcessSummary,
   type CompatibilityStatusOptions,
+  type ManagementProcessSummary,
   type ProcessOutputMode,
   type StopSignal,
 } from './processes.js';
@@ -24,7 +25,7 @@ import { BrowserManager, type BrowserComputerAction, type BrowserMouseButton, ty
 import { desktopHelperEnvironment } from './environments.js';
 import { RemoteBrokerManager, RemoteBrowserManager, RemoteDesktopApplicationManager, RemoteDesktopManager, RemotePortManager, RemoteProcessManager, RemoteWebManager, type RemoteProcessStatus } from './remote-runners.js';
 import { discoverListeningPorts } from './ports.js';
-import { PreviewManager, previewAccessFileSource, type PortSource } from './previews.js';
+import { PreviewManager, previewAccessFileSource, type ManagementPreviewSummary, type ManagementPreviewTicket, type PortSource } from './previews.js';
 import { AuditLog, contentAuditMetadata, toolAuditMetadata } from './audit.js';
 import { SkillManager } from './skills.js';
 import { RuntimePolicy } from './policy.js';
@@ -62,8 +63,27 @@ type ProcessController = Pick<ProcessManager,
 > & {
   count(): number | Promise<number>;
   listCompatibility(owner: LeaseProof): ReturnType<ProcessManager['listCompatibility']> | Promise<ReturnType<ProcessManager['listCompatibility']>>;
+  listForManagement(): ReturnType<ProcessManager['listForManagement']> | Promise<ReturnType<ProcessManager['listForManagement']>>;
+  stopForManagement(id: string): ReturnType<ProcessManager['stopForManagement']>;
   status?(): Promise<RemoteProcessStatus>;
 };
+
+export interface ToolCallContext {
+  leaseActor?: LeaseActor;
+}
+
+export interface OperatorControllerSnapshot {
+  kind: 'none' | 'agent' | 'human';
+  generation: number;
+  expiresAt?: string;
+  actor?: LeaseActor;
+}
+
+export interface OperatorManagementStatus {
+  controller: OperatorControllerSnapshot;
+  managedProcesses: number;
+  activePreviews: number;
+}
 type DesktopApplicationController = Pick<DesktopApplicationManager, 'open' | 'close' | 'shutdown'> & {
   list(): ReturnType<DesktopApplicationManager['list']> | Promise<ReturnType<DesktopApplicationManager['list']>>;
   count(): number | Promise<number>;
@@ -156,10 +176,10 @@ export class ToolExecutor {
     });
   }
 
-  async call(name: ToolName, rawInput: unknown): Promise<unknown> {
+  async call(name: ToolName, rawInput: unknown, context: ToolCallContext = {}): Promise<unknown> {
     const started = Date.now();
     try {
-      const result = annotateUntrustedToolResult(name, await this.executeCall(name, rawInput));
+      const result = annotateUntrustedToolResult(name, await this.executeCall(name, rawInput, context));
       this.audit.record({ type: 'tool', tool: name, status: 'ok', durationMs: Date.now() - started, ...toolAuditMetadata(name, (rawInput ?? {}) as Record<string, unknown>), ...contentAuditMetadata(result) });
       return result;
     } catch (error) {
@@ -168,7 +188,7 @@ export class ToolExecutor {
     }
   }
 
-  private async executeCall(name: ToolName, rawInput: unknown): Promise<unknown> {
+  private async executeCall(name: ToolName, rawInput: unknown, context: ToolCallContext): Promise<unknown> {
     if (!this.policy.isToolEnabled(name)) throw new QubiclError('capability_unsupported', `Tool ${name} is not supported because it is disabled by this computer's operator policy or capability contract.`, 404);
     const schema = toolDefinitions[name].input as z.ZodType<ToolInput>;
     const parsed = schema.safeParse(rawInput ?? {});
@@ -225,7 +245,7 @@ export class ToolExecutor {
         };
       }
       case 'acquire_lease':
-        return this.leases.acquire(input.durationSeconds as number);
+        return this.leases.acquire(input.durationSeconds as number, context.leaseActor);
       case 'renew_lease':
         return this.leases.renew(input.lease as LeaseProof, input.durationSeconds as number);
       case 'release_lease':
@@ -464,6 +484,35 @@ export class ToolExecutor {
   }
 
   enabledToolNames(): ToolName[] { return this.policy.enabledTools(); }
+
+  async operatorManagementStatus(): Promise<OperatorManagementStatus> {
+    const { epoch: _epoch, controller: kind, ...snapshot } = this.leases.snapshot();
+    return {
+      controller: { kind, ...snapshot },
+      managedProcesses: await this.processes.count(),
+      activePreviews: this.previews.listForManagement().length,
+    };
+  }
+
+  async operatorManagementProcesses(): Promise<{ items: ManagementProcessSummary[] }> {
+    return { items: await this.processes.listForManagement() };
+  }
+
+  operatorManagementPreviews(): { items: ManagementPreviewSummary[] } {
+    return { items: this.previews.listForManagement() };
+  }
+
+  stopOperatorManagedProcess(id: string): Promise<{ id: string; status: 'stopped' }> {
+    return this.processes.stopForManagement(id);
+  }
+
+  revokeOperatorPreview(id: string): { id: string; status: 'revoked' } {
+    return this.previews.revokeForManagement(id);
+  }
+
+  openOperatorPreview(id: string, access: 'local' | 'remote'): ManagementPreviewTicket {
+    return this.previews.openForManagement(id, access);
+  }
 
   compatibilityProcessList(proof: LeaseProof): Promise<CompatibilityProcessSummary[]> {
     return this.compatibilityOperation('exec_command', 'process-list', proof, async (owner) => this.processes.listCompatibility(owner));

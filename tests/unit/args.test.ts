@@ -65,3 +65,11 @@ test('skills enable supports both an import flag and a policy value', () => {
   assert.equal(parseArgs(['--enable', 'plan']).options.get('enable'), 'plan');
   assert.equal(parseArgs(['--enable=plan']).options.get('enable'), 'plan');
 });
+
+
+test('dashboard foreground and isolated asset port options are parsed without consuming actions', () => {
+  const parsed = parseArgs(['enable', '--foreground', '--asset-port', '4321']);
+  assert.deepEqual(parsed.positionals, ['enable']);
+  assert.equal(parsed.options.get('foreground'), true);
+  assert.equal(parsed.options.get('asset-port'), '4321');
+});

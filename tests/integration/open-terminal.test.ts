@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { createServer } from 'node:http';
-import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { createServer, type Server } from 'node:http';
+import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -20,7 +20,7 @@ import { RemoteProcessManager } from '../../packages/control/dist/remote-runners
 const execFileAsync = promisify(execFile);
 
 test('Open Terminal compatibility provides native files through a transparent fenced lease', async (context) => {
-  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-'));
+  const home = await canonicalTemporary('qubicl-open-terminal-');
   const previewTarget = createServer((request, response) => {
     response.writeHead(200, { 'content-type': 'text/plain' });
     response.end(`published:${request.url}`);
@@ -70,8 +70,8 @@ test('Open Terminal compatibility provides native files through a transparent fe
   context.after(async () => {
     await compatibility.shutdown();
     await executor.shutdown();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await new Promise<void>((resolve) => previewTarget.close(() => resolve()));
+    await closeServer(server);
+    await closeServer(previewTarget);
     await rm(home, { recursive: true, force: true });
   });
 
@@ -425,7 +425,7 @@ test('Open Terminal compatibility provides native files through a transparent fe
 });
 
 test('Open Terminal direct file routes stay descriptor-anchored during deterministic pathname swaps', async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-races-'));
+  const directory = await canonicalTemporary('qubicl-open-terminal-races-');
   const home = join(directory, 'home');
   const outside = join(directory, 'outside');
   await Promise.all([mkdir(home), mkdir(outside)]);
@@ -445,7 +445,7 @@ test('Open Terminal direct file routes stay descriptor-anchored during determini
   context.after(async () => {
     await compatibility.shutdown();
     await executor.shutdown();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await closeServer(server);
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -592,7 +592,7 @@ test('Open Terminal direct file routes stay descriptor-anchored during determini
 });
 
 test('Open Terminal process aliases recheck live policy inside ToolExecutor and audit metadata without command or input content', async (context) => {
-  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-policy-'));
+  const home = await canonicalTemporary('qubicl-open-terminal-policy-');
   const work = join(home, 'work');
   await mkdir(work);
   const auditPath = join(home, 'audit.jsonl');
@@ -636,7 +636,7 @@ test('Open Terminal process aliases recheck live policy inside ToolExecutor and 
   context.after(async () => {
     await compatibility.shutdown();
     await executor.shutdown();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await closeServer(server);
     await rm(home, { recursive: true, force: true });
   });
 
@@ -693,7 +693,7 @@ test('Open Terminal process aliases recheck live policy inside ToolExecutor and 
 });
 
 test('a delayed compatibility start is fenced again when policy reload revokes its lease in flight', async (context) => {
-  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-delayed-policy-'));
+  const home = await canonicalTemporary('qubicl-open-terminal-delayed-policy-');
   let execEnabled = true;
   let actionEntered!: () => void;
   let releaseAction!: () => void;
@@ -756,7 +756,7 @@ test('a delayed compatibility start is fenced again when policy reload revokes i
 });
 
 test('ambiguous remote execute and stdin responses fence the owner without replay', async (context) => {
-  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-ambiguous-runner-'));
+  const home = await canonicalTemporary('qubicl-open-terminal-ambiguous-runner-');
   let executeCalls = 0;
   let inputCalls = 0;
   let fenced = 0;
@@ -795,7 +795,7 @@ test('ambiguous remote execute and stdin responses fence the owner without repla
 });
 
 test('an invalid remote fence acknowledgement leaves ambiguous process work fail closed', async (context) => {
-  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-invalid-fence-'));
+  const home = await canonicalTemporary('qubicl-open-terminal-invalid-fence-');
   let executeCalls = 0;
   let fenceCalls = 0;
   const server = createServer((request, response) => {
@@ -814,7 +814,7 @@ test('an invalid remote fence acknowledgement leaves ambiguous process work fail
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   context.after(async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await closeServer(server);
     await rm(home, { recursive: true, force: true });
   });
   const port = (server.address() as { port: number }).port;
@@ -836,7 +836,7 @@ test('an invalid remote fence acknowledgement leaves ambiguous process work fail
 });
 
 test('a late ambiguous start re-fences its exact expired owner and keeps a failed fence closed', async (context) => {
-  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-late-ambiguous-'));
+  const home = await canonicalTemporary('qubicl-open-terminal-late-ambiguous-');
   let executeCalls = 0;
   const fencedOwners: Array<{ id: string; generation: number; epoch: string }> = [];
   let actionEntered!: () => void;
@@ -898,7 +898,7 @@ test('remote process aliases reject invalid success bodies as ambiguous only for
     response.end(request.url?.includes('compatibility-execute') ? '{}' : '{invalid');
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  context.after(async () => new Promise<void>((resolve) => server.close(() => resolve())));
+  context.after(() => closeServer(server));
   const port = (server.address() as { port: number }).port;
   const remote = new RemoteProcessManager(`http://127.0.0.1:${port}`, 'test-key');
   await assert.rejects(
@@ -912,7 +912,7 @@ test('remote process aliases reject invalid success bodies as ambiguous only for
 });
 
 test('Open Terminal never replays execute or stdin after a post-action stale lease', async (context) => {
-  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-no-replay-'));
+  const home = await canonicalTemporary('qubicl-open-terminal-no-replay-');
   let executeCalls = 0;
   let inputCalls = 0;
   let executeEntered!: () => void;
@@ -971,7 +971,7 @@ test('Open Terminal never replays execute or stdin after a post-action stale lea
     releaseInput();
     await compatibility.shutdown();
     await executor.shutdown();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await closeServer(server);
     await rm(home, { recursive: true, force: true });
   });
 
@@ -999,7 +999,7 @@ test('Open Terminal never replays execute or stdin after a post-action stale lea
 });
 
 test('completed archive output is served from an unlinked verified descriptor and cleanup closes it', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-output-descriptor-'));
+  const home = await canonicalTemporary('qubicl-open-terminal-output-descriptor-');
   try {
     const source = join(home, 'source.txt');
     await writeFile(source, 'descriptor-bound archive');
@@ -1028,7 +1028,7 @@ test('completed archive output is served from an unlinked verified descriptor an
 });
 
 test('archive inventory streams wide trees and retains compact ancestry evidence within hard budgets', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-inventory-bounds-'));
+  const home = await canonicalTemporary('qubicl-open-terminal-inventory-bounds-');
   try {
     const wide = join(home, 'wide');
     await mkdir(wide);
@@ -1065,7 +1065,7 @@ test('archive inventory streams wide trees and retains compact ancestry evidence
 });
 
 test('archive reservations bound concurrency and release after cancellation and cleanup', async (context) => {
-  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-archive-reservations-'));
+  const home = await canonicalTemporary('qubicl-open-terminal-archive-reservations-');
   const source = join(home, 'source.txt');
   await writeFile(source, 'reserved archive');
   let entered = 0;
@@ -1122,7 +1122,7 @@ test('archive reservations bound concurrency and release after cancellation and 
 });
 
 test('an aborted archive HTTP request cancels creation and releases its reservation', async (context) => {
-  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-archive-http-abort-'));
+  const home = await canonicalTemporary('qubicl-open-terminal-archive-http-abort-');
   const source = join(home, 'source.txt');
   await writeFile(source, 'archive after abort');
   let calls = 0;
@@ -1162,7 +1162,7 @@ test('an aborted archive HTTP request cancels creation and releases its reservat
   context.after(async () => {
     await compatibility.shutdown();
     await executor.shutdown();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await closeServer(server);
     await rm(home, { recursive: true, force: true });
   });
   const controller = new AbortController();
@@ -1185,7 +1185,7 @@ test('an aborted archive HTTP request cancels creation and releases its reservat
 });
 
 test('archive temp-directory substitution cannot redirect output or recursively delete the replacement', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'qubicl-open-terminal-output-directory-'));
+  const home = await canonicalTemporary('qubicl-open-terminal-output-directory-');
   const source = join(home, 'source.txt');
   await writeFile(source, 'pinned archive directory');
   let displacedDirectory = '';
@@ -1219,4 +1219,15 @@ async function json(url: string): Promise<unknown> {
   const response = await fetch(url);
   assert.equal(response.status, 200, `${url}: ${await response.clone().text()}`);
   return response.json();
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve) => {
+    server.close(() => resolve());
+    server.closeAllConnections();
+  });
+}
+
+async function canonicalTemporary(prefix: string): Promise<string> {
+  return realpath(await mkdtemp(join(tmpdir(), prefix)));
 }

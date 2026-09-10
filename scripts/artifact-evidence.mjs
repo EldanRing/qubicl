@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { basename, isAbsolute, join, win32 } from 'node:path';
@@ -5,7 +6,7 @@ import { promisify } from 'node:util';
 import { spdxPackageKeys } from './bundle-evidence.mjs';
 
 const exec = promisify(execFile);
-const SYSTEM_IMAGES = ['gateway', 'file-system', 'browser', 'computer', 'desktop', 'workstation'];
+const SYSTEM_IMAGES = ['gateway', 'dashboard', 'file-system', 'browser', 'computer', 'desktop', 'workstation'];
 // These two identifiers are intentionally retained for v2 state migration and
 // recovery of computers created by pre-release source builds. They are not
 // packaged defaults: exact candidate catalog/default references are required
@@ -14,6 +15,14 @@ const LEGACY_DEVELOPMENT_IMAGE_REFERENCES = new Set([
   'qubicl/computer:dev',
   'qubicl/workstation:dev',
 ]);
+
+export function assertNativeBinaryPrivacy(bytes, forbiddenPaths) {
+  assert(Buffer.isBuffer(bytes) || bytes instanceof Uint8Array, 'Native binary privacy inspection requires binary bytes.');
+  const binary = Buffer.from(bytes);
+  for (const path of new Set(forbiddenPaths.filter((value) => typeof value === 'string' && value.length > 0))) {
+    assert(!binary.includes(Buffer.from(path)), 'Native executable embeds a private build path.');
+  }
+}
 
 export async function inspectReleaseArchive(archive, expectedRoot) {
   const archiveStat = await import('node:fs/promises').then(({ lstat }) => lstat(archive));
@@ -64,6 +73,11 @@ export async function assertNpmArtifact({
     'dist/SBOM.spdx.json',
     'dist/assets/image-catalog.json',
     'dist/assets/gateway/Dockerfile',
+    'dist/assets/dashboard/Dockerfile',
+    'dist/assets/dashboard/LICENSE',
+    'dist/assets/dashboard/server.mjs',
+    'dist/assets/dashboard/asset-manifest.json',
+    'dist/assets/dashboard/public/index.html',
     'dist/assets/computer/Dockerfile',
   ]) assert(files.includes(required), `Packed npm candidate is missing ${required}.`);
   assert(files.every((path) => ['package.json', 'README.md', 'LICENSE'].includes(path) || path.startsWith('dist/')), 'Packed npm candidate has a file outside its canonical package/dist layout.');
@@ -78,6 +92,7 @@ export async function assertNpmArtifact({
   const catalogText = await readFile(join(root, 'dist', 'assets', 'image-catalog.json'), 'utf8');
   assert(catalogText === expectedCatalogText, 'The staged npm archive embeds a different image catalog.');
   const catalog = JSON.parse(catalogText);
+  await assertDashboardAssetBundle(root, files, 'dist/assets/dashboard', catalog);
   const sbomPath = join(root, 'dist', 'SBOM.spdx.json');
   assert(await readFile(sbomPath, 'utf8') === await readFile(expectedSbomPath, 'utf8'), 'The staged npm archive embeds a different SPDX document.');
   await assertSbomEvidence(sbomPath, join(root, 'dist', 'THIRD_PARTY_NOTICES.txt'), {
@@ -153,6 +168,11 @@ export async function assertNativeArtifact({
     'THIRD_PARTY_NOTICES.txt',
     'SBOM.spdx.json',
     'assets/image-catalog.json',
+    'assets/dashboard/Dockerfile',
+    'assets/dashboard/LICENSE',
+    'assets/dashboard/server.mjs',
+    'assets/dashboard/asset-manifest.json',
+    'assets/dashboard/public/index.html',
   ]) assert(files.includes(required), `Native candidate is missing ${required}.`);
   const nativeRoots = new Set(['qubicl', 'LICENSE', 'NODE_LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.txt', 'SBOM.spdx.json']);
   assert(files.every((path) => nativeRoots.has(path) || path.startsWith('assets/')), 'Native candidate has a file outside its canonical executable/evidence/assets layout.');
@@ -169,6 +189,7 @@ export async function assertNativeArtifact({
   const catalogText = await readFile(join(root, 'assets', 'image-catalog.json'), 'utf8');
   assert(catalogText === expectedCatalogText, 'The staged native archive embeds a different image catalog.');
   const catalog = JSON.parse(catalogText);
+  await assertDashboardAssetBundle(root, files, 'assets/dashboard', catalog);
   const sbomPath = join(root, 'SBOM.spdx.json');
   assert(await readFile(sbomPath, 'utf8') === await readFile(expectedSbomPath, 'utf8'), 'The staged native archive embeds a different SPDX document.');
   await assertSbomEvidence(sbomPath, join(root, 'THIRD_PARTY_NOTICES.txt'), {
@@ -206,8 +227,15 @@ export async function assertSbomEvidence(sbomPath, noticePath, {
 
   const noticeKeys = thirdPartyNoticeKeys(await readFile(noticePath, 'utf8'));
   const componentKeys = spdxPackageKeys(document);
-  const expected = nativeNodeVersion ? [...noticeKeys, `node@${nativeNodeVersion}`].sort() : noticeKeys;
+  const dashboardKey = `qubicl-dashboard@${version}`;
+  assert(!noticeKeys.includes(dashboardKey), 'The first-party dashboard must not be listed as a third-party dependency.');
+  const expected = [
+    ...noticeKeys,
+    dashboardKey,
+    ...(nativeNodeVersion ? [`node@${nativeNodeVersion}`] : []),
+  ].sort();
   assert(equalArrays(componentKeys, expected), 'Artifact SBOM components do not match THIRD_PARTY_NOTICES.txt.');
+  assert(componentKeys.includes(dashboardKey), 'Artifact SBOM omits the first-party dashboard.');
   assert(componentKeys.some((key) => key.startsWith('@modelcontextprotocol/node@')), 'Artifact SBOM omits @modelcontextprotocol/node.');
   assert(componentKeys.some((key) => key.startsWith('@hono/node-server@')), 'Artifact SBOM omits @hono/node-server.');
   assert(!componentKeys.some((key) => key.startsWith('@modelcontextprotocol/client@')), 'Artifact SBOM includes test-only @modelcontextprotocol/client.');
@@ -216,8 +244,11 @@ export async function assertSbomEvidence(sbomPath, noticePath, {
 export async function assertCompiledCandidateRefs(path, catalog, { version, revision, artifact }) {
   const contents = await readFile(path);
   const required = new Set([version, revision]);
+  assert(/^[a-f0-9]{64}$/u.test(catalog.dashboard?.assetManifestSha256 ?? ''), `${artifact} catalog lacks the dashboard asset-manifest digest.`);
+  required.add(catalog.dashboard?.assetManifestSha256);
   for (const preset of Object.values(catalog.presets ?? {})) required.add(preset.manifestSha256);
-  for (const image of [catalog.gateway, ...Object.values(catalog.presets ?? {}).map((preset) => preset.image)]) {
+  for (const image of [catalog.gateway, catalog.dashboard?.image, ...Object.values(catalog.presets ?? {}).map((preset) => preset.image)]) {
+    assert(image && typeof image === 'object', `${artifact} catalog is missing a required image.`);
     required.add(image.requested);
     required.add(image.indexDigest);
     for (const variant of Object.values(image.platforms ?? {})) {
@@ -235,6 +266,37 @@ export async function assertCompiledCandidateRefs(path, catalog, { version, revi
       assert(!text.includes(reference), `${artifact} embeds a development system-image reference for ${image}.`);
     }
   }
+}
+
+async function assertDashboardAssetBundle(root, files, prefix, catalog) {
+  assert(catalog.dashboard?.protocolVersion === 1, 'Candidate catalog has the wrong dashboard protocol version.');
+  assert(/^[a-f0-9]{64}$/u.test(catalog.dashboard.assetManifestSha256 ?? ''), 'Candidate catalog lacks the dashboard asset-manifest digest.');
+  const manifestBytes = await readFile(join(root, prefix, 'asset-manifest.json'));
+  const digest = createHash('sha256').update(manifestBytes).digest('hex');
+  assert(digest === catalog.dashboard.assetManifestSha256, 'Packaged dashboard asset manifest does not match the candidate catalog.');
+  const manifest = JSON.parse(manifestBytes.toString('utf8'));
+  assert(manifest?.schemaVersion === 1 && manifest.entrypoint === '/index.html' && Array.isArray(manifest.assets) && manifest.assets.length > 0,
+    'Packaged dashboard asset manifest is invalid.');
+  const paths = new Set();
+  for (const asset of manifest.assets) {
+    assert(asset && typeof asset === 'object'
+      && /^\/(?:index\.html|assets\/[A-Za-z0-9._-]+)$/u.test(asset.path ?? '')
+      && /^[a-f0-9]{64}$/u.test(asset.sha256 ?? '')
+      && Number.isSafeInteger(asset.bytes) && asset.bytes >= 0,
+    'Packaged dashboard asset manifest contains an invalid asset.');
+    assert(!paths.has(asset.path), `Packaged dashboard asset manifest repeats ${asset.path}.`);
+    paths.add(asset.path);
+    const relative = `${prefix}/public${asset.path}`;
+    assert(files.includes(relative), `Candidate is missing dashboard asset ${relative}.`);
+    const bytes = await readFile(join(root, relative));
+    assert(bytes.byteLength === asset.bytes
+      && createHash('sha256').update(bytes).digest('hex') === asset.sha256,
+    `Candidate dashboard asset ${asset.path} does not match its manifest.`);
+  }
+  const publicFiles = files.filter((path) => path.startsWith(`${prefix}/public/`))
+    .map((path) => path.slice(`${prefix}/public`.length))
+    .sort();
+  assert(equalArrays(publicFiles, [...paths].sort()), 'Candidate dashboard public assets are not exactly manifest-listed.');
 }
 
 async function assertExecutableTarget(path, target) {
