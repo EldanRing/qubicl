@@ -563,7 +563,7 @@ try {
   const handoffFocus = await call('control_computer', { lease: workingLease, action: { type: 'type', text: '' } });
   const handoffWindowId = handoffFocus.focusEvidence.after.id;
   assert.equal(Number.isSafeInteger(handoffWindowId), true);
-  const humanProcess = await call('exec_command', { lease: workingLease, command: 'sleep 300', yieldTimeMs: 25 });
+  const humanProcess = await call('exec_command', { lease: workingLease, command: 'sleep 300', lifecycle: 'session', yieldTimeMs: 25 });
   assert.equal(humanProcess.running, true);
   const ticketResponse = await fetch(`${base}/view-ticket`, { method: 'POST', headers: { authorization: `Bearer ${token}` } });
   const ticket = await ticketResponse.json();
@@ -575,8 +575,8 @@ try {
   assert.equal(viewer.ok, true);
   const viewerDocument = await viewer.text();
   assert.match(viewerDocument, /view_only=true/);
-  assert.match(viewerDocument, /Take control stops agent commands\. Desktop-session applications and the managed browser stay open\./);
-  assert.match(viewerDocument, /Closing this viewer releases control after 10 seconds\./);
+  assert.match(viewerDocument, /Take control fences agent interactive input\. Background tasks, services, desktop applications, and the managed browser stay open\./);
+  assert.match(viewerDocument, /A disconnected controlling viewer has 10 seconds to reconnect\./);
   assert.match(viewerDocument, /Agent pointer: on/);
   const pointerResponse = await fetch(`${base}/view/actions?after=0`, { headers: { cookie } });
   assert.equal(pointerResponse.ok, true);
