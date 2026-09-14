@@ -236,7 +236,7 @@ try {
     test "$(stat -c %a "$keyring_password")" = 600
     runuser -u qubicl -- test -r "$keyring_password" -a -w "$keyring_password"
     grep -Eq '^[A-Za-z0-9+/]{43}=$' "$keyring_password"
-    pgrep -x gnome-keyring-daemon >/dev/null
+    pgrep -f '^gnome-keyring-daemon ' >/dev/null
     ! pgrep -x gcr-prompter >/dev/null
   `]);
   await commandCli(['stop', browserContract.name]);
