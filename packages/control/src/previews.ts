@@ -79,6 +79,7 @@ const MAX_FILE_PUBLICATIONS = 64;
 const MAX_MANAGEMENT_TICKETS = 128;
 const MAX_MANAGEMENT_SESSIONS = 256;
 const MANAGEMENT_TICKET_TTL_MS = 60_000;
+const PORT_MONITOR_INTERVAL_MS = 2_000;
 const FILE_PREVIEW_CSP = [
   'sandbox',
   "default-src 'none'",
@@ -104,7 +105,7 @@ export class PreviewManager {
   private readonly activeConnections = new Map<string, Set<{ destroy(error?: Error): void }>>();
   private readonly expiryTimers = new Map<string, NodeJS.Timeout>();
   private readonly shareExpiryTimers = new Map<string, NodeJS.Timeout>();
-  private readonly portMonitor: NodeJS.Timeout;
+  private portMonitor: NodeJS.Timeout | undefined;
 
   constructor(
     private readonly ports: PortSource,
@@ -113,10 +114,7 @@ export class PreviewManager {
     private readonly internalBaseUrl: string,
     private readonly remoteBaseUrl?: string,
     private readonly accessSource?: PreviewAccessSource,
-  ) {
-    this.portMonitor = setInterval(() => { void this.removeStoppedPortPublications(); }, 2_000);
-    this.portMonitor.unref();
-  }
+  ) {}
 
   listPorts(): Promise<ListeningPort[]> { return this.ports.listPorts(); }
 
@@ -197,6 +195,7 @@ export class PreviewManager {
       createdAt: now.toISOString(),
     };
     this.publications.set(id, publication);
+    this.schedulePortMonitor();
     const access = this.previewAccess();
     const legacyShare = legacyShareExpiresInSeconds !== undefined && access.remoteBaseUrl
       ? this.share(id, legacyShareExpiresInSeconds)
@@ -300,6 +299,7 @@ export class PreviewManager {
       this.closeConnections(id);
       this.clearExpiry(id);
       this.clearShareExpiry(id);
+      this.stopPortMonitorWhenIdle();
     }
     return removed;
   }
@@ -307,6 +307,7 @@ export class PreviewManager {
     for (const id of [...this.publications.keys()]) this.unpublish(id);
     this.managementTickets.clear();
     this.managementSessions.clear();
+    this.stopPortMonitor();
   }
 
   handle(request: IncomingMessage, response: ServerResponse, url: URL): boolean {
@@ -613,6 +614,28 @@ export class PreviewManager {
     for (const publication of this.publications.values()) {
       if (publication.kind === 'port' && !activePorts.has(publication.port)) this.unpublish(publication.id);
     }
+  }
+
+  private schedulePortMonitor(): void {
+    if (this.portMonitor || ![...this.publications.values()].some(({ kind }) => kind === 'port')) return;
+    const timer = setTimeout(() => {
+      void this.removeStoppedPortPublications().finally(() => {
+        if (this.portMonitor === timer) this.portMonitor = undefined;
+        this.schedulePortMonitor();
+      });
+    }, PORT_MONITOR_INTERVAL_MS);
+    timer.unref();
+    this.portMonitor = timer;
+  }
+
+  private stopPortMonitorWhenIdle(): void {
+    if ([...this.publications.values()].some(({ kind }) => kind === 'port')) return;
+    this.stopPortMonitor();
+  }
+
+  private stopPortMonitor(): void {
+    if (this.portMonitor) clearTimeout(this.portMonitor);
+    this.portMonitor = undefined;
   }
 
   private trackConnections(id: string, scope: PreviewConnectionScope, ...connections: Array<{ destroy(error?: Error): void }>): () => void {

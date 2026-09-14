@@ -52,8 +52,12 @@ test('preview publication adds a remote URL without replacing existing local and
 
 test('owner previews follow the listener while remote shares rotate and revoke independently', async () => {
   let listening = true;
+  let portInspections = 0;
   const manager = new PreviewManager(
-    { listPorts: async () => listening ? [{ port: 3000, address: 'loopback', protocol: 'tcp' }] : [] },
+    { listPorts: async () => {
+      portInspections += 1;
+      return listening ? [{ port: 3000, address: 'loopback', protocol: 'tcp' }] : [];
+    } },
     '127.0.0.1',
     localBase,
     internalBase,
@@ -75,6 +79,9 @@ test('owner previews follow the listener while remote shares rotate and revoke i
   listening = false;
   await new Promise((resolve) => setTimeout(resolve, 2_100));
   assert.deepEqual(manager.list(), []);
+  const inspectionsAfterRemoval = portInspections;
+  await new Promise((resolve) => setTimeout(resolve, 2_100));
+  assert.equal(portInspections, inspectionsAfterRemoval);
 });
 
 test('preview publication reads expose, rotate, and revoke state dynamically', async () => {

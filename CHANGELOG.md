@@ -127,6 +127,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 - Managed Chromium initializes and unlocks its durable Secret Service with a
   per-computer credential, so first navigation cannot stall behind an invisible
   keyring password prompt.
+- Preview listener monitoring now runs only while a port preview exists, stops
+  after the last publication is removed, and never overlaps its own checks.
 
 ### Security
 
