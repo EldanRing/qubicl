@@ -13,9 +13,12 @@ paths = [
 ]
 
 [[allowlists]]
-description = "RFC 6455 sample WebSocket nonce used by the gateway integration test"
+description = "RFC 6455 sample WebSocket nonce used by gateway and end-to-end tests"
 condition = "AND"
-paths = ['''(^|/)tests/integration/gateway\.test\.ts$''']
+paths = [
+  '''(^|/)tests/integration/gateway\.test\.ts$''',
+  '''(^|/)tests/e2e/run\.mjs$'''
+]
 regexTarget = "line"
 regexes = ['''Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==''']
 
