@@ -10,7 +10,7 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { initializeState, statePaths } from '../../packages/cli/dist/state.js';
 import { portAvailable } from '../../packages/cli/dist/docker.js';
-import { CORE_SKILL_IDS, defaultCatalogSkillsForCompatibility, enabledToolNames, PRESET_DEFINITIONS, UNTRUSTED_RESULT_TAG } from '../../packages/core/dist/index.js';
+import { CORE_SKILL_IDS, defaultCatalogSkillsForCompatibility, enabledToolNames, PRESET_DEFINITIONS, STATE_FORMAT_VERSION, UNTRUSTED_RESULT_TAG } from '../../packages/core/dist/index.js';
 import {
   containerName,
   controlNetwork,
@@ -70,7 +70,7 @@ try {
   }).then(() => undefined, (error) => error);
   assert.match(interruptedMigration?.stderr ?? '', /Simulated state migration interruption after config-written/);
   assert.equal((await stat(paths.migration)).mode & 0o777, 0o600);
-  assert.equal(YAML.parse(await readFile(paths.config, 'utf8')).version, 4);
+  assert.equal(YAML.parse(await readFile(paths.config, 'utf8')).version, STATE_FORMAT_VERSION);
   assert.equal(YAML.parse(await readFile(paths.secrets, 'utf8')).version, 1);
   const interruptedConfigRaw = await readFile(paths.config, 'utf8');
   const interruptedSecretsRaw = await readFile(paths.secrets, 'utf8');
@@ -85,8 +85,8 @@ try {
   const explicitSetup = ['setup', '--preset', 'workstation', '--gateway-port', `${initializedPort}`, '--no-create', '--yes', '--offline'];
   await commandCli(explicitSetup);
   await assert.rejects(stat(paths.migration), { code: 'ENOENT' });
-  assert.equal(YAML.parse(await readFile(paths.config, 'utf8')).version, 4);
-  assert.equal(YAML.parse(await readFile(paths.secrets, 'utf8')).version, 4);
+  assert.equal(YAML.parse(await readFile(paths.config, 'utf8')).version, STATE_FORMAT_VERSION);
+  assert.equal(YAML.parse(await readFile(paths.secrets, 'utf8')).version, STATE_FORMAT_VERSION);
   const migrationBackups = await readdir(paths.backups);
   assert.ok(migrationBackups.length >= 1);
   const firstBackup = join(paths.backups, migrationBackups[0]);
@@ -104,13 +104,13 @@ try {
   assert.equal(await readFile(paths.config, 'utf8'), legacyConfigRaw);
   assert.equal(await readFile(paths.secrets, 'utf8'), legacySecretsRaw);
   await commandCli(explicitSetup);
-  assert.equal(YAML.parse(await readFile(paths.config, 'utf8')).version, 4);
-  assert.equal(YAML.parse(await readFile(paths.secrets, 'utf8')).version, 4);
+  assert.equal(YAML.parse(await readFile(paths.config, 'utf8')).version, STATE_FORMAT_VERSION);
+  assert.equal(YAML.parse(await readFile(paths.secrets, 'utf8')).version, STATE_FORMAT_VERSION);
   assert.ok((await readdir(paths.backups)).length >= 2);
 
   const state = await initializeState(paths);
   installationId = state.config.installationId;
-  assert.equal(state.config.version, 4);
+  assert.equal(state.config.version, STATE_FORMAT_VERSION);
   assert.equal(state.config.gateway.port, initializedPort);
   composePath = state.paths.compose;
   const initializedConfig = JSON.parse((await commandCli(['config', 'show'])).stdout);
