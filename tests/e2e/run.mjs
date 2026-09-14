@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
+import { connect } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -606,6 +607,7 @@ try {
   const viewerOrigin = `http://127.0.0.1:${config.gateway.port}`;
   const takeover = await fetch(`${base}/human-control/take`, { method: 'POST', headers: { cookie, origin: viewerOrigin } });
   assert.equal(takeover.ok, true);
+  const controllingViewer = await openViewerWebSocket(config.gateway.port, computer.id, cookie);
   assert.deepEqual(await takeover.json(), {
     controller: 'human',
     epoch: workingLease.epoch,
@@ -625,6 +627,7 @@ try {
   await exec('docker', ['exec', computerSessionRuntime(computer), 'xdotool', 'getwindowname', `${handoffWindowId}`]);
   const operatorRelease = await commandCli(['control', 'release', computer.name]);
   assert.match(operatorRelease.stdout, /Released human control of e2e/);
+  await waitFor(async () => controllingViewer.destroyed, 10_000);
   const afterHumanLease = await call('acquire_lease', { durationSeconds: 60 });
   assert.notEqual(afterHumanLease.generation, workingLease.generation);
   const preservedApplications = await call('list_desktop_applications', { lease: afterHumanLease });
@@ -1328,6 +1331,42 @@ async function waitFor(check, timeoutMs) {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error(`Condition did not become true within ${timeoutMs} ms.`);
+}
+
+async function openViewerWebSocket(port, id, cookie) {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, '127.0.0.1');
+    let response = '';
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error('Viewer WebSocket did not open.'));
+    }, 5_000);
+    socket.on('connect', () => socket.write([
+      `GET /computers/${id}/view/websockify HTTP/1.1`,
+      `Host: 127.0.0.1:${port}`,
+      'Connection: Upgrade',
+      'Upgrade: websocket',
+      'Sec-WebSocket-Version: 13',
+      'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+      'Sec-WebSocket-Protocol: binary',
+      `Origin: http://127.0.0.1:${port}`,
+      `Cookie: ${cookie}`,
+      '',
+      '',
+    ].join('\r\n')));
+    socket.on('data', (chunk) => {
+      response += chunk.toString();
+      if (!response.includes('\r\n\r\n')) return;
+      clearTimeout(timeout);
+      if (!response.startsWith('HTTP/1.1 101')) {
+        socket.destroy();
+        reject(new Error(`Viewer WebSocket returned: ${response.split('\r\n', 1)[0]}`));
+        return;
+      }
+      resolve(socket);
+    });
+    socket.once('error', reject);
+  });
 }
 
 function withoutExpiry(value) {
