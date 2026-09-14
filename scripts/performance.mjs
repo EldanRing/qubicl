@@ -10,7 +10,7 @@ import { computerContainerName, computerExecutorContainerName, computerResourceE
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const options = parseArgs(process.argv.slice(2));
-const iterations = options.iterations ?? 10;
+const iterations = options.iterations ?? 20;
 const cli = resolve(root, 'packages/cli/dist/qubicl.mjs');
 const timeAvailable = await stat('/usr/bin/time').then(() => true, () => false);
 
@@ -275,10 +275,10 @@ function evaluateBudgets(report) {
     // 125 ms leaves ordinary local scheduling jitter without masking regressions.
     budget('CLI help p95 milliseconds', report.cli.help.elapsedMs.p95, 125),
   ];
-  // The v0.2 Node-wrapped CLI measures about 97 MiB on the release host while
-  // the exact native artifact measures about 93 MiB. Keep modest runtime/ASLR
-  // headroom without allowing a materially larger dependency graph to land.
-  if (report.cli.help.maxRssKiB) checks.push(budget('CLI help max RSS KiB', report.cli.help.maxRssKiB.max, 104 * 1024));
+  // The complete v0.6 Node-wrapped CLI measures about 108 MiB on the release
+  // host. Keep modest runtime/ASLR headroom without allowing a materially larger
+  // dependency graph to land.
+  if (report.cli.help.maxRssKiB) checks.push(budget('CLI help max RSS KiB', report.cli.help.maxRssKiB.max, 112 * 1024));
   if (report.images.gateway.downloadBytes !== null) checks.push(budget('gateway download bytes', report.images.gateway.downloadBytes, 65_000_000));
   if (report.images.dashboard.downloadBytes !== null) checks.push(budget('dashboard download bytes', report.images.dashboard.downloadBytes, 65_000_000));
   // The universal local web service, source skill catalog, and common CLI utilities

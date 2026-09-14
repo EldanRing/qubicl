@@ -27,7 +27,7 @@ bundle. Container layers are measured separately below.
 | --- | ---: |
 | npm package | 7 MB packed |
 | CLI help p95 | 125 ms |
-| CLI help peak RSS | 104 MiB |
+| CLI help peak RSS | 112 MiB |
 | gateway image | 65 MB expanded platform content |
 | dashboard image | 65 MB expanded platform content |
 | file-system image | 205 MB |

@@ -65,6 +65,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   explicit maintainer approval gates.
 - The reviewed full-workstation tool-definition ceiling is 38 KB for the 0.6
   catalog; focused static profiles remain available to reduce client context.
+- The local CLI performance gate uses 20 samples for a meaningful p95 and a
+  reviewed 112 MiB help-process ceiling for the complete 0.6 command surface.
 
 ### Fixed
 
