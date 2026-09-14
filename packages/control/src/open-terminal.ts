@@ -556,8 +556,19 @@ export class OpenTerminalCompatibility {
       try {
         return await this.executor.call(name, { ...withoutLease, lease: proof }, { clientCredential });
       } catch (error) {
-        if (!(error instanceof QubiclError) || error.code !== 'stale_lease' || attempt > 0) throw error;
-        if (sameProof(state.proof, proof)) state.proof = undefined;
+        if (!(error instanceof QubiclError)
+          || !['stale_lease', 'background_lease'].includes(error.code)
+          || attempt > 0) throw error;
+        if (sameProof(state.proof, proof)) {
+          state.proof = undefined;
+          if (error.code === 'background_lease') {
+            try {
+              await this.executor.call('release_lease', { lease: proof }, { clientCredential });
+            } catch (releaseError) {
+              if (!(releaseError instanceof QubiclError) || releaseError.code !== 'stale_lease') throw releaseError;
+            }
+          }
+        }
       }
     }
     throw new QubiclError('stale_lease', 'The Open Terminal compatibility lease could not be renewed.', 409);

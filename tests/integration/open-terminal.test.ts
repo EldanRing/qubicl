@@ -38,6 +38,7 @@ test('Open Terminal compatibility provides native files through a transparent fe
   const browser = {
     count: () => 1,
     shutdown: async () => undefined,
+    navigate: async (url: string) => ({ url, title: url }),
     screenshot: async () => ({
       data: browserPng.toString('base64'),
       mimeType: 'image/png',
@@ -413,8 +414,31 @@ test('Open Terminal compatibility provides native files through a transparent fe
   await executor.takeHumanControl();
   const observed = await fetch(`${base}/files/list?directory=${encodeURIComponent(home)}`);
   assert.equal(observed.status, 200);
+  const backgroundWrite = await fetch(`${base}/v1/tools/write_file`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-session-id': 'takeover-recovery' },
+    body: JSON.stringify({ path: join(home, 'takeover.txt'), content: 'background work continued' }),
+  });
+  assert.equal(backgroundWrite.status, 200);
+  const blockedBrowser = await fetch(`${base}/v1/tools/browser_navigate`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-session-id': 'takeover-recovery' },
+    body: JSON.stringify({ url: 'https://example.test/during-takeover' }),
+  });
+  assert.equal(blockedBrowser.status, 409);
+  assert.match(await blockedBrowser.text(), /human_control_active/);
   executor.releaseHumanControl();
   assert.equal((await fetch(`${base}/files/list?directory=${encodeURIComponent(home)}`)).status, 200);
+  const resumedBrowser = await fetch(`${base}/v1/tools/browser_navigate`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-session-id': 'takeover-recovery' },
+    body: JSON.stringify({ url: 'https://example.test/after-takeover' }),
+  });
+  assert.equal(resumedBrowser.status, 200);
+  const resumedResult = await resumedBrowser.json() as { url: string; title: string };
+  assert.deepEqual({ url: resumedResult.url, title: resumedResult.title }, {
+    url: 'https://example.test/after-takeover', title: 'https://example.test/after-takeover',
+  });
 
   const remove = await fetch(`${base}/files/delete?path=${encodeURIComponent(join(home, 'documents'))}`, { method: 'DELETE' });
   assert.equal(remove.status, 200);
