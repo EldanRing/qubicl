@@ -124,7 +124,20 @@ npm run release:check
 
 `release:check` owns source-level checks, including source Docker E2E. Candidate
 construction later runs the exact npm and native artifacts against the selected
-image catalog; it does not repeat the source E2E. For a suspected lifecycle or
+image catalog; it does not repeat the source E2E. The artifact harness owns one
+explicit temporary Qubicl home and removes its exact Compose project and image
+namespace after success or failure. A cleanup failure is reported and preserves
+the temporary home for diagnosis instead of silently leaking Docker resources.
+
+Treat a failed aggregate gate as terminal. Record the completed commands and do
+not restart the aggregate command. After correcting an external condition, run
+only the missing command. Source E2E may set `QUBICL_E2E_SKIP_IMAGE_BUILD=1`
+only when the failed gate already built the exact development images, those
+images remain locally available, and no image input changed; then run the
+remaining token and performance checks individually. A source or image-input
+change invalidates that reuse and requires a new reviewed plan.
+
+For a suspected lifecycle or
 migration problem, inspect the bounded diagnostic plan and then run that exact
 scenario before freezing source:
 

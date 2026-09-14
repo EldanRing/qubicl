@@ -84,8 +84,13 @@ test('candidate assembly wires bounded incremental builds and isolated serial ar
   assert.match(builder, /for \(const args of acceptanceJobs\)/u);
   assert.doesNotMatch(builder, /runWithConcurrency\(acceptanceJobs/u);
   assert.match(harness, /artifactAcceptanceIsolation\(mode, temporary\)/u);
+  assert.match(harness, /QUBICL_E2E_HOME: e2eHome/u);
+  assert.match(harness, /cleanupE2eHome\(e2eHome, isolation\.imageNamespace\)/u);
+  assert.match(harness, /label=com\.docker\.compose\.project=\$\{project\}/u);
+  assert.match(harness, /reference=\$\{imageNamespace\}-custom\*/u);
   assert.match(e2e, /QUBICL_E2E_PORT_START/u);
   assert.match(e2e, /QUBICL_E2E_PORT_END/u);
   assert.match(e2e, /QUBICL_E2E_IMAGE_NAMESPACE/u);
+  assert.match(e2e, /const ownsRoot = externalRoot === undefined/u);
   assert.doesNotMatch(e2e, /qubicl\/e2e-custom(?:-|:)*/u);
 });

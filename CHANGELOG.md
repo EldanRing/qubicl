@@ -82,6 +82,11 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Artifact acceptance now gives its outer harness ownership of one explicit
+  temporary Qubicl home, removes the exact Compose project after success or
+  failure, removes its temporary image namespace, verifies that no labeled
+  Docker resources remain, and preserves the
+  diagnostic home when cleanup itself fails.
 - Release-impact evidence now includes deleted paths, scan freshness rejects
   future-dated binding/database/check-bundle metadata, and release commands stop
   after a failure instead of relying on repeated full candidate attempts.

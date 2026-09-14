@@ -291,6 +291,13 @@ loading, catalog generation, and final verification also remain serial because
 their shared caches, memory use, or ordering make additional parallelism unsafe
 or immaterial. A failed command stops. Nothing automatically starts a new
 candidate or repeatedly polls and relaunches the process.
+Artifact acceptance runs inside one explicit temporary Qubicl home. Its outer
+harness removes the exact Compose project and temporary image namespace on
+success or failure, then verifies no labeled Docker resources remain. If cleanup itself fails, the
+harness reports both failures and preserves the temporary home for diagnosis.
+Do not rerun an aggregate source gate after a late external failure: retain its
+completed evidence and execute only the missing command. Reuse locally built
+development images only when their exact inputs did not change.
 Output remains ignored under
 `release/candidates/`; there is no push, publish, tag, release, or visibility
 operation.

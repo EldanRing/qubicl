@@ -3,7 +3,7 @@ import { execFile, spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { connect } from 'node:net';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import YAML from 'yaml';
@@ -20,7 +20,13 @@ import {
 } from '../../packages/cli/dist/runtime.js';
 
 const exec = promisify(execFile);
-const root = await mkdtemp(join(homedir(), '.qubicl-e2e-'));
+const externalRoot = process.env.QUBICL_E2E_HOME;
+const root = externalRoot ? resolve(externalRoot) : await mkdtemp(join(homedir(), '.qubicl-e2e-'));
+const ownsRoot = externalRoot === undefined;
+if (externalRoot) {
+  assert.equal(externalRoot, root, 'QUBICL_E2E_HOME must be an absolute path.');
+  await mkdir(root, { recursive: true, mode: 0o700 });
+}
 const sourceCli = fileURLToPath(new URL('../../packages/cli/dist/qubicl.mjs', import.meta.url));
 const webProviderTest = fileURLToPath(new URL('./web-provider-test.py', import.meta.url));
 const cliProgram = process.env.QUBICL_E2E_CLI ?? process.execPath;
@@ -1259,11 +1265,13 @@ try {
   ].toSorted());
   console.log(`Qubicl Docker end-to-end test passed (${artifact}).`);
 } finally {
-  if (composePath) {
-    await exec('docker', ['compose', '--project-name', composeProject(), '--file', composePath, 'down', '--remove-orphans']).catch(() => undefined);
+  if (ownsRoot) {
+    if (composePath) {
+      await exec('docker', ['compose', '--project-name', composeProject(), '--file', composePath, 'down', '--remove-orphans']);
+    }
+    for (const tag of customImageTags) await exec('docker', ['image', 'rm', '--force', tag]).catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
   }
-  for (const tag of customImageTags) await exec('docker', ['image', 'rm', '--force', tag]).catch(() => undefined);
-  await rm(root, { recursive: true, force: true });
 }
 
 function execCli(args, options = {}) {
