@@ -27,6 +27,7 @@ import {
   validateRemoteAccessConformance,
 } from './remote-access-conformance.mjs';
 import { verifyReleaseSet } from './release-set.mjs';
+import { requiresReleaseImpact } from './release-impact.mjs';
 
 const root = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const LEGACY_CLIENTS = ['codex', 'claude-code', 'claude-desktop', 'cursor', 'vscode', 'open-webui', 'mcp-stdio', 'mcp-http', 'openapi'];
@@ -86,6 +87,8 @@ export async function validateAcceptanceEvidence(evidence, context) {
     assert(evidence.schemaVersion === 4, 'Acceptance schemaVersion 4 is required for v0.2 and later releases.');
   }
   const profile = evidence.schemaVersion === 4 ? acceptanceProfile(evidence, releaseSet) : undefined;
+  const notBefore = releaseSet.qualificationStartedAt ?? releaseSet.createdAt;
+  assert(iso(notBefore) && Date.parse(notBefore) <= Date.parse(releaseSet.createdAt), 'Acceptance qualification start is invalid.');
   assert(evidence.releaseSet?.sha256 === releaseSetSha256, 'Acceptance evidence targets another release set.');
   assert(evidence.releaseSet?.signatureFingerprint === signatureFingerprint, 'Acceptance evidence names another release-set signature key.');
   assert(evidence.releaseSet?.version === releaseSet.version && evidence.releaseSet?.revision === releaseSet.revision, 'Acceptance evidence targets another version or revision.');
@@ -102,19 +105,19 @@ export async function validateAcceptanceEvidence(evidence, context) {
 
   let conformance;
   if (evidence.schemaVersion === 3) {
-    await requiredRows(evidence.clients, LEGACY_CLIENTS, 'client', evidenceDirectory, releaseSet.createdAt, now, (row) => {
+    await requiredRows(evidence.clients, LEGACY_CLIENTS, 'client', evidenceDirectory, notBefore, now, (row) => {
       assert(version(row.version), `${row.id} requires a real client/protocol version.`);
     });
     conformance = { clients: evidence.clients.length, protocols: 0, surfaces: 0 };
   } else {
     const requirements = await verifyConformanceRequirements(evidence, evidenceDirectory);
     conformance = await validateClientConformance(evidence, requirements, (result, label) => (
-      validateResult(result, label, evidenceDirectory, releaseSet.createdAt, now)
+      validateResult(result, label, evidenceDirectory, notBefore, now)
     ), { clients: profile.clients, protocols: profile.protocols });
   }
   let platformSummary;
   if (evidence.schemaVersion === 3) {
-    await requiredRows(evidence.platforms, LEGACY_PLATFORMS, 'platform', evidenceDirectory, releaseSet.createdAt, now, (row) => {
+    await requiredRows(evidence.platforms, LEGACY_PLATFORMS, 'platform', evidenceDirectory, notBefore, now, (row) => {
       assert(row.minimumVersionsPassed === true && row.restartPassed === true && row.physicalRebootPassed === true, `${row.id} lacks minimum/restart/reboot evidence.`);
       for (const field of ['osVersion', 'architecture', 'node', 'dockerEngine', 'dockerCompose']) assert(version(row[field]), `${row.id} requires ${field}.`);
       assert(row.dockerDesktop === null || version(row.dockerDesktop), `${row.id} has invalid dockerDesktop evidence.`);
@@ -130,25 +133,25 @@ export async function validateAcceptanceEvidence(evidence, context) {
   } else {
     const requirements = await verifyPlatformSupportRequirements(evidence, evidenceDirectory);
     platformSummary = await validatePlatformConformance(evidence, requirements, (result, label) => (
-      validateResult(result, label, evidenceDirectory, releaseSet.createdAt, now)
+      validateResult(result, label, evidenceDirectory, notBefore, now)
     ), { platforms: profile.platforms, requiredChecks: profile.platformChecks });
   }
   let remoteSummary = {};
   if (evidence.schemaVersion === 4) {
     const requirements = await verifyRemoteAccessRequirements(evidence, evidenceDirectory);
     remoteSummary = await validateRemoteAccessConformance(evidence, requirements, (result, label) => (
-      validateResult(result, label, evidenceDirectory, releaseSet.createdAt, now)
+      validateResult(result, label, evidenceDirectory, notBefore, now)
     ), { profiles: profile.remoteProfiles });
   }
   const dashboardSummary = profile?.dashboardProfiles
-    ? await validateDashboardAcceptance(evidence.dashboard, evidenceDirectory, releaseSet.createdAt, now, releaseSet.version, evidence.profile)
+    ? await validateDashboardAcceptance(evidence.dashboard, evidenceDirectory, notBefore, now, releaseSet.version, evidence.profile)
     : {};
   assert(evidence.workflows && typeof evidence.workflows === 'object', 'Acceptance workflows are required.');
   const workflows = evidence.schemaVersion === 4 ? profile.workflows : WORKFLOWS;
-  for (const id of workflows) await validateResult(evidence.workflows[id], `workflow ${id}`, evidenceDirectory, releaseSet.createdAt, now);
+  for (const id of workflows) await validateResult(evidence.workflows[id], `workflow ${id}`, evidenceDirectory, notBefore, now);
 
   for (const [name, review] of [['security', evidence.securityReview], ['vulnerability', evidence.vulnerabilityReview], ['privacy', evidence.privacyReview]]) {
-    await validateReview(review, `${name} review`, evidence, evidenceDirectory, releaseSet.createdAt, now, profile?.independentReviews ?? true);
+    await validateReview(review, `${name} review`, evidence, evidenceDirectory, notBefore, now, profile?.independentReviews ?? true);
   }
   const securityTopics = ['processBoundary', 'internalAuthentication', 'browserSurface', 'filesystemRaces', 'networkReconciliation', 'releaseIntegrity'];
   if (evidence.schemaVersion === 4) securityTopics.push('remoteExposure');
@@ -177,8 +180,8 @@ function acceptanceProfile(evidence, releaseSet) {
   if (!requiresDashboardAcceptance(releaseSet.version)) return selected;
   return {
     ...selected,
-    clients: undefined,
-    protocols: undefined,
+    clients: requiresReleaseImpact(releaseSet.version) ? selected.clients : undefined,
+    protocols: requiresReleaseImpact(releaseSet.version) ? selected.protocols : undefined,
     dashboardProfiles: DASHBOARD_ACCEPTANCE_PROFILES.map(({ id }) => id),
   };
 }
@@ -326,7 +329,7 @@ async function validateEvidenceFile(reference, directory, label) {
 function validateTimestamp(value, notBefore, now, label) {
   assert(iso(value), `${label} requires a valid UTC ISO timestamp.`);
   const time = Date.parse(value);
-  assert(time >= Date.parse(notBefore), `${label} predates the release set.`);
+  assert(time >= Date.parse(notBefore), `${label} predates the release set qualification boundary.`);
   assert(time <= Date.parse(now) + 300_000, `${label} is implausibly in the future.`);
 }
 

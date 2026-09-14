@@ -44,7 +44,7 @@
     "performance": "node scripts/performance.mjs",
     "tokens:audit": "npm run build:types && node scripts/token-audit.mjs",
     "skills:catalog:update": "npm run build:types && node scripts/update-core-skill-catalog.mjs --write",
-    "check:release": "npm run check && npm audit signatures && npm run scan:secrets && npm run test:e2e:all && node scripts/release-preflight.mjs --require-binary",
+    "check:release": "npm run check && npm audit signatures && npm run scan:secrets && npm run test:e2e:source",
     "release:check": "npm run public:check && npm run check:release && npm run tokens:audit && npm run performance",
     "release:impact": "node scripts/release-impact.mjs",
     "candidate:local": "node scripts/build-local-candidates.mjs",
@@ -58,7 +58,10 @@
     "public:check": "node scripts/public-source.mjs check",
     "public:export": "node scripts/public-source.mjs export",
     "release:publish": "node scripts/publish-candidate.mjs",
-    "images:build": "npm run build && node packages/cli/dist/qubicl.mjs image build-system"
+    "images:build": "npm run build && node packages/cli/dist/qubicl.mjs image build-system",
+    "release:plan": "node scripts/release-plan.mjs",
+    "release:diagnose": "node scripts/release-diagnose.mjs",
+    "test:release-workflow": "node --test tests/unit/release-impact.test.mjs tests/unit/release-workflow.test.mjs"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",

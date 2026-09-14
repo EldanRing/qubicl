@@ -94,7 +94,8 @@ do not run them merely to validate a documentation edit. Maintainers also follow
 their local approval and resource policy. For 0.6 and later, generate and verify
 the exact [release-impact document](decisions/0002-v0.6-capabilities-and-constraints.md)
 before candidate work. It selects required evidence, while the current publisher
-still requires a complete signed candidate.
+still requires a complete signed candidate. Unchanged image bytes may be carried
+forward with exact per-image provenance instead of being rebuilt.
 
 ## Image and setup acceptance
 
@@ -124,6 +125,19 @@ npm run test:e2e:all
 ```
 
 These are large local Docker runs. Start one and let that exact process finish; do not overlap or repeatedly launch acceptance builds.
+
+To reproduce one source-level failure against an existing candidate catalog
+without starting release construction, use the read-only diagnostic plan and
+then execute it once:
+
+```sh
+npm run release:diagnose -- --candidate /path/to/complete-candidate
+npm run release:diagnose -- --candidate /path/to/complete-candidate --execute
+```
+
+Add `--upgrade-from /path/to/old/qubicl` for the isolated upgrade scenario. It
+retains that fixture for inspection and creates no candidate, image, scan,
+signature, or acceptance evidence.
 
 ## Remote-access acceptance
 
@@ -199,11 +213,13 @@ npm run release:impact -- --base v0.5.1 --output /secure/release-impact-v0.6.0.j
 ```
 
 The command fails on an unknown path by selecting `full`, refuses to overwrite
-its output, and records exact base and candidate commits. A preview prerelease
-then uses that document:
+its output, and records exact base and candidate commits. Candidate commands are
+read-only planners by default. A preview prerelease first prints its plan:
 
 ```sh
 npm run candidate:preview -- --impact /secure/release-impact-v0.6.0.json
+# After review, run that plan once:
+npm run candidate:preview -- --impact /secure/release-impact-v0.6.0.json --execute
 ```
 
 This assembles an unsupported prerelease candidate. It rejects secrets and
@@ -215,7 +231,14 @@ For a stable pre-1.0 candidate using the focused signed `initial` acceptance
 profile:
 
 ```sh
-npm run candidate:release -- --impact /secure/release-impact-v0.6.0.json
+npm run candidate:release -- \
+  --impact /secure/release-impact-v0.6.0.json \
+  --reuse /path/to/last-complete-0.6-candidate
+# After review:
+npm run candidate:release -- \
+  --impact /secure/release-impact-v0.6.0.json \
+  --reuse /path/to/last-complete-0.6-candidate \
+  --execute
 ```
 
 Its schema-2 release set contains the complete Linux x64 candidate. Publication
@@ -226,21 +249,38 @@ For the strict full-matrix supported-release policy:
 
 ```sh
 npm run candidate:local -- --impact /secure/release-impact-v0.6.0.json
+# After review, append --execute.
 ```
 
-The builder creates six multi-architecture OCI archives (gateway, dashboard, and four
-presets), checks contracts/provenance/SBOM, and scans independently filtered
+The plan names every image it will build, reuse, and scan before any expensive
+work starts. A schema-7 candidate stores `image-inputs.json`, which binds each
+image to the same release version, its originating ancestor commit, a hash of
+its mapped Git-tree entries and image-relevant root manifest fields, and its
+original toolchain. Deleted inputs are included and unknown paths fail closed to
+all images. A changed local toolchain
+does not invalidate already immutable bytes; its identity remains attached to
+the originating image.
+
+Execution copies unchanged archives only after checking the donor manifest.
+Changed inputs rebuild their mapped images. Fresh Trivy reports and an unchanged
+efficiency report can be reused; expired advisory data triggers scanning without
+rebuilding the images. When every image is reused, the preliminary image-context
+build is skipped. The final verifier checks the copied bytes, recomputes
+their per-image source identities, inspects every OCI archive, and regenerates
+the efficiency report from the same inspection results. It rejects future-dated
+scanner, database, and check-bundle metadata.
+
+For images that require construction, the builder creates multi-architecture OCI
+archives, checks contracts/provenance/SBOM, and scans independently filtered
 amd64 and arm64 OCI views. Each retained Trivy report must match the selected
 manifest, configuration, compressed layers, and rootfs diff IDs. The builder
 records those platform-view bindings as schema 2, which is mandatory when a
 v0.2-or-later candidate is verified; legacy schema-1 bindings remain readable
-only for v0.1 candidate evidence. For v0.2 and later, it also writes a mandatory
-`oci-efficiency.json` report from the exact archives and embedded SPDX
-attestations. The report accounts for logical, deduplicated, shared, unique, and
-duplicate compressed/expanded layer bytes and package identities across all
-six images on both platforms. Verification regenerates it rather than trusting
-editable summary data. The builder then generates exact digest/size catalog
-data and builds/tests the npm and native artifacts against those exact bytes.
+only for v0.1 candidate evidence. `oci-efficiency.json` accounts for logical,
+deduplicated, shared, unique, and duplicate compressed/expanded layer bytes and
+package identities across all six images on both platforms. The builder then
+generates exact digest/size catalog data and builds/tests the npm and native
+artifacts against those exact bytes.
 To reduce local candidate latency without overwhelming Docker, the six BuildKit
 image jobs run with a fixed limit of two. Exact-artifact acceptance remains
 serial because those lifecycle-heavy runs share the Docker daemon; each run
@@ -249,7 +289,8 @@ image work is drained before a failure is handled, so preserved staging cannot
 keep changing in the background. Trivy scans, OCI-efficiency inspection, image
 loading, catalog generation, and final verification also remain serial because
 their shared caches, memory use, or ordering make additional parallelism unsafe
-or immaterial.
+or immaterial. A failed command stops. Nothing automatically starts a new
+candidate or repeatedly polls and relaunches the process.
 Output remains ignored under
 `release/candidates/`; there is no push, publish, tag, release, or visibility
 operation.
@@ -270,7 +311,8 @@ Additional native hosts must use the exact generated catalog:
 ```sh
 node scripts/build-local-candidates.mjs --binary-only \
   --catalog /path/to/image-catalog.json \
-  --impact /secure/release-impact-v0.6.0.json
+  --impact /secure/release-impact-v0.6.0.json \
+  --execute
 ```
 
 Hardware not locally validated remains a supported-1.0 blocker. An initial or preview

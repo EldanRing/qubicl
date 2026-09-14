@@ -28,6 +28,18 @@ test('release sets preserve v0.1 shape and enforce tier-specific native targets'
   };
   assert.doesNotThrow(() => assertReleaseSetShape(document));
   assert.doesNotThrow(() => assertReleaseSetShape({ ...document, schemaVersion: 2, releaseTier: 'supported' }));
+  assert.doesNotThrow(() => assertReleaseSetShape({
+    ...document,
+    schemaVersion: 2,
+    releaseTier: 'supported',
+    qualificationStartedAt: '2026-08-23T11:00:00.000Z',
+  }));
+  assert.throws(() => assertReleaseSetShape({
+    ...document,
+    schemaVersion: 2,
+    releaseTier: 'supported',
+    qualificationStartedAt: '2026-08-23T13:00:00.000Z',
+  }), /qualification start/);
   assert.throws(() => assertReleaseSetShape({ ...document, schemaVersion: 2 }), /release tier/);
   assert.doesNotThrow(() => assertReleaseSetShape({
     ...document,
@@ -382,6 +394,33 @@ test('v0.2 schema-4 acceptance binds exact client surfaces and platform facts to
       clients: requirements.clients.length,
       protocols: requirements.protocols.length,
       surfaces: [...requirements.clients, ...requirements.protocols]
+        .reduce((count: number, profile: { requiredSurfaces: string[] }) => count + profile.requiredSurfaces.length, 0),
+      platforms: 1,
+      remoteProfiles: 1,
+      remoteSurfaces: remoteRequirements.requiredSurfaces.length,
+      dashboardPlatforms: 3,
+      dashboardChecks: 26,
+      workflows: 6,
+    });
+    const v06Initial: Record<string, any> = structuredClone(v05Initial);
+    v06Initial.releaseSet.version = '0.6.0';
+    v06Initial.clients = v06Initial.clients.filter(({ id }: { id: string }) => ['codex', 'open-webui'].includes(id));
+    for (const row of v06Initial.dashboard) row.qubiclVersion = '0.6.0';
+    const v06InitialContext = {
+      ...v05InitialContext,
+      releaseSet: {
+        ...v05InitialContext.releaseSet,
+        version: '0.6.0',
+        qualificationStartedAt: '2026-08-23T12:00:00.000Z',
+        createdAt: '2026-08-23T12:40:00.000Z',
+      },
+    };
+    assert.deepEqual(await acceptance.validateAcceptanceEvidence(v06Initial, v06InitialContext), {
+      schemaVersion: 4,
+      profile: 'initial',
+      clients: 2,
+      protocols: requirements.protocols.length,
+      surfaces: [...requirements.clients.filter(({ id }: { id: string }) => ['codex', 'open-webui'].includes(id)), ...requirements.protocols]
         .reduce((count: number, profile: { requiredSurfaces: string[] }) => count + profile.requiredSurfaces.length, 0),
       platforms: 1,
       remoteProfiles: 1,

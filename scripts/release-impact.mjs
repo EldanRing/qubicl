@@ -106,7 +106,7 @@ export async function verifyReleaseImpactDocument(path, { revision, repositoryRo
   if (!/^[a-f0-9]{40}$/u.test(document.baseRevision ?? '') || document.revision !== revision) throw new Error('Release impact does not bind exact base and candidate revisions.');
   try { await exec('git', ['merge-base', '--is-ancestor', document.baseRevision, revision], { cwd: repositoryRoot }); }
   catch { throw new Error('Release impact base is not an ancestor of the candidate revision.'); }
-  const changedFiles = (await exec('git', ['diff', '--name-only', '--diff-filter=ACMRTUXB', document.baseRevision, revision, '--'], { cwd: repositoryRoot, maxBuffer: 10_000_000 })).stdout.split(/\r?\n/u).filter(Boolean).sort();
+  const changedFiles = (await exec('git', ['diff', '--name-only', document.baseRevision, revision, '--'], { cwd: repositoryRoot, maxBuffer: 10_000_000 })).stdout.split(/\r?\n/u).filter(Boolean).sort();
   if (JSON.stringify(changedFiles) !== JSON.stringify(document.changedFiles)) throw new Error('Release impact changed files do not match the exact Git revision range.');
   return document;
 }
@@ -124,7 +124,7 @@ async function main(args) {
   const base = baseInput ? await exec('git', ['rev-parse', `${baseInput}^{commit}`], { cwd: root }).then(({ stdout }) => stdout.trim()) : undefined;
   const files = fileInput
     ? JSON.parse(await readFile(resolve(fileInput), 'utf8'))
-    : (await exec('git', ['diff', '--name-only', '--diff-filter=ACMRTUXB', base, revision, '--'], { cwd: root, maxBuffer: 10_000_000 })).stdout.split(/\r?\n/u).filter(Boolean);
+    : (await exec('git', ['diff', '--name-only', base, revision, '--'], { cwd: root, maxBuffer: 10_000_000 })).stdout.split(/\r?\n/u).filter(Boolean);
   if (!Array.isArray(files) || files.some((file) => typeof file !== 'string')) throw new Error('--files must name a JSON array of repository-relative paths.');
   const plan = classifyReleaseImpact(files);
   const document = { ...plan, generatedAt: new Date().toISOString(), ...(base ? { baseRevision: base } : {}), revision };

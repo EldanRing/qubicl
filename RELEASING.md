@@ -8,9 +8,10 @@ The instructions below describe the currently enforced candidate and publisher
 contract. The [0.6 design](docs/decisions/0002-v0.6-capabilities-and-constraints.md)
 adds exact change-impact analysis, representative affected clients, and
 identity/freshness-bound evidence reuse. Candidate, release-set, verifier, and
-publisher metadata enforce that impact identity. The publisher still requires
-the complete immutable signed candidate; there is no npm-only or unchanged-image
-publication mode.
+publisher metadata enforce that impact identity. Publication still uses one
+complete immutable signed candidate containing all six images. Candidate
+construction may reuse an unchanged image archive, scan report, and efficiency
+report when their recorded inputs and freshness still satisfy the verifier.
 
 Before selecting gates, identify changed source/dependencies, resulting
 artifacts, affected state/protocol/platform behavior, and reusable evidence with
@@ -112,18 +113,50 @@ Prerequisites on the Linux x64 release host:
 - Trivy 0.74.0, which the candidate tooling enforces; and
 - a clean checkout of the new public repository at the release revision.
 
-Run:
+Run the source gates once after the intended source is stable:
 
 ```sh
 gitleaks version
 trivy --version
 npm ci
-npm run public:check
-npm run check:release
-npm run tokens:audit
-npm run performance -- --no-build
+npm run release:check
+```
+
+`release:check` owns source-level checks, including source Docker E2E. Candidate
+construction later runs the exact npm and native artifacts against the selected
+image catalog; it does not repeat the source E2E. For a suspected lifecycle or
+migration problem, inspect the bounded diagnostic plan and then run that exact
+scenario before freezing source:
+
+```sh
+npm run release:diagnose -- --candidate /path/to/last-complete-candidate
+npm run release:diagnose -- --candidate /path/to/last-complete-candidate --execute
+# For an upgrade-specific check, also pass --upgrade-from /path/to/old/qubicl.
+```
+
+The diagnostic command never creates release evidence or builds images, scans,
+native archives, or signatures. Its default is read-only; `--execute` runs one
+scenario once. It does not retry or start another candidate after a failure.
+
+Commit the frozen source, generate its impact document, and ask the candidate
+builder for a read-only plan. Supply the most recent complete candidate for the
+same version when one exists:
+
+```sh
 npm run release:impact -- --base v0.5.1 --output /secure/release-impact-v0.6.0.json
-npm run candidate:release -- --impact /secure/release-impact-v0.6.0.json
+npm run candidate:release -- \
+  --impact /secure/release-impact-v0.6.0.json \
+  --reuse /path/to/previous-0.6.0/linux-x64
+```
+
+Review `buildImages`, `reuseImages`, `scanImages`, and the recorded reasons. Only
+the explicit execution form performs expensive work:
+
+```sh
+npm run candidate:release -- \
+  --impact /secure/release-impact-v0.6.0.json \
+  --reuse /path/to/previous-0.6.0/linux-x64 \
+  --execute
 ```
 
 Generate the impact document only after the release commit is frozen. The
@@ -144,22 +177,45 @@ npm run candidate:resume -- release/candidates/.failed-VERSION-REVISION-TARGET.P
 Resume runs only the complete candidate verifier before promoting the unchanged
 bytes; it does not rebuild images, rerun Trivy, or rerun artifact acceptance. If
 failure occurred before the manifest and checksums were complete, the directory
-remains available for diagnosis or explicit cleanup but cannot be promoted.
+remains available for diagnosis or explicit cleanup but cannot be promoted. A
+failed command is terminal: release tooling never launches a replacement build
+or loops until one passes.
 
 `candidate:release` first exports the reviewed commit into a disposable clean
 worktree, runs a fresh `npm ci`, and retains lockfile, registry, installed-tree,
-audit, and registry-signature evidence. It then creates the six multi-platform
-image archives first, generates their exact catalog, builds npm/native artifacts
-once against that catalog, and reruns source/npm/native acceptance against the
-staged bytes. Before recording scanner identity, it explicitly refreshes the
-Trivy vulnerability database and rejects metadata whose next-update time has
-already passed. Each amd64/arm64 Trivy run receives its own one-manifest OCI view;
+audit, and registry-signature evidence. Candidate schema 7 adds
+`image-inputs.json`: every image records its originating commit, a hash of the
+mapped Git-tree entries and image-relevant root manifest fields, the release
+version, and its original build toolchain. An origin must be an ancestor of the
+candidate and reproduce the same versioned input hash. Unknown input paths
+invalidate every image.
+Current host tool versions do not invalidate already immutable image bytes;
+their original toolchain remains recorded.
+
+The builder copies only archives selected for reuse and checks each copy against
+the donor manifest. Changed image inputs rebuild only their mapped image group.
+A candidate that reuses every image also carries forward the verified dashboard
+asset identity and skips the preliminary image-context build; final candidate
+verification still requires the npm/native build to reproduce that identity.
+A fresh scan set can be copied when its scanner/database identity is still
+valid; stale scan evidence causes a rescan of the selected immutable archives,
+not an image rebuild. When all images are unchanged, the exact efficiency report
+is copied and the final verifier regenerates it from the archives. The catalog
+and final candidate still contain all six images.
+
+For newly required scans, the builder refreshes the Trivy vulnerability database
+and rejects metadata whose next-update time has already passed or whose scan,
+database, or check-bundle time is in the future. Each amd64/arm64 Trivy run
+receives its own one-manifest OCI view;
 the builder verifies the selected index, manifest, configuration, compressed
 layers, rootfs diff IDs, and report identity before retaining the report. It
 writes `oci-efficiency.json` for v0.2 and later from those exact archives and
 their embedded SPDX attestations, recording shared/unique compressed and expanded
 layers plus normalized package overlap. Candidate verification regenerates the
-report from the retained bytes, and publication includes it as release evidence.
+report from the retained bytes using the OCI inspections already performed by
+that verification call. The builder generates the exact catalog, builds the npm
+and native artifacts once against it, and runs their exact-artifact acceptance
+serially. Publication includes the retained evidence.
 The builder writes an ignored candidate beneath:
 
 ```text
@@ -173,8 +229,9 @@ acceptance:
 node scripts/verify-candidate.mjs /path/to/candidate
 ```
 
-If the candidate fails, fix the source or dependency, commit the change, and
-build a new candidate. Never edit candidate contents in place.
+If the candidate fails because source or dependencies must change, commit the
+fix and generate a new plan against the last complete candidate. Rebuild only
+the inputs that plan invalidates. Never edit candidate contents in place.
 
 ## Mandatory detached signature
 
@@ -196,20 +253,11 @@ distribution.
 
 Install Skopeo on the release host before publication; it copies the exact
 multi-platform OCI archives to GHCR without rebuilding them. Authenticate npm
-and `gh`. Before even the publisher dry run, obtain separate authorization to
-fast-forward the exact reviewed release commit to `origin/main`; build, signing,
-or publication approval does not substitute for that push approval. Push only
-that reviewed commit, then confirm the remote-tracking branch resolves to it:
+and `gh`. The publisher dry run is local and does not require `origin/main` to
+have moved. It verifies the candidate, signatures, acceptance bundle, release
+notes, and local checkout, then prints the exact publication plan.
 
-```sh
-git fetch origin main
-git merge-base --is-ancestor origin/main HEAD
-git push origin HEAD:main
-git fetch origin main
-test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
-```
-
-Then inspect the publication plan:
+Inspect the publication plan before any push:
 
 ```sh
 npm run release:publish -- --candidate /path/to/candidate \
@@ -222,7 +270,21 @@ npm run release:publish -- --candidate /path/to/candidate \
 ```
 
 The dry run verifies the full candidate and the exact checkout but performs no
-remote mutation. After explicit approval:
+remote mutation. Actual publication requires separate authorization to
+fast-forward the exact reviewed release commit to `origin/main`; build, signing,
+or publication preparation does not substitute for that push approval. Push
+only that reviewed commit, then confirm the remote-tracking branch resolves to
+it:
+
+```sh
+git fetch origin main
+git merge-base --is-ancestor origin/main HEAD
+git push origin HEAD:main
+git fetch origin main
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+```
+
+After explicit publication approval:
 
 ```sh
 QUBICL_RELEASE_APPROVAL=0.6.0 npm run release:publish -- \
@@ -320,6 +382,11 @@ the release-impact document selects the affected protocol surfaces; adapters
 whose inputs changed require their real client rows. Adding this gate does not
 produce evidence: required real-client runs must still be performed against the
 frozen candidate before acceptance is signed.
+
+For schema-7 candidates, `qualificationStartedAt` is the immutable candidate
+commit time. Evidence may be collected after that boundary and before all native
+members are assembled into `release-set.json`; creating the release set no
+longer invalidates work already performed against the same frozen candidate.
 
 Schema 4 also hash-binds `platform-support-v1.json`. The initial profile
 requires the exact Linux x64 host/runtime versions plus minimum-version and

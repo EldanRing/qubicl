@@ -1,8 +1,9 @@
 # Verifying Qubicl artifacts
 
 Qubicl releases retain checksums, a candidate manifest, SBOMs, vulnerability
-summary, an exact image catalog, and detached project signatures. The release
-notes identify the Ed25519 public-key fingerprint used for those signatures.
+summary, an exact image catalog, per-image build-input provenance, and detached
+project signatures. The release notes identify the Ed25519 public-key
+fingerprint used for those signatures.
 
 These instructions describe the verifier and signed-evidence formats. For 0.6
 and later, the [release-impact design](docs/decisions/0002-v0.6-capabilities-and-constraints.md)
@@ -33,6 +34,11 @@ Do not rename, add, remove, regenerate, or extract files before verification. Th
   classification, then verifies the embedded document, candidate manifest, and
   release set share one base revision, candidate revision, hash, and profile;
 - binds the image catalog's exact release version, full revision, normalized source URL, platform matrix, requested references, and immutable digests to the candidate;
+- for schema-7 candidates, verifies `image-inputs.json` contains exactly six
+  images, reproduces each image's mapped Git-tree and semantic root-manifest
+  input hash at both the candidate and recorded ancestor revision, preserves the
+  release version, and records the original Node, npm, Docker, and Buildx
+  identities;
 - installs and inspects the staged npm tarball and extracts the staged native archive without packing or rebuilding;
 - proves the build used a clean exported source tree and fresh `npm ci`, with
   exact lockfile, registry, dependency inventory, audit, and registry-signature evidence;
@@ -52,7 +58,10 @@ A complete candidate contains gateway, dashboard, file-system, browser,
 computer, and workstation OCI archives plus one Trivy report for each Linux
 amd64/arm64 image variant. Do not use the lower-level OCI inspector by hand as
 a substitute for the directory verifier; the directory verifier supplies its
-required version, revision, source, preset, and expected-manifest arguments.
+required version, per-image origin revision, source, preset, and
+expected-manifest arguments. Within one verification call, archive hashes and
+full OCI inspections are reused for catalog, scan-binding, and efficiency
+checks; each archive is not repeatedly unpacked for those separate assertions.
 
 ## Client conformance acceptance
 
@@ -80,6 +89,12 @@ evidence reference. One comprehensive report may support multiple surface rows,
 but each surface remains a distinct result in the acceptance record; a matching
 hash proves only which bytes were reviewed. Missing, extra, failed, pre-freeze,
 unhashed, or detached surface records fail acceptance.
+
+For schema-7 candidates, the release set records the frozen candidate commit as
+`qualificationStartedAt`. Evidence collected after that boundary remains valid
+when the multi-host release set is assembled later. The release-set creation
+time no longer forces otherwise applicable work against the same immutable
+candidate to be repeated.
 
 The validator performs no network lookup and does not run or install clients.
 Passing evidence must come from maintainer-supplied real clients and accounts;

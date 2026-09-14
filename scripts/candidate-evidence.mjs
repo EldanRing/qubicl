@@ -15,9 +15,10 @@ import { requiresClientConformance } from './client-conformance.mjs';
 import {
   OCI_EFFICIENCY_MAX_REPORT_BYTES,
   OCI_EFFICIENCY_REPORT_NAME,
-  inspectOciEfficiencyArchives,
+  buildOciEfficiencyReport,
 } from './oci-efficiency.mjs';
 import { inspectOciArchive } from './oci-evidence.mjs';
+import { IMAGE_INPUTS_NAME, verifyImageInputs } from './release-inputs.mjs';
 export const IMAGE_NAMES = ['gateway', 'dashboard', 'file-system', 'browser', 'computer', 'workstation'];
 export const PLATFORMS = ['linux/amd64', 'linux/arm64'];
 export const REQUIRED_TRIVY_VERSION = '0.74.0';
@@ -423,6 +424,14 @@ export async function sha256(path) {
 
 export async function verifyCandidateDirectory(directory, { root, inspectOci = true, now = new Date().toISOString() } = {}) {
   const candidateDirectory = resolve(directory);
+  // Cache only within this verification. A new call reads every byte again.
+  const hashes = new Map();
+  const hashFile = (path) => {
+    if (!hashes.has(path)) hashes.set(path, sha256(path));
+    return hashes.get(path);
+  };
+  const inspections = {};
+  const sourceText = async (path) => (await exec('git', ['show', `${candidate.revision}:${path}`], { cwd: root, maxBuffer: 20_000_000 })).stdout;
   const entries = await readdir(candidateDirectory, { withFileTypes: true });
   assert(entries.every((entry) => entry.isFile()), 'Candidate directories may contain regular files only.');
   const names = entries.map((entry) => entry.name).sort();
@@ -439,7 +448,7 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
   const checksumEntries = parseChecksums(await readFile(join(candidateDirectory, 'SHA256SUMS'), 'utf8'));
   assert(equalArrays([...checksumEntries.keys()].sort(), names.filter((name) => name !== 'SHA256SUMS')), 'SHA256SUMS must cover every candidate file except itself.');
   for (const [name, expected] of checksumEntries) {
-    assert(await sha256(join(candidateDirectory, name)) === expected, `Checksum mismatch for ${name}.`);
+    assert(await hashFile(join(candidateDirectory, name)) === expected, `Checksum mismatch for ${name}.`);
   }
 
   const expectedArtifacts = expectedArtifactNames(candidate).sort();
@@ -450,19 +459,24 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
     assert(safeName(artifact.name), `Unsafe artifact name ${artifact.name}.`);
     const details = await stat(join(candidateDirectory, artifact.name));
     assert(details.size === artifact.bytes, `Artifact size mismatch for ${artifact.name}.`);
-    assert(await sha256(join(candidateDirectory, artifact.name)) === artifact.sha256, `Artifact hash mismatch for ${artifact.name}.`);
+    assert(await hashFile(join(candidateDirectory, artifact.name)) === artifact.sha256, `Artifact hash mismatch for ${artifact.name}.`);
   }
 
   const catalogPath = join(candidateDirectory, 'image-catalog.json');
-  assert(await sha256(catalogPath) === candidate.imageCatalog.sha256, 'candidate.json image-catalog hash does not match.');
+  assert(await hashFile(catalogPath) === candidate.imageCatalog.sha256, 'candidate.json image-catalog hash does not match.');
   const expectedCatalogText = await readFile(catalogPath, 'utf8');
   const catalog = assertCatalogIdentity(JSON.parse(expectedCatalogText), candidate);
   const dependencyEvidencePath = join(candidateDirectory, 'dependency-evidence.json');
-  assert(await sha256(dependencyEvidencePath) === candidate.dependencies.sha256, 'candidate.json dependency-evidence hash does not match.');
+  assert(await hashFile(dependencyEvidencePath) === candidate.dependencies.sha256, 'candidate.json dependency-evidence hash does not match.');
   await assertDependencyEvidence(await jsonFile(dependencyEvidencePath), candidate, root);
+  let imageInputs;
+  if (candidate.imageInputs) {
+    assert(await hashFile(join(candidateDirectory, IMAGE_INPUTS_NAME)) === candidate.imageInputs.sha256, 'Image input evidence hash mismatch.');
+    imageInputs = await verifyImageInputs(await jsonFile(join(candidateDirectory, IMAGE_INPUTS_NAME)), candidate, root);
+  }
   if (candidate.releaseImpact) {
     const impactPath = join(candidateDirectory, candidate.releaseImpact.name);
-    assert(await sha256(impactPath) === candidate.releaseImpact.sha256, 'candidate.json release-impact hash does not match.');
+    assert(await hashFile(impactPath) === candidate.releaseImpact.sha256, 'candidate.json release-impact hash does not match.');
     const impact = await verifyReleaseImpactDocument(impactPath, { revision: candidate.revision, repositoryRoot: root });
     assert(impact.profile === candidate.releaseImpact.profile && impact.baseRevision === candidate.releaseImpact.baseRevision, 'candidate.json release-impact identity does not match.');
   }
@@ -484,8 +498,8 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
         source: candidate.source,
         expectedCatalogText,
         expectedSbomPath: join(candidateDirectory, 'qubicl-npm.spdx.json'),
-        expectedManifest: await jsonFile(join(root, 'packages', 'cli', 'package.json')),
-        expectedReadme: await readFile(join(root, 'packages', 'cli', 'README.md'), 'utf8'),
+        expectedManifest: JSON.parse(await sourceText('packages/cli/package.json')),
+        expectedReadme: await sourceText('packages/cli/README.md'),
       });
     }
 
@@ -515,7 +529,7 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
           const preset = PRESETS.includes(image) ? image : undefined;
           const measured = await inspectOciArchive(join(candidateDirectory, `qubicl-${image}.oci.tar`), {
             expectedVersion: candidate.version,
-            expectedRevision: candidate.revision,
+            expectedRevision: imageInputs?.images[image]?.revision ?? candidate.revision,
             expectedSource: candidate.source,
             expectedPreset: preset,
             expectedManifestPath: preset
@@ -525,7 +539,10 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
               ? catalog.dashboard.assetManifestSha256
               : undefined,
             requireAttestations: true,
+            includeLayerMeasurements: true,
+            includePackageInventory: true,
           });
+          inspections[image] = measured;
           const expectedImage = image === 'gateway'
             ? catalog.gateway
             : image === 'dashboard'
@@ -544,11 +561,10 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
       if (requiresClientConformance(candidate.version)) {
         const reportPath = join(candidateDirectory, OCI_EFFICIENCY_REPORT_NAME);
         assert(candidate.imageEfficiency?.name === OCI_EFFICIENCY_REPORT_NAME
-          && candidate.imageEfficiency.sha256 === await sha256(reportPath),
+          && candidate.imageEfficiency.sha256 === await hashFile(reportPath),
         'candidate.json image-efficiency identity does not match the retained report.');
         if (inspectOci) {
-          const archives = Object.fromEntries(IMAGE_NAMES.map((name) => [name, join(candidateDirectory, `qubicl-${name}.oci.tar`)]));
-          const expectedReport = await inspectOciEfficiencyArchives(archives);
+          const expectedReport = buildOciEfficiencyReport(inspections);
           assert(canonicalJson(await jsonFile(reportPath)) === canonicalJson(expectedReport),
             'oci-efficiency.json does not match the exact candidate OCI archives and SPDX package inventories.');
         }
@@ -576,12 +592,12 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
         const binding = bindings.scans.find(({ report: name }) => name === report.name);
         assert(binding, `trivy-bindings.json lacks ${report.name}.`);
         const archive = join(candidateDirectory, `qubicl-${identity.image}.oci.tar`);
-        const measured = await inspectOciArchive(archive, { requireAttestations: true });
+        const measured = inspections[identity.image] ??= await inspectOciArchive(archive, { requireAttestations: true });
         assertTrivyScanBinding(binding, report.document, {
           reportName: report.name,
-          reportSha256: await sha256(join(candidateDirectory, report.name)),
+          reportSha256: await hashFile(join(candidateDirectory, report.name)),
           archiveName: basename(archive),
-          archiveSha256: await sha256(archive),
+          archiveSha256: await hashFile(archive),
           image: identity.image,
           platform: identity.platform,
           measured,
@@ -590,18 +606,18 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
       }
       const expectedSummary = summarizeTrivyReports(reportEntries, exceptions, {
         evaluatedAt: summary.evaluatedAt,
-        exceptionSha256: await sha256(exceptionPath),
+        exceptionSha256: await hashFile(exceptionPath),
         applicabilityDocument: applicability,
-        applicabilitySha256: await sha256(applicabilityPath),
+        applicabilitySha256: await hashFile(applicabilityPath),
         releaseTier: candidate.releaseTier,
       });
       assert(canonicalJson(summary) === canonicalJson(expectedSummary), 'trivy-summary.json does not match the retained reports and vulnerability review records.');
       assert(canonicalJson(candidate.security) === canonicalJson(summary), 'candidate.json security summary does not match trivy-summary.json.');
       summarizeTrivyReports(reportEntries, exceptions, {
         evaluatedAt: now,
-        exceptionSha256: await sha256(exceptionPath),
+        exceptionSha256: await hashFile(exceptionPath),
         applicabilityDocument: applicability,
-        applicabilitySha256: await sha256(applicabilityPath),
+        applicabilitySha256: await hashFile(applicabilityPath),
         releaseTier: candidate.releaseTier,
       });
     }
@@ -621,7 +637,7 @@ async function assertDependencyEvidence(evidence, candidate, root) {
   const registry = new URL(evidence.install?.registry ?? 'invalid:');
   assert(registry.protocol === 'https:' && !registry.username && !registry.password, 'Dependency evidence registry must be credential-free HTTPS.');
   assert(root, 'Dependency verification requires the reviewed repository root.');
-  assert(evidence.install?.lockfileSha256 === await sha256(join(root, 'package-lock.json')), 'Dependency evidence lockfile does not match reviewed source.');
+  assert(evidence.install?.lockfileSha256 === createHash('sha256').update((await exec('git', ['show', `${candidate.revision}:package-lock.json`], { cwd: root, maxBuffer: 20_000_000 })).stdout).digest('hex'), 'Dependency evidence lockfile does not match reviewed source.');
   const temporary = await mkdtemp(join(tmpdir(), 'qubicl-source-archive-'));
   try {
     const archive = join(temporary, 'source.tar');
@@ -704,9 +720,17 @@ export function assertTrivyScannerIdentity(bindings, now, { requiredSchemaVersio
   assert(Number.isInteger(database?.Version) && isoDate(database?.UpdatedAt) && isoDate(database?.DownloadedAt)
     && isoDate(database?.NextUpdate) && /^[a-f0-9]{64}$/u.test(database?.sha256 ?? ''), 'trivy-bindings.json has an invalid vulnerability database identity.');
   const evaluated = Date.parse(now);
+  const created = Date.parse(bindings.createdAt);
   const updated = Date.parse(database.UpdatedAt);
-  assert(updated <= Date.parse(bindings.createdAt) && evaluated - updated <= 48 * 60 * 60 * 1000, 'Trivy vulnerability database is stale or postdates the scan binding.');
+  const downloaded = Date.parse(database.DownloadedAt);
+  const nextUpdate = Date.parse(database.NextUpdate);
+  assert(created <= evaluated && updated <= downloaded && downloaded <= created,
+    'Trivy scan binding or vulnerability database is implausibly in the future.');
+  assert(evaluated - updated <= 48 * 60 * 60 * 1000 && evaluated < nextUpdate,
+    'Trivy vulnerability database is stale.');
   assert(/^sha256:[a-f0-9]{64}$/u.test(scanner.checkBundle?.Digest ?? '') && isoDate(scanner.checkBundle?.DownloadedAt), 'trivy-bindings.json has an invalid checks bundle identity.');
+  assert(Date.parse(scanner.checkBundle.DownloadedAt) <= created,
+    'Trivy checks bundle is implausibly in the future.');
 }
 
 export function assertReviewedTrivyVersion(version) {
@@ -849,7 +873,9 @@ function normalizeScanTarget(value) {
 }
 
 function assertCandidateManifest(candidate) {
-  assert([5, 6].includes(candidate?.schemaVersion), 'candidate.json schemaVersion must be 5 or 6.');
+  assert([5, 6, 7].includes(candidate?.schemaVersion), 'candidate.json schemaVersion must be 5, 6, or 7.');
+  if (candidate.schemaVersion === 7) assert(candidate.imageInputs?.name === IMAGE_INPUTS_NAME && /^[a-f0-9]{64}$/u.test(candidate.imageInputs.sha256), 'Candidate schema 7 requires image input provenance.');
+  else assert(candidate.imageInputs === undefined, 'Image input provenance requires candidate schema 7.');
   for (const field of ['version', 'revision', 'created', 'source']) assert(nonemptyString(candidate[field]), `candidate.json requires ${field}.`);
   assert(/^[a-f0-9]{40}$/u.test(candidate.revision), 'candidate.json revision must be the exact reviewed Git commit.');
   assert(Number.isFinite(Date.parse(candidate.created)), 'candidate.json created must be an ISO timestamp.');
@@ -860,7 +886,7 @@ function assertCandidateManifest(candidate) {
   assert(candidate.tools && /^v[0-9]+[.][0-9]+[.][0-9]+$/.test(candidate.tools.node ?? ''), 'candidate.json requires the exact Node tool version.');
   assert(candidate.dependencies?.name === 'dependency-evidence.json' && /^[a-f0-9]{64}$/u.test(candidate.dependencies?.sha256 ?? ''), 'candidate.json requires exact dependency evidence.');
   if (requiresReleaseImpact(candidate.version)) {
-    assert(candidate.schemaVersion === 6 && candidate.releaseImpact?.name === 'release-impact.json'
+    assert([6, 7].includes(candidate.schemaVersion) && candidate.releaseImpact?.name === 'release-impact.json'
       && /^[a-f0-9]{64}$/u.test(candidate.releaseImpact?.sha256 ?? '')
       && ['documentation', 'npm-presentation', 'cli', 'runtime-component', 'full'].includes(candidate.releaseImpact?.profile)
       && /^[a-f0-9]{40}$/u.test(candidate.releaseImpact?.baseRevision ?? ''), 'Qubicl 0.6 and later candidates require exact release-impact evidence.');
@@ -891,7 +917,7 @@ async function assertReviewedRevision(candidate, root) {
     exec('git', ['rev-parse', 'HEAD'], { cwd: root }).then(({ stdout }) => stdout.trim()),
     exec('git', ['status', '--porcelain'], { cwd: root }).then(({ stdout }) => stdout.trim()),
     exec('git', ['show', '-s', '--format=%cI', candidate.revision], { cwd: root }).then(({ stdout }) => stdout.trim()),
-    jsonFile(join(root, 'package.json')),
+    exec('git', ['show', `${candidate.revision}:package.json`], { cwd: root }).then(({ stdout }) => JSON.parse(stdout)),
   ]);
   assertReviewedRevisionFacts({
     head,
@@ -910,6 +936,7 @@ function expectedArtifactNames(candidate) {
     `qubicl-${candidate.version}-${candidate.host.target}.spdx.json`,
   ];
   if (candidate.releaseImpact) names.push(candidate.releaseImpact.name);
+  if (candidate.imageInputs) names.push(IMAGE_INPUTS_NAME);
   if (!candidate.modes.binaryOnly) names.push(`qubicl-cli-${candidate.version}.tgz`, 'qubicl-npm.spdx.json');
   if (candidate.modes.images) {
     names.push(...IMAGE_NAMES.map((name) => `qubicl-${name}.oci.tar`));

@@ -36,23 +36,25 @@ test('release impact verification binds the exact Git range and rejects understa
     await exec('git', ['config', 'user.name', 'Qubicl Test'], { cwd: repositoryRoot });
     await exec('git', ['config', 'user.email', 'test@qubicl.invalid'], { cwd: repositoryRoot });
     await writeFile(join(repositoryRoot, 'README.md'), '# Fixture\n');
-    await exec('git', ['add', 'README.md'], { cwd: repositoryRoot });
+    await writeFile(join(repositoryRoot, 'obsolete.txt'), 'remove me\n');
+    await exec('git', ['add', 'README.md', 'obsolete.txt'], { cwd: repositoryRoot });
     await exec('git', ['commit', '--quiet', '-m', 'fixture base'], { cwd: repositoryRoot });
     const baseRevision = (await exec('git', ['rev-parse', 'HEAD'], { cwd: repositoryRoot })).stdout.trim();
 
     await writeFile(join(repositoryRoot, 'README.md'), '# Changed fixture\n');
-    await exec('git', ['add', 'README.md'], { cwd: repositoryRoot });
+    await rm(join(repositoryRoot, 'obsolete.txt'));
+    await exec('git', ['add', '--all'], { cwd: repositoryRoot });
     await exec('git', ['commit', '--quiet', '-m', 'fixture change'], { cwd: repositoryRoot });
     const revision = (await exec('git', ['rev-parse', 'HEAD'], { cwd: repositoryRoot })).stdout.trim();
     const impactPath = join(repositoryRoot, 'release-impact.json');
     await writeFile(impactPath, `${JSON.stringify({
-      ...classifyReleaseImpact(['README.md']),
+      ...classifyReleaseImpact(['README.md', 'obsolete.txt']),
       baseRevision,
       revision,
     }, null, 2)}\n`);
 
     const verified = await verifyReleaseImpactDocument(impactPath, { revision, repositoryRoot });
-    assert.deepEqual(verified.changedFiles, ['README.md']);
+    assert.deepEqual(verified.changedFiles, ['README.md', 'obsolete.txt']);
 
     const understated = {
       ...classifyReleaseImpact([]),

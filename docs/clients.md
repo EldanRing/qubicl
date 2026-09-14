@@ -281,15 +281,17 @@ browser control, and human takeover. Non-applicable transport surfaces are
 omitted according to the versioned matrix; adding or removing a surface ad hoc
 fails validation.
 
-All timestamps must be at or after the signed release set was created. The
-acceptance bundle carries an exact copy and SHA-256 of the reviewed requirements
-file, and its detached signature binds the final acceptance JSON. Qubicl does
-not download clients, inspect online version feeds, or manufacture these
-results. Maintainers must supply the real-client binaries/accounts and retain
-the actual post-freeze evidence. A signed pre-1.0 `initial` v0.2 bundle requires
-Codex, Open WebUI, and all four protocol rows. A `supported` bundle requires the
-full nine-application matrix; omitted rows cannot be presented as supported
-coverage.
+For schema-7 candidates, timestamps must be at or after the release set's
+`qualificationStartedAt` frozen-commit boundary. Older evidence uses the release
+set creation time. The acceptance bundle carries an exact copy and SHA-256 of
+the reviewed requirements file, and its detached signature binds the final
+acceptance JSON. Qubicl does not download clients, inspect online version feeds,
+or manufacture these results. Maintainers must supply the real-client
+binaries/accounts and retain the actual post-freeze evidence. A signed pre-1.0
+`initial` v0.2-v0.4 or v0.6 bundle requires Codex, Open WebUI, and all four
+protocol rows; v0.5 retains its legacy full-matrix rule. A `supported` bundle
+requires the full nine-application matrix; omitted rows cannot be presented as
+supported coverage.
 
 Remote support is separately bound by the versioned
 [remote-access requirements](../conformance/remote-access-v1.json). Those rows

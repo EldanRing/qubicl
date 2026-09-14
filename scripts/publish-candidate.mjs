@@ -74,6 +74,7 @@ export function buildPublishPlan(candidate, catalog, candidateDirectory, release
       'SHA256SUMS',
       'image-catalog.json',
       ...(candidate.releaseImpact ? [candidate.releaseImpact.name] : []),
+      ...(candidate.imageInputs ? [candidate.imageInputs.name] : []),
       'qubicl-npm.spdx.json',
       'trivy-summary.json',
       ...(requiresClientConformance(candidate.version) ? [OCI_EFFICIENCY_REPORT_NAME] : []),
@@ -137,12 +138,12 @@ digests, creates vVERSION and an immutable GitHub release, then moves latest.`);
     assertReleaseNotesTrustAnchor(notesBody, signatureDocument.publicKeyFingerprint);
   }
   await assertCheckout(candidate);
-  await assertPublicHistory(candidate);
   if (!options.publish) {
     console.log(JSON.stringify({ ok: true, dryRun: true, signatureFingerprint: signatureDocument.publicKeyFingerprint, ...plan }, null, 2));
     return;
   }
   assert(options.yes, 'Publication requires --publish --yes.');
+  await assertPublicHistory(candidate);
   assert(process.env.QUBICL_RELEASE_APPROVAL === plan.version, `Set QUBICL_RELEASE_APPROVAL=${plan.version} for this exact release.`);
   await requireCommand('skopeo', ['--version']);
   await requireCommand('gh', ['auth', 'status']);

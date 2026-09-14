@@ -31,6 +31,7 @@ export async function createReleaseSet(directory, { root = repositoryRoot } = {}
       imageCatalogSha256: candidate.imageCatalog.sha256,
       releaseTier: candidate.releaseTier,
       ...(candidate.releaseImpact ? { releaseImpactSha256: candidate.releaseImpact.sha256, releaseImpactProfile: candidate.releaseImpact.profile } : {}),
+      ...(candidate.imageInputs ? { imageInputsSha256: candidate.imageInputs.sha256 } : {}),
     };
     common ??= identity;
     assert(JSON.stringify(identity) === JSON.stringify(common), `${target} candidate does not share the release identity and catalog.`);
@@ -51,6 +52,7 @@ export async function createReleaseSet(directory, { root = repositoryRoot } = {}
   const document = {
     schemaVersion: 2,
     createdAt: new Date().toISOString(),
+    ...(completeCandidate.candidate.schemaVersion === 7 ? { qualificationStartedAt: new Date(completeCandidate.candidate.created).toISOString() } : {}),
     ...common,
     completeTarget: members.find(({ complete }) => complete).target,
     members,
@@ -68,11 +70,15 @@ export async function verifyReleaseSet(path, { root = repositoryRoot } = {}) {
   for (const member of document.members) {
     const candidateDirectory = join(setDirectory, member.directory);
     const { candidate } = await verifyCandidateDirectory(candidateDirectory, { root });
+    if (document.qualificationStartedAt !== undefined || candidate.schemaVersion === 7) {
+      assert(document.qualificationStartedAt === new Date(candidate.created).toISOString(), 'Release-set qualification start must match the immutable source commit time.');
+    }
     assert(candidate.host.target === member.target, `${member.target} release-set directory contains another target.`);
     assert(candidate.version === document.version && candidate.revision === document.revision
       && candidate.source === document.source && candidate.imageCatalog.sha256 === document.imageCatalogSha256,
     `${member.target} candidate does not match the release-set identity.`);
     if (requiresReleaseImpact(candidate.version)) assert(candidate.releaseImpact?.sha256 === document.releaseImpactSha256 && candidate.releaseImpact?.profile === document.releaseImpactProfile, `${member.target} candidate does not match the release impact identity.`);
+    if (document.imageInputsSha256 !== undefined) assert(candidate.imageInputs?.sha256 === document.imageInputsSha256, `${member.target} candidate does not match the image-input identity.`);
     if (document.schemaVersion === 2) {
       assert(candidate.releaseTier === document.releaseTier,
         `${member.target} candidate does not match the release-set tier.`);
@@ -93,6 +99,7 @@ export async function verifyReleaseSet(path, { root = repositoryRoot } = {}) {
 export function assertReleaseSetShape(document) {
   assert([1, 2].includes(document?.schemaVersion), 'release-set.json schemaVersion must be 1 or 2.');
   assert(iso(document.createdAt), 'release-set.json requires an ISO createdAt timestamp.');
+  if (document.qualificationStartedAt !== undefined) assert(iso(document.qualificationStartedAt) && Date.parse(document.qualificationStartedAt) <= Date.parse(document.createdAt), 'Invalid release-set qualification start.');
   for (const field of ['version', 'revision', 'source']) assert(nonempty(document[field]), `release-set.json requires ${field}.`);
   assert(hash(document.imageCatalogSha256), 'release-set.json requires an image-catalog SHA-256.');
   if (document.schemaVersion === 2) {
@@ -100,6 +107,7 @@ export function assertReleaseSetShape(document) {
       'release-set.json schemaVersion 2 requires an initial or supported release tier.');
   }
   if (requiresReleaseImpact(document.version)) assert(hash(document.releaseImpactSha256) && ['documentation', 'npm-presentation', 'cli', 'runtime-component', 'full'].includes(document.releaseImpactProfile), 'Qubicl 0.6 and later release sets require one exact release-impact identity.');
+  if (document.imageInputsSha256 !== undefined) assert(hash(document.imageInputsSha256), 'release-set.json has an invalid image-input identity.');
   const targets = document.schemaVersion === 2 && document.releaseTier === 'initial'
     ? ['linux-x64']
     : RELEASE_TARGETS;

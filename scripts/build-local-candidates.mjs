@@ -14,7 +14,6 @@ import {
   assertTrivyReportPrivacy,
   assertTrivyScanBinding,
   canonicalJson,
-  describeFiles,
   normalizeRepository,
   sha256,
   summarizeTrivyReports,
@@ -30,6 +29,9 @@ import { LOCAL_CANDIDATE_CONCURRENCY, runWithConcurrency } from './candidate-con
 import { inspectOciArchive } from './oci-evidence.mjs';
 import { createOciPlatformView } from './oci-platform-view.mjs';
 import { requiresReleaseImpact, verifyReleaseImpactDocument } from './release-impact.mjs';
+import { createReleasePlan } from './release-plan.mjs';
+import { IMAGE_INPUTS_NAME } from './release-inputs.mjs';
+import { writeReleasePresetManifests } from './release-preset-manifests.mjs';
 
 const exec = promisify(execFile);
 const root = resolve(fileURLToPath(new URL('../', import.meta.url)));
@@ -40,6 +42,10 @@ if (options.help) {
 
 Build unpublished release candidates entirely on the current host.
 
+  --execute           Execute the printed plan (default is read-only planning)
+  --plan              Print the plan without constructing artifacts
+  --reuse DIRECTORY   Reuse unchanged images and fresh scans from a prior
+                      candidate of this release version
   --binary-only       Build only the native archive for this host
   --preview           Build an explicitly unsupported prerelease candidate whose
                       unfixed HIGH/CRITICAL findings are retained, not approved
@@ -52,9 +58,48 @@ Build unpublished release candidates entirely on the current host.
   --impact PATH       Bind the exact base-to-candidate change-impact document
   --help              Show this help
 
-A complete Linux x64 build creates six multi-architecture OCI archives first,
-generates their digest/size catalog, then builds and tests the final CLI artifacts.
+A complete Linux x64 run selects six multi-architecture OCI archives, builds
+only changed inputs, generates their digest/size catalog, then builds and tests
+the final CLI artifacts.
 Binary-only and --skip-images builds require --catalog. Nothing is uploaded.`);
+  process.exit(0);
+}
+
+assert(!(options.execute && options.plan), '--execute and --plan are mutually exclusive.');
+assert(!options.reuse || (!options.binaryOnly && !options.skipImages && !options.skipScan && !options.catalog),
+  '--reuse applies only to a complete scanned image candidate.');
+assert(!options.binaryOnly && !options.skipImages || options.catalog,
+  '--binary-only and --skip-images require --catalog PATH.');
+assert(options.binaryOnly || options.skipImages || !options.catalog,
+  '--catalog cannot be combined with a build that generates image candidates.');
+
+if (!options.execute || options.plan) {
+  const plan = await createReleasePlan(root, { reuse: options.reuse });
+  const planningWorkspace = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+  const planningRevision = await capture('git', ['rev-parse', 'HEAD']);
+  const planningTier = options.preview ? 'preview' : options.initial ? 'initial' : 'supported';
+  assert(planningTier !== 'preview' || planningWorkspace.version.includes('-'), '--preview requires a prerelease package version.');
+  assert(planningTier !== 'initial' || /^0\.[0-9]+\.[0-9]+$/.test(planningWorkspace.version), '--initial requires a stable pre-1.0 package version.');
+  let planningImpact;
+  if (requiresReleaseImpact(planningWorkspace.version)) {
+    assert(options.impact, 'Qubicl 0.6 and later candidate plans require --impact PATH generated from the exact prior release revision.');
+    planningImpact = await verifyReleaseImpactDocument(options.impact, { revision: planningRevision, repositoryRoot: root });
+  }
+  plan.releaseTier = planningTier;
+  if (planningImpact) plan.releaseImpact = {
+    profile: planningImpact.profile,
+    baseRevision: planningImpact.baseRevision,
+    affectedArtifacts: planningImpact.affectedArtifacts,
+    requiredChecks: planningImpact.requiredChecks,
+  };
+  if (options.binaryOnly || options.skipImages) {
+    plan.buildImages = []; plan.reuseImages = []; plan.scanImages = [];
+    plan.images = {};
+    plan.cliArtifacts = options.binaryOnly ? ['native'] : ['npm', 'native'];
+    plan.acceptance = [];
+    plan.notes.push('This mode produces a supplemental artifact, not the complete release member; --catalog is required.');
+  }
+  console.log(JSON.stringify({ ...plan, execute: false }, null, 2));
   process.exit(0);
 }
 
@@ -68,6 +113,10 @@ assert(!(options.preview && options.initial), '--preview and --initial are mutua
 const releaseTier = options.preview ? 'preview' : options.initial ? 'initial' : 'supported';
 const buildImages = !binaryOnly && !options.skipImages;
 const scanImages = buildImages && !options.skipScan;
+assert(!options.reuse || (buildImages && scanImages), '--reuse requires a complete scanned candidate.');
+const buildPlan = buildImages ? await createReleasePlan(root, { reuse: options.reuse }) : undefined;
+const refreshScans = scanImages && (!options.reuse || buildPlan.scanImages.length > 0);
+console.log(JSON.stringify({ stage: 'execution-plan', plan: buildPlan }, null, 2));
 const supportedTargets = new Set(['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64']);
 const target = `${process.platform}-${process.arch}`;
 assert(supportedTargets.has(target), `Native candidates are not supported on ${target}.`);
@@ -81,10 +130,11 @@ assert(releaseTier !== 'preview' || version.includes('-'), '--preview requires a
 assert(releaseTier !== 'initial' || /^0\.[0-9]+\.[0-9]+$/.test(version), '--initial requires a stable pre-1.0 package version.');
 const revision = process.env.QUBICL_CANDIDATE_REVISION ?? await capture('git', ['rev-parse', 'HEAD']);
 if (requiresReleaseImpact(version)) assert(options.impact, 'Qubicl 0.6 and later candidates require --impact PATH generated from the exact prior release revision.');
+assert(requiresReleaseImpact(version), 'This builder workflow targets 0.6 and later; use the historical release tooling for older versions.');
 const releaseImpact = options.impact ? await verifyReleaseImpactDocument(options.impact, { revision, repositoryRoot: root }) : undefined;
-if (releaseImpact?.affectedArtifacts.some((artifact) => artifact.endsWith('-image'))) assert(buildImages, 'The release impact requires image candidates; --skip-images and --binary-only are not valid.');
-if (releaseImpact?.requiredChecks.includes('image-scans')) assert(scanImages, 'The release impact requires image scans; --skip-scan is not valid.');
-if (releaseImpact?.affectedArtifacts.includes('npm')) assert(!binaryOnly, 'The release impact requires the npm artifact; --binary-only is not valid.');
+if (!binaryOnly && releaseImpact?.affectedArtifacts.some((artifact) => artifact.endsWith('-image'))) assert(buildImages, 'The release impact requires image candidates; --skip-images and --binary-only are not valid.');
+if (!binaryOnly && releaseImpact?.requiredChecks.includes('image-scans')) assert(scanImages, 'The release impact requires image scans; --skip-scan is not valid.');
+// Supplemental native members bind the full impact but do not duplicate its complete Linux member.
 const snapshotRevision = await capture('git', ['rev-parse', 'HEAD']);
 assert(/^[a-f0-9]{40}$/u.test(revision) && revision === snapshotRevision,
   `Candidate revision must be the exact reviewed Git HEAD; expected ${snapshotRevision}, found ${revision}.`);
@@ -99,12 +149,17 @@ const staging = join(outputRoot, `.${version}-${shortRevision}-${target}.${proce
 const clean = await capture('git', ['status', '--porcelain']);
 const toolVersions = { node: process.version, npm: await capture('npm', ['--version']) };
 const scanBindings = [];
+const stagedHashes = new Map();
+const stagedSha256 = (path) => {
+  if (!stagedHashes.has(path)) stagedHashes.set(path, sha256(path));
+  return stagedHashes.get(path);
+};
 let trivyDetails;
 if (buildImages) {
   toolVersions.docker = await capture('docker', ['version', '--format', '{{.Server.Version}}']);
   toolVersions.buildx = await capture('docker', ['buildx', 'version']);
 }
-if (scanImages) {
+if (refreshScans) {
   await run('trivy', ['image', '--download-db-only']);
   toolVersions.trivy = await capture('trivy', ['--version']);
   trivyDetails = JSON.parse(await capture('trivy', ['--version', '--format', 'json']));
@@ -141,28 +196,75 @@ try {
   if (releaseImpact) await copyFile(options.impact, join(staging, releaseImpactName));
   let catalogPath;
   let imageEfficiency;
+  let imageInputsPath;
+  const donor = options.reuse
+    ? JSON.parse(await readFile(join(options.reuse, 'candidate.json'), 'utf8'))
+    : undefined;
 
   if (buildImages) {
-    // This first build creates only the image contexts. Final npm/native bytes are
-    // built once after the exact OCI catalog exists.
-    await run('npm', ['run', 'build'], { env: metadataEnvironment });
+    if (donor) {
+      assert(donor.source === source && donor.version === version, 'Reuse candidate has another release identity.');
+    }
     const dashboardManifestPath = join(root, 'packages', 'cli', 'dist', 'assets', 'dashboard', 'asset-manifest.json');
-    const dashboardAssetManifestSha256 = await sha256(dashboardManifestPath);
-    console.log(`Building image candidates with at most ${LOCAL_CANDIDATE_CONCURRENCY} concurrent jobs.`);
-    await runWithConcurrency(imageSpecs, (spec) => buildImageCandidate(spec, dashboardAssetManifestSha256));
-    if (scanImages) {
+    let dashboardAssetManifestSha256;
+    let donorCatalogPath;
+    if (buildPlan.buildImages.length === 0) {
+      donorCatalogPath = join(options.reuse, donor.imageCatalog.name);
+      assert(await sha256(donorCatalogPath) === donor.imageCatalog.sha256,
+        'Reusable image catalog does not match its candidate manifest.');
+      dashboardAssetManifestSha256 = JSON.parse(await readFile(donorCatalogPath, 'utf8')).dashboard?.assetManifestSha256;
+      assert(/^[a-f0-9]{64}$/u.test(dashboardAssetManifestSha256 ?? ''),
+        'Reusable image catalog has no dashboard asset identity.');
+    } else {
+      // A context build is needed only when at least one image will be rebuilt.
+      // Final npm/native bytes are built once after the exact catalog exists.
+      await run('npm', ['run', 'build'], { env: metadataEnvironment });
+      dashboardAssetManifestSha256 = await sha256(dashboardManifestPath);
+    }
+    console.log(`Applying image plan with at most ${LOCAL_CANDIDATE_CONCURRENCY} concurrent builds.`);
+    for (const spec of imageSpecs.filter(({ name }) => buildPlan.images[name].action === 'reuse')) {
+      const name = `qubicl-${spec.name}.oci.tar`;
+      await copyFile(join(options.reuse, name), join(staging, name));
+      assert(await stagedSha256(join(staging, name)) === donor.artifacts.find((artifact) => artifact.name === name)?.sha256,
+        `Reused archive ${name} changed while it was copied.`);
+    }
+    await runWithConcurrency(imageSpecs.filter(({ name }) => buildPlan.images[name].action === 'build'), (spec) => buildImageCandidate(spec, dashboardAssetManifestSha256));
+    const imageInputs = {
+      schemaVersion: 1, version, revision,
+      images: Object.fromEntries(imageSpecs.map(({ name }) => [name, {
+        ...buildPlan.images[name].origin,
+        ...(buildPlan.images[name].action === 'build' ? { node: toolVersions.node, npm: toolVersions.npm, docker: toolVersions.docker, buildx: toolVersions.buildx } : {}),
+      }])),
+    };
+    imageInputsPath = join(staging, IMAGE_INPUTS_NAME);
+    await writeFile(imageInputsPath, `${JSON.stringify(imageInputs, null, 2)}\n`, { mode: 0o644 });
+    if (scanImages && !refreshScans) {
+      for (const name of ['trivy-bindings.json', ...IMAGE_NAMES.flatMap((image) => PLATFORMS.map((platform) => `trivy-${image}-${platform.replace('/', '-')}.json`))]) {
+        await copyFile(join(options.reuse, name), join(staging, name));
+        assert(await stagedSha256(join(staging, name)) === donor.artifacts.find((artifact) => artifact.name === name)?.sha256,
+          `Reused scan evidence ${name} changed while it was copied.`);
+      }
+      toolVersions.trivy = donor.tools.trivy;
+    }
+    if (refreshScans) {
       console.log('Scanning image candidates serially against the shared local Trivy cache.');
       for (const spec of imageSpecs) await scanImageCandidate(spec);
     }
     if (requiresClientConformance(version)) {
-      const archives = Object.fromEntries(imageSpecs.map(({ name }) => [name, join(staging, `qubicl-${name}.oci.tar`)]));
       const reportPath = join(staging, OCI_EFFICIENCY_REPORT_NAME);
-      const report = await inspectOciEfficiencyArchives(archives);
-      await writeFile(reportPath, serializeOciEfficiencyReport(report), { mode: 0o644 });
-      imageEfficiency = { name: OCI_EFFICIENCY_REPORT_NAME, sha256: await sha256(reportPath) };
+      if (donor && buildPlan.buildImages.length === 0) {
+        await copyFile(join(options.reuse, OCI_EFFICIENCY_REPORT_NAME), reportPath);
+        assert(await stagedSha256(reportPath) === donor.artifacts.find((artifact) => artifact.name === OCI_EFFICIENCY_REPORT_NAME)?.sha256,
+          `Reused ${OCI_EFFICIENCY_REPORT_NAME} changed while it was copied.`);
+      } else {
+        const archives = Object.fromEntries(imageSpecs.map(({ name }) => [name, join(staging, `qubicl-${name}.oci.tar`)]));
+        const report = await inspectOciEfficiencyArchives(archives);
+        await writeFile(reportPath, serializeOciEfficiencyReport(report), { mode: 0o644 });
+      }
+      imageEfficiency = { name: OCI_EFFICIENCY_REPORT_NAME, sha256: await stagedSha256(reportPath) };
     }
     catalogPath = join(staging, 'image-catalog.json');
-    await run(process.execPath, [
+    const catalogArguments = [
       'scripts/generate-image-catalog.mjs',
       '--directory', staging,
       '--output', catalogPath,
@@ -170,16 +272,27 @@ try {
       '--revision', revision,
       '--source', source,
       '--owner', owner,
-      '--dashboard-manifest', dashboardManifestPath,
-    ], { env: metadataEnvironment });
+      '--image-inputs', imageInputsPath,
+    ];
+    if (donorCatalogPath) catalogArguments.push(
+      '--reuse-catalog', donorCatalogPath,
+      '--dashboard-manifest-sha256', dashboardAssetManifestSha256,
+    );
+    else catalogArguments.push('--dashboard-manifest', dashboardManifestPath);
+    await run(process.execPath, catalogArguments, { env: metadataEnvironment });
   } else {
     await run('npm', ['run', 'build:types'], { env: metadataEnvironment });
     catalogPath = join(staging, 'image-catalog.json');
     await copyFile(options.catalog, catalogPath);
+    const suppliedInputs = join(resolve(options.catalog, '..'), IMAGE_INPUTS_NAME);
+    try {
+      await stat(suppliedInputs);
+      imageInputsPath = join(staging, IMAGE_INPUTS_NAME);
+      await copyFile(suppliedInputs, imageInputsPath);
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
 
-  const { ImageCatalogSchema } = await import('../packages/core/dist/index.js');
-  const catalog = assertCatalogIdentity(ImageCatalogSchema.parse(JSON.parse(await readFile(catalogPath, 'utf8'))), {
+  const catalog = assertCatalogIdentity(JSON.parse(await readFile(catalogPath, 'utf8')), {
     version,
     revision,
     source,
@@ -194,8 +307,14 @@ try {
     QUBICL_DEFAULT_COMPUTER_IMAGE: catalog.presets.workstation.image.requested,
   });
 
-  // No command after this build may rebuild either staged artifact.
-  await run('npm', ['run', 'build:binary'], { env: finalEnvironment });
+  // Build once against the catalog, then rewrite only the external preset
+  // manifests to the verified per-image origins before packaging.
+  await run('npm', ['run', 'build'], { env: finalEnvironment });
+  if (imageInputsPath) {
+    await writeReleasePresetManifests(root, JSON.parse(await readFile(imageInputsPath, 'utf8')));
+  }
+  // No command after this step may rebuild the staged JavaScript or assets.
+  await run(process.execPath, ['scripts/build-binary.mjs'], { env: finalEnvironment });
 
   const binaryArchive = `qubicl-${version}-${target}.tar.gz`;
   const nativeSbom = `qubicl-${version}-${target}.spdx.json`;
@@ -236,26 +355,28 @@ try {
     security = summarizeTrivyReports(reportEntries, exceptions, {
       evaluatedAt: new Date().toISOString(),
       exceptionName,
-      exceptionSha256: await sha256(exceptionPath),
+      exceptionSha256: await stagedSha256(exceptionPath),
       applicabilityDocument: applicability,
       applicabilityName,
-      applicabilitySha256: await sha256(applicabilityPath),
+      applicabilitySha256: await stagedSha256(applicabilityPath),
       releaseTier,
     });
     await writeFile(join(staging, 'trivy-summary.json'), `${JSON.stringify(security, null, 2)}\n`, { mode: 0o644 });
-    const trivyDatabase = resolve(process.env.TRIVY_CACHE_DIR ?? join(homedir(), '.cache', 'trivy'), 'db', 'trivy.db');
-    await writeFile(join(staging, 'trivy-bindings.json'), `${JSON.stringify({
-      schemaVersion: 2,
-      createdAt: new Date().toISOString(),
-      scanner: {
-        name: 'trivy',
-        version: trivyDetails.Version,
-        versionOutputSha256: createHash('sha256').update(toolVersions.trivy).digest('hex'),
-        vulnerabilityDatabase: { ...trivyDetails.VulnerabilityDB, sha256: await sha256(trivyDatabase) },
-        checkBundle: trivyDetails.CheckBundle,
-      },
-      scans: scanBindings.sort((left, right) => left.report.localeCompare(right.report)),
-    }, null, 2)}\n`, { mode: 0o644 });
+    if (refreshScans) {
+      const trivyDatabase = resolve(process.env.TRIVY_CACHE_DIR ?? join(homedir(), '.cache', 'trivy'), 'db', 'trivy.db');
+      await writeFile(join(staging, 'trivy-bindings.json'), `${JSON.stringify({
+        schemaVersion: 2,
+        createdAt: new Date().toISOString(),
+        scanner: {
+          name: 'trivy',
+          version: trivyDetails.Version,
+          versionOutputSha256: createHash('sha256').update(toolVersions.trivy).digest('hex'),
+          vulnerabilityDatabase: { ...trivyDetails.VulnerabilityDB, sha256: await sha256(trivyDatabase) },
+          checkBundle: trivyDetails.CheckBundle,
+        },
+        scans: scanBindings.sort((left, right) => left.report.localeCompare(right.report)),
+      }, null, 2)}\n`, { mode: 0o644 });
+    }
   }
 
   const preflightArgs = [
@@ -271,16 +392,19 @@ try {
 
   if (buildImages) {
     for (const spec of imageSpecs) {
-      await run('docker', ['image', 'load', '--input', join(staging, `qubicl-${spec.name}.oci.tar`), '--platform', 'linux/amd64']);
       const resolved = catalogImage(catalog, spec.name).platforms['linux/amd64'].resolved;
-      await capture('docker', ['image', 'inspect', resolved]);
+      try {
+        await capture('docker', ['image', 'inspect', resolved]);
+      } catch {
+        await run('docker', ['image', 'load', '--input', join(staging, `qubicl-${spec.name}.oci.tar`), '--platform', 'linux/amd64']);
+        await capture('docker', ['image', 'inspect', resolved]);
+      }
     }
     const acceptanceEnvironment = {
       ...finalEnvironment,
       QUBICL_E2E_SKIP_IMAGE_BUILD: '1',
     };
     const acceptanceJobs = [
-      ['source', '--no-build'],
       ['npm', '--archive', join(staging, npmArchive)],
       ['binary', '--archive', join(staging, binaryArchive)],
     ];
@@ -293,9 +417,9 @@ try {
   }
 
   await assertSourceSnapshot('candidate manifest generation');
-  const artifacts = await describeFiles(staging);
+  const artifacts = await describeStagedFiles(staging);
   const manifest = {
-    schemaVersion: releaseImpact ? 6 : 5,
+    schemaVersion: imageInputsPath && releaseImpact ? 7 : releaseImpact ? 6 : 5,
     version,
     revision,
     created,
@@ -303,10 +427,11 @@ try {
     releaseTier,
     host: { platform: process.platform, architecture: process.arch, target },
     tools: toolVersions,
-    dependencies: { name: dependencyEvidenceName, sha256: await sha256(join(staging, dependencyEvidenceName)) },
-    ...(releaseImpact ? { releaseImpact: { name: releaseImpactName, sha256: await sha256(join(staging, releaseImpactName)), profile: releaseImpact.profile, baseRevision: releaseImpact.baseRevision } } : {}),
+    dependencies: { name: dependencyEvidenceName, sha256: await stagedSha256(join(staging, dependencyEvidenceName)) },
+    ...(releaseImpact ? { releaseImpact: { name: releaseImpactName, sha256: await stagedSha256(join(staging, releaseImpactName)), profile: releaseImpact.profile, baseRevision: releaseImpact.baseRevision } } : {}),
     modes: { binaryOnly, images: buildImages, scans: scanImages, exactArtifactAcceptance: buildImages },
-    imageCatalog: { name: 'image-catalog.json', sha256: await sha256(catalogPath) },
+    imageCatalog: { name: 'image-catalog.json', sha256: await stagedSha256(catalogPath) },
+    ...(imageInputsPath && releaseImpact ? { imageInputs: { name: IMAGE_INPUTS_NAME, sha256: await stagedSha256(imageInputsPath) } } : {}),
     ...(imageEfficiency ? { imageEfficiency } : {}),
     ...(security ? { security } : {}),
     artifacts,
@@ -315,7 +440,7 @@ try {
 
   const checksumFiles = (await readdir(staging)).filter((name) => name !== 'SHA256SUMS').sort();
   const checksums = [];
-  for (const name of checksumFiles) checksums.push(`${await sha256(join(staging, name))}  ${name}`);
+  for (const name of checksumFiles) checksums.push(`${await stagedSha256(join(staging, name))}  ${name}`);
   await writeFile(join(staging, 'SHA256SUMS'), `${checksums.join('\n')}\n`, { mode: 0o644 });
 
   await run(process.execPath, ['scripts/verify-candidate.mjs', staging], { env: finalEnvironment });
@@ -376,7 +501,7 @@ async function scanImageCandidate(spec) {
   const scanSourceName = `.scan-${spec.name}.source.oci`;
   const scanSource = join(staging, scanSourceName);
   const measured = await inspectOciArchive(archive, { requireAttestations: true });
-  const archiveSha256 = await sha256(archive);
+  const archiveSha256 = await stagedSha256(archive);
   await mkdir(scanSource);
   await run('tar', ['-xf', archive, '-C', scanSource], { env: metadataEnvironment });
   try {
@@ -491,6 +616,16 @@ function releaseEnvironment(overrides) {
   return { ...environment, ...overrides };
 }
 
+async function describeStagedFiles(directory) {
+  const files = [];
+  for (const name of (await readdir(directory)).sort()) {
+    const path = join(directory, name);
+    const details = await stat(path);
+    if (details.isFile()) files.push({ name, bytes: details.size, sha256: await stagedSha256(path) });
+  }
+  return files;
+}
+
 async function capture(command, args, options = {}) {
   const { trim = true, ...execOptions } = options;
   const result = await exec(command, args, { cwd: root, encoding: 'utf8', ...execOptions });
@@ -527,6 +662,8 @@ async function buildInIsolatedSource(args) {
   const childArgs = [...args];
   const catalogIndex = childArgs.indexOf('--catalog');
   if (catalogIndex >= 0) childArgs[catalogIndex + 1] = options.catalog;
+  const reuseIndex = childArgs.indexOf('--reuse');
+  if (reuseIndex >= 0) childArgs[reuseIndex + 1] = options.reuse;
   const impactIndex = childArgs.indexOf('--impact');
   if (impactIndex >= 0) childArgs[impactIndex + 1] = options.impact;
   const status = await capture('git', ['status', '--porcelain']);
@@ -591,10 +728,16 @@ async function buildInIsolatedSource(args) {
 }
 
 function parseOptions(args) {
-  const parsed = { binaryOnly: false, preview: false, initial: false, skipImages: false, skipScan: false, help: false, catalog: undefined, impact: undefined };
+  const parsed = { execute: false, plan: false, reuse: undefined, binaryOnly: false, preview: false, initial: false, skipImages: false, skipScan: false, help: false, catalog: undefined, impact: undefined };
   for (let index = 0; index < args.length; index += 1) {
     const option = args[index];
-    if (option === '--binary-only') parsed.binaryOnly = true;
+    if (option === '--execute') parsed.execute = true;
+    else if (option === '--plan') parsed.plan = true;
+    else if (option === '--reuse') {
+      assert(args[index + 1] && !args[index + 1].startsWith('--'), '--reuse requires a directory.');
+      parsed.reuse = resolve(args[++index]);
+    }
+    else if (option === '--binary-only') parsed.binaryOnly = true;
     else if (option === '--preview') parsed.preview = true;
     else if (option === '--initial') parsed.initial = true;
     else if (option === '--skip-images') parsed.skipImages = true;
