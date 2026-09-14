@@ -458,7 +458,7 @@ try {
     return { response, value };
   };
   const lease = await call('acquire_lease', { durationSeconds: 60 });
-  const longProcess = await call('exec_command', { lease, command: 'sleep 300', yieldTimeMs: 25 });
+  const longProcess = await call('exec_command', { lease, command: 'sleep 300', lifecycle: 'session', yieldTimeMs: 25 });
   assert.equal(longProcess.running, true);
   await exec('docker', ['restart', gatewayRuntime()]);
   await waitFor(async () => (await fetch(`http://127.0.0.1:${config.gateway.port}/health`)).ok, 60_000);
