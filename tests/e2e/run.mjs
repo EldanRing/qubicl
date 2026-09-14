@@ -290,13 +290,13 @@ try {
   });
   const computerBrowserServer = await computerCall('exec_command', {
     lease: computerLease,
-    command: 'python3 -m http.server 8765 --bind 127.0.0.1 --directory /home/qubicl',
+    command: 'python3 -m http.server 8765 --bind 0.0.0.0 --directory /home/qubicl',
     lifecycle: 'session',
     label: 'Computer browser contract server',
     yieldTimeMs: 1_000,
   });
   assert.equal(computerBrowserServer.running, true);
-  const computerNavigation = await computerCall('browser_navigate', { lease: computerLease, url: 'http://127.0.0.1:8765/computer-browser.html' });
+  const computerNavigation = await computerCall('browser_navigate', { lease: computerLease, url: `http://${computerExecutorRuntime(computerContract)}:8765/computer-browser.html` });
   assert.equal(computerNavigation.title, 'Qubicl computer browser');
   await computerCall('release_lease', { lease: computerLease });
   await exec('docker', ['exec', computerSessionRuntime(computerContract), 'pgrep', '-x', 'chromium']);
