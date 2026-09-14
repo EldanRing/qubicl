@@ -120,6 +120,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 - The gateway image advertises protocol 3 consistently with its runtime health
   and viewer-routing contract, so source and packaged artifact acceptance no
   longer reject the 0.6 image as a legacy gateway.
+- Gateway requests now allow bounded browser operations to finish before the
+  idle cutoff, so slow navigation returns the browser's actual result instead
+  of an ambiguous post-dispatch timeout.
 
 ### Security
 

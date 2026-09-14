@@ -64,7 +64,9 @@ const EXTERNAL_TICKETS_PER_MINUTE = 12;
 const EXTERNAL_UPGRADE_IDLE_TIMEOUT_MS = 30 * 60 * 1_000;
 const EXTERNAL_UPGRADE_LIFETIME_MS = 12 * 60 * 60 * 1_000;
 const PROXY_CONNECT_TIMEOUT_MS = 10_000;
-const PROXY_IDLE_TIMEOUT_MS = 30_000;
+// Browser and isolated-runner calls can legitimately remain silent for 35 seconds.
+// Leave enough room for the computer to return its bounded result or specific error.
+const PROXY_IDLE_TIMEOUT_MS = 60_000;
 const PROXY_OVERALL_TIMEOUT_MS = 5 * 60_000;
 const MAX_PROXY_REQUESTS_PER_COMPUTER = 32;
 const LOCAL_MAX_BODY_BYTES = 32 * 1024 * 1024;
