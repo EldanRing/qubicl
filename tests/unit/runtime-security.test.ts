@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import YAML from 'yaml';
-import { CONTROL_PROTOCOL_VERSION, IMAGE_CATALOG, deriveInternalServiceKey, imageIdentity, presetDefaults, type ComputerConfig } from '@qubicl/core';
+import { CONTROL_PROTOCOL_VERSION, GATEWAY_EXPOSURE_PROTOCOL, GATEWAY_PROTOCOL_VERSION, IMAGE_CATALOG, VIEWER_AUTHENTICATION_HEADER_V1, deriveInternalServiceKey, imageIdentity, presetDefaults, type ComputerConfig } from '@qubicl/core';
 import {
   containerName,
   computerExecutorServiceName,
@@ -19,6 +19,7 @@ import {
   LEGACY_VIEWER_AUTHENTICATION,
   projectName,
   readableContainerName,
+  readRuntimeImageContracts,
   recordRuntimeImageContracts,
   renderRuntime,
   runtimeImageReference,
@@ -32,6 +33,41 @@ import {
   type LegacyRuntimeMigrationAdapter,
   type RuntimeInspection,
 } from '../../packages/cli/dist/docker.js';
+
+test('runtime image contract cache keeps supported prior gateway evidence readable for upgrades', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-runtime-prior-gateway-contract-'));
+  try {
+    const state = await initializeState(statePaths(root));
+    const contentId = `sha256:${'7'.repeat(64)}` as const;
+    const contractsPath = join(state.paths.runtime, 'image-contracts.json');
+    const document = (gatewayProtocolVersion: number) => ({
+      version: 1,
+      images: {
+        [contentId]: {
+          kind: 'gateway',
+          contentId,
+          viewerAuthentication: VIEWER_AUTHENTICATION_HEADER_V1,
+          gatewayProtocolVersion,
+          gatewayExposureProtocol: GATEWAY_EXPOSURE_PROTOCOL,
+        },
+      },
+    });
+
+    await writeFile(contractsPath, `${JSON.stringify(document(GATEWAY_PROTOCOL_VERSION - 1))}\n`, { mode: 0o600 });
+    assert.equal(
+      (await readRuntimeImageContracts(state)).images[contentId]?.gatewayProtocolVersion,
+      GATEWAY_PROTOCOL_VERSION - 1,
+    );
+
+    await writeFile(contractsPath, `${JSON.stringify(document(GATEWAY_PROTOCOL_VERSION + 1))}\n`, { mode: 0o600 });
+    await assert.rejects(readRuntimeImageContracts(state), /Runtime image contract/);
+
+    await writeFile(contractsPath, `${JSON.stringify(document(1))}\n`, { mode: 0o600 });
+    await assert.rejects(readRuntimeImageContracts(state), /Runtime image contract/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('stopped services use a Compose command that supports dependency suppression', () => {
   assert.deepEqual(stoppedServiceCreationArgs('gateway', false), ['up', '--no-start', '--no-deps', 'gateway']);

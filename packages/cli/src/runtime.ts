@@ -49,6 +49,7 @@ const LEGACY_PROJECT_NAME = 'qubicl';
 const INSTALLATION_FINGERPRINT_LENGTH = 20;
 const COMPUTER_FINGERPRINT_LENGTH = 24;
 const RUNTIME_IMAGE_CONTRACTS_VERSION = 1;
+const FIRST_AUTHENTICATED_VIEWER_GATEWAY_PROTOCOL_VERSION = 2;
 export const PREVIEW_ACCESS_RUNTIME_DIRECTORY = 'preview-access';
 export const PREVIEW_ACCESS_RUNTIME_FILE = 'access.json';
 export const PREVIEW_ACCESS_CONTAINER_DIRECTORY = '/run/qubicl/preview-access';
@@ -100,7 +101,9 @@ export async function readRuntimeImageContracts(state: LoadedState): Promise<Run
     const validGateway = contract?.kind === 'gateway'
       && (viewerAuthentication === LEGACY_VIEWER_AUTHENTICATION
         ? contract.gatewayProtocolVersion === undefined && contract.gatewayExposureProtocol === undefined
-        : contract.gatewayProtocolVersion === GATEWAY_PROTOCOL_VERSION
+        : Number.isInteger(contract.gatewayProtocolVersion)
+          && contract.gatewayProtocolVersion! >= FIRST_AUTHENTICATED_VIEWER_GATEWAY_PROTOCOL_VERSION
+          && contract.gatewayProtocolVersion! <= GATEWAY_PROTOCOL_VERSION
           && (contract.gatewayExposureProtocol === undefined
             || contract.gatewayExposureProtocol === GATEWAY_EXPOSURE_PROTOCOL));
     if (!/^sha256:[a-f0-9]{64}$/u.test(contentId)

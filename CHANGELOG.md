@@ -70,6 +70,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Persisted 0.5 authenticated-gateway evidence remains readable during the
+  coordinated upgrade, while malformed and future protocol contracts still
+  fail closed.
 - State-format migration now transforms each valid 0.5 active and trashed
   computer metadata record alongside its configuration, so existing
   installations can complete the backed-up 0.6 migration.
