@@ -654,7 +654,7 @@ try {
   assert.equal(Number.isSafeInteger(saveWindowId), true);
   await call('control_computer', { lease: afterHumanLease, action: { type: 'keypress', keys: ['ctrl+s'], targetWindowId: saveWindowId } });
   await call('control_computer', { lease: afterHumanLease, action: { type: 'wait', durationMs: 1_000 } });
-  await call('close_desktop_application', { lease: afterHumanLease, applicationId: handoffWriter.applicationId });
+  await call('close_desktop_application', { lease: afterHumanLease, applicationId: handoffWriter.applicationId, discardUnsavedChanges: true });
   const takeoverSaved = await call('exec_command', { lease: afterHumanLease, command: "rm -rf /home/qubicl/takeover-verify; mkdir -p /home/qubicl/takeover-verify; libreoffice --headless --convert-to txt --outdir /home/qubicl/takeover-verify /home/qubicl/document.odt >/tmp/libreoffice-takeover-verify.log 2>&1; grep -q 'takeover survived' /home/qubicl/takeover-verify/document.txt; printf saved", yieldTimeMs: 30_000 });
   assert.equal(takeoverSaved.output, 'saved');
 
