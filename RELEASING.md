@@ -128,6 +128,9 @@ image catalog; it does not repeat the source E2E. The artifact harness owns one
 explicit temporary Qubicl home and removes its exact Compose project and image
 namespace after success or failure. A cleanup failure is reported and preserves
 the temporary home for diagnosis instead of silently leaking Docker resources.
+The home is created under the maintainer's home directory so Docker Desktop can
+bind-mount it through the same shared filesystem required by a normal Qubicl
+installation.
 
 Treat a failed aggregate gate as terminal. Record the completed commands and do
 not restart the aggregate command. After correcting an external condition, run

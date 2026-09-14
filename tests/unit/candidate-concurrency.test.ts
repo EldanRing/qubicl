@@ -84,6 +84,7 @@ test('candidate assembly wires bounded incremental builds and isolated serial ar
   assert.match(builder, /for \(const args of acceptanceJobs\)/u);
   assert.doesNotMatch(builder, /runWithConcurrency\(acceptanceJobs/u);
   assert.match(harness, /artifactAcceptanceIsolation\(mode, temporary\)/u);
+  assert.match(harness, /mkdtemp\(resolve\(homedir\(\), `\.qubicl-\$\{mode\}-e2e-`\)\)/u);
   assert.match(harness, /QUBICL_E2E_HOME: e2eHome/u);
   assert.match(harness, /cleanupE2eHome\(e2eHome, isolation\.imageNamespace\)/u);
   assert.match(harness, /label=com\.docker\.compose\.project=\$\{project\}/u);

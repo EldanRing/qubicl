@@ -295,6 +295,8 @@ Artifact acceptance runs inside one explicit temporary Qubicl home. Its outer
 harness removes the exact Compose project and temporary image namespace on
 success or failure, then verifies no labeled Docker resources remain. If cleanup itself fails, the
 harness reports both failures and preserves the temporary home for diagnosis.
+The temporary home lives under the maintainer's home directory so Docker Desktop
+can bind-mount it through the normal shared host filesystem.
 Do not rerun an aggregate source gate after a late external failure: retain its
 completed evidence and execute only the missing command. Reuse locally built
 development images only when their exact inputs did not change.

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
@@ -13,7 +13,7 @@ const supportedModes = new Set(['source', 'npm', 'binary']);
 if (!supportedModes.has(mode)) throw new Error(`Artifact mode must be source, npm, or binary; received ${mode}.`);
 const options = parseOptions(process.argv.slice(3));
 
-const temporary = await mkdtemp(join(tmpdir(), `qubicl-${mode}-e2e-`));
+const temporary = await mkdtemp(resolve(homedir(), `.qubicl-${mode}-e2e-`));
 const e2eHome = join(temporary, 'home');
 await mkdir(e2eHome, { mode: 0o700 });
 const isolation = artifactAcceptanceIsolation(mode, temporary);
