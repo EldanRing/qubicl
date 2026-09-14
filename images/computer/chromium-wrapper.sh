@@ -4,11 +4,6 @@ set -eu
 launch_browser='
 keyring_directory="${XDG_DATA_HOME:-$HOME/.local/share}/qubicl"
 keyring_password_file="$keyring_directory/browser-keyring-password"
-install -d -m 0700 "$keyring_directory"
-if [ ! -e "$keyring_password_file" ]; then
-  umask 077
-  head -c 32 /dev/urandom | base64 >"$keyring_password_file"
-fi
 if [ -L "$keyring_password_file" ] || [ ! -f "$keyring_password_file" ] ||
    [ "$(stat -c %u "$keyring_password_file")" != "$(id -u)" ] ||
    [ "$(stat -c %a "$keyring_password_file")" != 600 ] ||

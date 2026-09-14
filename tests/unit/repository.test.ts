@@ -244,9 +244,12 @@ test('container bases are pinned by digest', async () => {
   assert.doesNotMatch(computer, /--no-sandbox|--disable-dev-shm-usage/);
   assert.match(computer, /rm -f \/etc\/chromium\.d\/dev-shm/);
   assert.match(computer, /libreoffice-registrymodifications\.xcu/);
+  const entrypoint = await readFile(join(root, 'images/computer/entrypoint.sh'), 'utf8');
   const chromiumWrapper = await readFile(join(root, 'images/computer/chromium-wrapper.sh'), 'utf8');
+  assert.match(entrypoint, /prepare_browser_keyring_password\(\)/);
+  assert.match(entrypoint, /runuser -u qubicl -- sh -ceu[^\n]*head -c 32 \/dev\/urandom \| base64/);
+  assert.ok(entrypoint.indexOf('prepare_browser_keyring_password\n') < entrypoint.indexOf('start_internal_session()'));
   assert.match(chromiumWrapper, /browser-keyring-password/);
-  assert.match(chromiumWrapper, /head -c 32 \/dev\/urandom \| base64/);
   assert.match(chromiumWrapper, /stat -c %a[^\n]*!= 600/);
   assert.ok(chromiumWrapper.indexOf('gnome-keyring-daemon --login') < chromiumWrapper.indexOf('gnome-keyring-daemon --start'));
   assert.match(chromiumWrapper, /--password-store=gnome-libsecret/);

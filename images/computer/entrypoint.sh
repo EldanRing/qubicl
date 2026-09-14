@@ -133,10 +133,31 @@ prepare_browser_leaf_directory() {
   runuser -u qubicl -- test -d "$path" -a -w "$path" -a -x "$path" || browser_home_ownership_error "$path"
 }
 
+prepare_browser_keyring_password() {
+  local path=/home/qubicl/.local/share/qubicl/browser-keyring-password owner
+  if [[ -L "$path" ]] || { [[ -e "$path" ]] && [[ ! -f "$path" ]]; }; then
+    browser_home_ownership_error "$path"
+  fi
+  if [[ ! -e "$path" ]]; then
+    runuser -u qubicl -- sh -ceu 'umask 077; head -c 32 /dev/urandom | base64 >"$1"' qubicl-keyring "$path"
+  fi
+  owner="$(stat -c '%u:%g' -- "$path")"
+  if [[ "$owner" != "$expected_owner" ]]; then
+    browser_home_ownership_error "$path"
+  fi
+  runuser -u qubicl -- chmod 0600 "$path"
+  if ! runuser -u qubicl -- grep -Eq '^[A-Za-z0-9+/]{43}=$' "$path"; then
+    echo "Qubicl browser keyring credential is invalid: ${path}" >&2
+    echo "Restore this computer from a trusted backup before opening the managed browser." >&2
+    exit 78
+  fi
+}
+
 prepare_browser_home() {
   prepare_browser_parent_directory /home/qubicl/.local
   prepare_browser_parent_directory /home/qubicl/.local/share
   prepare_browser_parent_directory /home/qubicl/.local/share/qubicl
+  prepare_browser_keyring_password
   prepare_browser_leaf_directory /home/qubicl/.local/share/qubicl/browser-profile
   prepare_browser_leaf_directory /home/qubicl/Downloads
 }
