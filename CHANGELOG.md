@@ -123,6 +123,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 - Gateway requests now allow bounded browser operations to finish before the
   idle cutoff, so slow navigation returns the browser's actual result instead
   of an ambiguous post-dispatch timeout.
+- Managed Chromium initializes and unlocks its durable Secret Service with a
+  per-computer credential, so first navigation cannot stall behind an invisible
+  keyring password prompt.
 
 ### Security
 

@@ -244,6 +244,12 @@ test('container bases are pinned by digest', async () => {
   assert.doesNotMatch(computer, /--no-sandbox|--disable-dev-shm-usage/);
   assert.match(computer, /rm -f \/etc\/chromium\.d\/dev-shm/);
   assert.match(computer, /libreoffice-registrymodifications\.xcu/);
+  const chromiumWrapper = await readFile(join(root, 'images/computer/chromium-wrapper.sh'), 'utf8');
+  assert.match(chromiumWrapper, /browser-keyring-password/);
+  assert.match(chromiumWrapper, /head -c 32 \/dev\/urandom \| base64/);
+  assert.match(chromiumWrapper, /stat -c %a[^\n]*!= 600/);
+  assert.ok(chromiumWrapper.indexOf('gnome-keyring-daemon --login') < chromiumWrapper.indexOf('gnome-keyring-daemon --start'));
+  assert.match(chromiumWrapper, /--password-store=gnome-libsecret/);
   for (const target of ['file-system', 'browser', 'computer', 'workstation']) assert.match(computer, new RegExp(` AS ${target}$`, 'm'));
   assert.doesNotMatch(computer, /^\s+xfce4\s*\\$/m);
   assert.doesNotMatch(computer, /^\s+(?:atril|ristretto)\s*\\$/m);

@@ -229,6 +229,14 @@ try {
     test "$renderer_nspid_fields" -gt "$browser_nspid_fields"
     grep -Eq '^[[:space:]]*1000[[:space:]]+1000[[:space:]]+1' "/proc/$renderer_pid/uid_map"
     test "$(df -B1 --output=size /dev/shm | tail -n 1)" -ge 1000000000
+    keyring_password=/home/qubicl/.local/share/qubicl/browser-keyring-password
+    test -f "$keyring_password"
+    test ! -L "$keyring_password"
+    test "$(stat -c %u "$keyring_password")" = 1000
+    test "$(stat -c %a "$keyring_password")" = 600
+    grep -Eq '^[A-Za-z0-9+/]{43}=$' "$keyring_password"
+    pgrep -x gnome-keyring-daemon >/dev/null
+    ! pgrep -x gcr-prompter >/dev/null
   `]);
   await commandCli(['stop', browserContract.name]);
   await commandCli(['delete', browserContract.name]);
