@@ -8,11 +8,12 @@ Qubicl has one durable computer boundary: the bind-mounted `/home`.
 | --- | --- | --- |
 | Files under `/home` | Yes | Host path: `~/.qubicl/computers/<uuid>/home`. |
 | Chromium profile | Yes | Cookies, site data, preferences, history, and sessions live under the computer's `/home`; the viewer identifies the profile as durable. |
-| UUID, name, preset, capabilities, exact image identity, CPU, memory | Yes | State format 4 in protected host configuration. |
-| External token/internal credentials | Until rotation/delete | Raw values exist only in mode-`0600` host state. |
+| UUID, name, preset, capabilities, exact image identity, CPU, memory | Yes | State format 5 in protected host configuration. |
+| Named client credentials/internal keys | Until selective rotation/delete | Raw values exist only in mode-`0600` host state; client IDs, scopes, and last use are separately attributable. |
+| Retained task records and output | Bounded | Stored in the durable home for the configured retention period; a runtime restart interrupts the process but preserves its terminal record without replay. |
 | Optional remote-gateway exposure | Until revoked | Host-local bind, TLS identity metadata, trusted origins, and network policy are durable; copied certificate and key material remain in protected host state. |
 | Runtime roots and system packages | No guarantee | Recreation discards them. Use a custom image. |
-| `/tmp`, display state, managed processes | No | Runtime-only. |
+| `/tmp`, display state, live process state | No | Runtime-only. Declared services may restart; arbitrary jobs do not replay. |
 | Compose, routes, networks, containers | No | Rebuilt from durable intent. |
 
 Stop/start may make root changes appear durable because the same runtime containers remain. That is incidental. Recreation, image replacement, migration, or recovery may remove them without warning.
@@ -103,7 +104,9 @@ runtime work still waiting for Docker.
 
 State v1/v2 migration first writes an exact checksummed backup of config/secrets under `backups/`, then uses `state-migration.yaml` for resumability. Migration preserves IDs, names, tokens, internal keys, homes, trash, resources, port, and legacy image strings. It does not inspect Docker, recreate containers, or start anything. Newer unsupported formats fail closed.
 
-Do not delete a journal. Preserve the state root, fix the reported prerequisite, then rerun `qubicl setup` or `qubicl up` as directed.
+Do not delete a journal. Run `qubicl recover status` to see its exact target,
+completed phase, and roll-forward command. Preserve the state root, fix the
+reported prerequisite, then run `qubicl recover resume --yes` as directed.
 
 ## Delete, restore, purge
 
@@ -127,12 +130,32 @@ qubicl backup restore BACKUP_ID restored-research
 qubicl backup prune research --keep 5 --yes
 ```
 
-`--stopped` requires the source computer to be stopped. Optional `--encrypt --passphrase-file FILE` uses a local passphrase without persisting it in Qubicl state. Archives have checksummed manifests, explicit retention, and contain only the durable home—not runtime roots, credentials, or gateway TLS state. Verification and restore copy the exact archive through a no-follow, size-bounded descriptor, validate its complete regular-file/directory/confined-link graph, repeat the metadata and byte identity checks during extraction, and no-follow walk the staged tree before promotion. Traversal, duplicate or canonically aliased paths, cycles, special or sparse entries, unsafe permissions, and over-budget metadata or expansion fail closed. Migration snapshots are not backups of computer homes, and secret-free `export` intentionally omits credentials, gateway exposure, and file contents. A separate private backup of the complete state root is still required for disaster recovery of computer identities, tokens, policies, SSH keys, remote-gateway TLS material, and trash.
+`--stopped` requires the source computer to be stopped. Optional `--encrypt --passphrase-file FILE` uses a local passphrase without persisting it in Qubicl state. The dashboard can create, verify, and restore encrypted backups while keeping the passphrase only in the accepted operation. Archives have checksummed manifests, explicit retention, and contain only the durable home—not runtime roots, credentials, or gateway TLS state. Verification and restore copy the exact archive through a no-follow, size-bounded descriptor, validate its complete regular-file/directory/confined-link graph, repeat the metadata and byte identity checks during extraction, and no-follow walk the staged tree before promotion. Traversal, duplicate or canonically aliased paths, cycles, special or sparse entries, unsafe permissions, and over-budget metadata or expansion fail closed. Migration snapshots are not backups of computer homes, and secret-free `export` intentionally omits credentials, gateway exposure, and file contents.
+
+## Full-installation export and import
+
+For a stopped installation, `qubicl installation export --output FILE
+--passphrase-file FILE` creates a mandatory AES-256-GCM encrypted bundle outside
+the source state root. It includes configuration, computer and client secrets,
+homes and browser profiles, SSH identities, dashboard authentication state,
+trash, audits, and home-backup records. It excludes live containers, generated
+runtime state, container root filesystems, service-manager registrations, and
+external DNS/trust configuration.
+
+`installation inspect` validates encryption, archive safety, manifest/state
+identity, computer inventory, and an optional target before any import.
+`installation import FILE --target-root DIR --passphrase-file FILE` requires a
+new target directory, assigns a new installation ID, retains computer IDs and
+client credentials, rewrites owner markers for the importing operator, disables
+the imported dashboard and its remote exposure, starts nothing, and leaves the
+source installation and bundle unchanged. The generated `import-report.json`
+lists the host-specific gateway, SSH, certificate, image, and service checks to
+perform before starting the imported installation.
 
 
-## State format 4 and management recovery
+## State format 5 and management recovery
 
-Migration to format 4 requires explicit setup/dashboard-enable approval and
+Migration to format 5 requires explicit setup/dashboard-enable approval and
 retains protected checksummed prior state under `backups`. An old CLI must not
 write migrated state; it refuses the newer format. Dashboard schema-1 documents
 are independent of the core schema. Preserve their password verifier and TLS
@@ -163,8 +186,8 @@ an unjournaled interrupted result remains unconfirmed. Recovery preserves the
 history of that distinction. The dashboard retains the newest 500 terminal
 operation records and preserves unresolved recovery records.
 
-Home archives are not full-installation exports. For host loss, retain a
-protected offline copy of core config/secrets, dashboard state, durable homes,
-backup/migration evidence and pending journals. Reinstall a compatible CLI and
-review restored identities before starting resources. Do not merge arbitrary
-old/new journals or downgrade a migrated live state directory.
+Home archives remain narrower than installation exports. For host loss, retain
+the encrypted installation bundle and its passphrase separately, reinstall a
+compatible CLI, inspect the bundle, import it to a new state root, and review
+the generated host-reconciliation report before starting resources. Do not
+merge arbitrary old/new journals or downgrade a migrated live state directory.

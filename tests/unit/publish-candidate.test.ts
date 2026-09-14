@@ -72,6 +72,7 @@ test('publisher always requires a trusted candidate signature', async () => {
 test('supported publication cannot bypass release-set acceptance evidence', async () => {
   const { buildPublishPlan } = await import(moduleUrl);
   assert.throws(() => buildPublishPlan({
+    version: '0.2.0',
     releaseTier: 'supported',
     modes: { images: true, scans: true, exactArtifactAcceptance: true, binaryOnly: false },
   }, {}, '/candidate'), /signed release set/);

@@ -4,6 +4,140 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
+## 0.6.0 - 2026-09-14
+
+### Added
+
+- Named per-client credentials with independent scopes, rotation, revocation,
+  one-time delivery, dashboard management, and connection examples. The legacy
+  computer token remains as a compatibility credential.
+- Retained tasks with bounded records and logs, list/show/wait/input/stop
+  controls, explicit session-scoped execution, declared restartable services,
+  and interactive PTY tools for MCP and Open Terminal clients.
+- Dynamic installed-application discovery and launch with a bounded built-in,
+  user, and system desktop-entry catalog, resolved executable identity, safe
+  document paths, observable lifecycle, and explicit unsaved-work
+  acknowledgement before close.
+- Scoped custom-network CIDR and TCP-port grants, live-tunnel revocation, and
+  `explain_capability`, network-policy, and secret-scope explanations.
+- App-lifetime preview publications with root-path proxying, isolated origins,
+  normal app cookies, and separately expiring/revocable remote shares.
+- Storage reporting and quota guidance, explicit update checks and notification
+  preferences, resumable recovery status, encrypted dashboard backups, and
+  passphrase-encrypted full-installation export/inspect/import.
+- Guest-only devcontainer lifecycle hooks and harmless forwarded-port metadata,
+  with bounded parsing, offline checks, and host-boundary validation.
+- Exact release-impact documents for 0.6 candidates. Builder, verifier,
+  release-set, and publisher metadata bind the base/candidate revisions, changed
+  paths, required artifacts, checks, protocols, platforms, and evidence-reuse
+  rules.
+- Executable documentation contracts that validate local links, CLI examples,
+  synchronized root/npm claims, and retired constraint language.
+
+### Changed
+
+- State format 5 and control protocol 11 separate interactive ownership from
+  observation, file work, retained tasks, services, and operator-owned SSH.
+  Migration preserves IDs, homes, credentials, and explicit user policy.
+- Runtime names are scoped to the installation, including the primary state
+  root, so multiple installations cannot collide and `gateway` is available as
+  an ordinary computer name.
+- Human control follows the connected viewer with a visible configurable
+  5–300-second reconnect grace (10 seconds by default). Takeover immediately
+  fences old interactive browser, desktop, session-process, and PTY input while
+  retained work continues.
+- Chromium uses a normal durable profile with logins, extensions, downloads,
+  and continued human use. The agent-open tab budget is visible and fails
+  explicitly instead of silently evicting tabs.
+- Git workflows run inside the computer, so repository configuration receives
+  computer authority rather than host-maintainer authority.
+- Dashboard routine saves execute directly. Local authentication survives a
+  same-tab refresh through `sessionStorage`; logout and tab close clear it.
+  Reauthentication remains for destructive, interrupting, or
+  authority-expanding operations. Computer details report the managed browser's
+  effective sandbox, durable-profile, extension, password-store, extraction,
+  tab-budget, engine-version, and sanitized diagnostic posture.
+- Backup and update workflows report clearer outcomes, preserve interrupted
+  state for explicit recovery, and avoid blind replay. Ordinary jobs retain
+  interrupted records after runtime replacement; only declared services restart.
+- Public docs and maintainer rules now distinguish host/security boundaries,
+  configurable resource defaults, implementation limits, support evidence, and
+  explicit maintainer approval gates.
+- The reviewed full-workstation tool-definition ceiling is 38 KB for the 0.6
+  catalog; focused static profiles remain available to reduce client context.
+
+### Fixed
+
+- Operator release of human control now requires the computer's internal
+  operator key; the workload bearer can no longer invoke that route.
+- Queued browser work rechecks ownership immediately before dispatch, late
+  results are discarded after a handoff, failed process fencing can be retried,
+  and cleanup for an old owner no longer revokes a newer unrelated lease.
+- Browser typing honors append mode, desktop application launches reserve
+  capacity before asynchronous preparation, and dropped-UID LibreOffice
+  sessions own their isolated profile files.
+- Interactive Chromium restores phishing, update, extension, popup, keyring,
+  process-protection and HTTPS/storage features disabled by Playwright's test
+  defaults while keeping its sandbox required. Rendered public extraction uses
+  an isolated context without saved logins.
+- Browser tabs have stable IDs and a visible 24-tab agent-open budget. Qubicl
+  no longer closes older or idle tabs automatically, large snapshots report
+  their scan boundary, long action batches are rejected, and full-page capture
+  is bounded before raster allocation.
+- Managed desktop launch accepts any installed executable name available from
+  the approved user/system bin directories, keeps document paths inside the durable home, and no
+  longer applies arbitrary file-extension walls. Programmatic close requires
+  an explicit acknowledgement that unsaved changes may be discarded.
+- Managed commands now default to retained, labeled computer tasks that survive
+  client disconnect and human desktop takeover. Callers can request a
+  lease-scoped session process, and a new process listing lets later clients
+  inspect and stop retained work without exposing command text or output.
+- Devcontainer JSONC preserves comma-like string contents, nested build paths
+  resolve from the configuration file, escaped workspace paths are rejected,
+  and offline imports refuse implicit image builds before contacting Docker.
+- Dashboard credential forms preserve exact secret values, including leading
+  and trailing whitespace.
+- Dashboard backup planning now accepts passphrases for encrypted create,
+  verify, and restore operations, rejects mismatched encryption inputs, and
+  scrubs operation-only passphrases from retained history.
+- Preview revocation and network-rule expiry/revocation now close associated
+  upgraded connections and tunnels instead of only refusing new requests.
+- PTY resize and input messages arriving in one pipe read are drained together;
+  buffered control input can no longer remain invisible behind `select()` and
+  leave an interactive shell waiting indefinitely.
+- Audit events are validated and bounded before persistence, and centralized
+  rotation no longer depends on renaming a file bind-mounted into computers.
+- Configuration can change the viewer reconnect grace and safely rebuild or
+  reconnect the gateway only when that behavior actually changes.
+- Observation-only browser calls no longer attempt to validate a missing
+  interactive lease, Open Terminal sessions sharing one client credential no
+  longer compete for separate compatibility leases, and protocol-10 computers
+  continue to use the unified runtime during a coordinated upgrade.
+- The CLI accepts every documented 0.6 management option, including task,
+  storage, network-CIDR, import-root, credential-template, and viewer-grace
+  values. Storage reports include current and legacy audit paths, and network
+  explanations evaluate literal IPv4 and IPv6 CIDR matches.
+
+### Security
+
+- Browser images keep Chromium's namespace and renderer sandboxes, remove
+  unsafe Playwright testing flags, enable `no-new-privileges`, use a
+  Chromium-compatible seccomp profile and dedicated shared memory, and expose
+  launch diagnostics.
+- Rendered public extraction uses an anonymous ephemeral browser context without
+  persistent cookies, extensions, saved logins, or service workers, and checks
+  public destinations independently of the normal browser profile.
+- Client authorization is scoped to named identities, and internal credentials,
+  operator release authority, route data, and workload command environments are
+  separated. Revoking one client no longer disconnects every client.
+- Gateway requests, sessions, tickets, connections, route bodies, and audit
+  metadata have explicit bounds. Preview and egress authority is checked for the
+  lifetime of managed upgraded connections.
+- Installation archives use authenticated encryption, bounded no-follow archive
+  inspection, exact manifest/state identity checks, a new installation ID on
+  import, safe replacement of any archived ownership-marker link,
+  stopped-by-default recovery, and no imported remote administration.
+
 ## 0.5.1 - 2026-09-10
 
 ### Added

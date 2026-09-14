@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { copyFile, lstat, mkdir, realpath, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, chown, copyFile, lstat, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { DesktopApplicationName, Preset } from '@qubicl/core';
@@ -11,7 +12,7 @@ const DEFAULT_MAX_APPLICATIONS = 8;
 const GRACEFUL_CLOSE_MS = 1_500;
 const FORCED_CLOSE_MS = 500;
 
-type AllowedPathKind = 'file' | 'directory';
+type AllowedPathKind = 'file' | 'directory' | 'either';
 
 export interface DesktopApplicationDefinition {
   executable: string;
@@ -21,7 +22,7 @@ export interface DesktopApplicationDefinition {
   isolatedLibreOfficeProfile?: boolean;
 }
 
-const APPLICATION_DEFINITIONS: Readonly<Record<DesktopApplicationName, DesktopApplicationDefinition>> = {
+const APPLICATION_DEFINITIONS: Readonly<Record<string, DesktopApplicationDefinition>> = {
   writer: {
     executable: '/usr/bin/libreoffice',
     fixedArguments: ['--writer'],
@@ -52,10 +53,8 @@ const APPLICATION_DEFINITIONS: Readonly<Record<DesktopApplicationName, DesktopAp
   'file-manager': { executable: '/usr/bin/thunar', fixedArguments: [], allowedPathKind: 'directory' },
 };
 
-const APPLICATIONS_BY_COMPATIBILITY: Readonly<Record<Preset, readonly DesktopApplicationName[]>> = {
-  'file-system': [],
-  browser: [],
-  computer: ['text-editor', 'file-manager'],
+const BUILTIN_APPLICATIONS_BY_COMPATIBILITY: Readonly<Record<Preset, readonly string[]>> = {
+  'file-system': [], browser: [], computer: ['text-editor', 'file-manager'],
   workstation: ['writer', 'calc', 'impress', 'text-editor', 'file-manager'],
 };
 
@@ -72,7 +71,7 @@ interface TrackedDesktopApplication {
 export interface DesktopApplicationManagerOptions {
   root?: string;
   maxApplications?: number;
-  definitions?: Partial<Record<DesktopApplicationName, DesktopApplicationDefinition>>;
+  definitions?: Readonly<Record<string, DesktopApplicationDefinition>>;
   environment?: NodeJS.ProcessEnv;
   runtimeRoot?: string;
   spawnUid?: number;
@@ -88,19 +87,28 @@ export interface DesktopApplicationRecord {
   openedAt: string;
 }
 
+export interface AvailableDesktopApplication {
+  application: DesktopApplicationName;
+  label: string;
+  source: 'builtin' | 'user' | 'system';
+}
+
 export class DesktopApplicationManager {
   private readonly applications = new Map<string, TrackedDesktopApplication>();
-  private readonly allowedApplications: Set<DesktopApplicationName>;
-  private readonly definitions: Readonly<Record<DesktopApplicationName, DesktopApplicationDefinition>>;
+  private readonly builtinApplications: Set<string>;
+  private readonly definitions: Readonly<Record<string, DesktopApplicationDefinition>>;
+  private readonly supportsApplications: boolean;
   private readonly root: string;
   private readonly maxApplications: number;
   private readonly environment: NodeJS.ProcessEnv;
   private readonly runtimeRoot: string;
   private readonly spawnUid: number | undefined;
   private readonly spawnGid: number | undefined;
+  private pendingApplications = 0;
 
   constructor(compatibility: Preset, options: DesktopApplicationManagerOptions = {}) {
-    this.allowedApplications = new Set(APPLICATIONS_BY_COMPATIBILITY[compatibility]);
+    this.builtinApplications = new Set(BUILTIN_APPLICATIONS_BY_COMPATIBILITY[compatibility]);
+    this.supportsApplications = compatibility === 'computer' || compatibility === 'workstation';
     this.definitions = { ...APPLICATION_DEFINITIONS, ...options.definitions };
     this.root = resolve(options.root ?? DEFAULT_ROOT);
     this.maxApplications = options.maxApplications ?? DEFAULT_MAX_APPLICATIONS;
@@ -115,73 +123,94 @@ export class DesktopApplicationManager {
   }
 
   async open(application: DesktopApplicationName, requestedPaths: readonly string[]): Promise<DesktopApplicationRecord> {
-    if (!this.allowedApplications.has(application)) {
-      throw new QubiclError('desktop_application_unsupported', `Desktop application ${application} is not available for this computer's compatibility contract.`, 404);
+    if (!this.supportsApplications) {
+      throw new QubiclError('desktop_application_unsupported', 'This computer does not provide managed desktop applications.', 404);
     }
-    if (this.applications.size >= this.maxApplications) {
+    if (this.applications.size + this.pendingApplications >= this.maxApplications) {
       throw new QubiclError('desktop_application_limit', `This desktop session already has ${this.maxApplications} tracked applications. Close one before opening another.`, 429);
     }
-    const definition = this.definitions[application];
-    const paths = await Promise.all(requestedPaths.map((path) => this.safeExistingPath(path, definition)));
-    const applicationId = randomBytes(12).toString('base64url');
-    const runtimeDirectory = definition.isolatedLibreOfficeProfile ? resolve(this.runtimeRoot, applicationId) : undefined;
-    const profileArguments = runtimeDirectory
-      ? [`-env:UserInstallation=${pathToFileURL(resolve(runtimeDirectory, 'profile')).href}`]
-      : [];
-    if (runtimeDirectory) {
-      const profileUser = resolve(runtimeDirectory, 'profile/user');
-      await mkdir(profileUser, { recursive: true, mode: 0o700 });
-      try {
-        await copyFile(
-          '/etc/skel/.config/libreoffice/4/user/registrymodifications.xcu',
-          resolve(profileUser, 'registrymodifications.xcu'),
-        );
-      } catch (error) {
-        await rm(runtimeDirectory, { recursive: true, force: true });
-        throw new QubiclError('desktop_application_launch_failed', `The fixed LibreOffice desktop-session profile could not be prepared: ${(error as Error).message}`, 500);
+    this.pendingApplications += 1;
+    try {
+      const definition = this.builtinApplications.has(application)
+        ? this.definitions[application]!
+        : await installedApplicationDefinition(application, this.root);
+      const paths = await Promise.all(requestedPaths.map((path) => this.safeExistingPath(path, definition)));
+      const applicationId = randomBytes(12).toString('base64url');
+      const runtimeDirectory = definition.isolatedLibreOfficeProfile ? resolve(this.runtimeRoot, applicationId) : undefined;
+      const profileArguments = runtimeDirectory
+        ? [`-env:UserInstallation=${pathToFileURL(resolve(runtimeDirectory, 'profile')).href}`]
+        : [];
+      if (runtimeDirectory) {
+        const profile = resolve(runtimeDirectory, 'profile');
+        const profileUser = resolve(profile, 'user');
+        await mkdir(profileUser, { recursive: true, mode: 0o700 });
+        try {
+          await copyFile(
+            '/etc/skel/.config/libreoffice/4/user/registrymodifications.xcu',
+            resolve(profileUser, 'registrymodifications.xcu'),
+          );
+          if (this.spawnUid !== undefined) {
+            await Promise.all([
+              chown(runtimeDirectory, this.spawnUid, this.spawnGid!),
+              chown(profile, this.spawnUid, this.spawnGid!),
+              chown(profileUser, this.spawnUid, this.spawnGid!),
+              chown(resolve(profileUser, 'registrymodifications.xcu'), this.spawnUid, this.spawnGid!),
+            ]);
+          }
+        } catch (error) {
+          await rm(runtimeDirectory, { recursive: true, force: true });
+          throw new QubiclError('desktop_application_launch_failed', `The fixed LibreOffice desktop-session profile could not be prepared: ${(error as Error).message}`, 500);
+        }
       }
-    }
-    const child = spawn(definition.executable, [...profileArguments, ...definition.fixedArguments, ...paths], {
-      cwd: this.root,
-      detached: true,
-      env: sanitizedDesktopEnvironment(this.root, this.environment),
-      ...(this.spawnUid === undefined ? {} : { uid: this.spawnUid, gid: this.spawnGid }),
-      stdio: 'ignore',
-    });
-    let finish!: () => void;
-    const finished = new Promise<void>((resolveFinished) => { finish = resolveFinished; });
-    const tracked: TrackedDesktopApplication = {
-      applicationId,
-      application,
-      child,
-      openedAt: new Date().toISOString(),
-      finished,
-      completed: false,
-      ...(runtimeDirectory ? { runtimeDirectory } : {}),
-    };
-    this.applications.set(applicationId, tracked);
-    child.once('exit', () => this.complete(tracked, finish));
-    const started = new Promise<void>((resolveStarted, reject) => {
-      child.once('spawn', resolveStarted);
-      child.once('error', (error) => {
-        this.complete(tracked, finish);
-        if (runtimeDirectory) void rm(runtimeDirectory, { recursive: true, force: true });
-        reject(new QubiclError('desktop_application_launch_failed', `Could not launch desktop application ${application}: ${error.message}`, 500));
+      const child = spawn(definition.executable, [...profileArguments, ...definition.fixedArguments, ...paths], {
+        cwd: this.root,
+        detached: true,
+        env: sanitizedDesktopEnvironment(this.root, this.environment),
+        ...(this.spawnUid === undefined ? {} : { uid: this.spawnUid, gid: this.spawnGid }),
+        stdio: 'ignore',
       });
-    });
-    await started;
-    child.unref();
-    if (tracked.completed) {
-      throw new QubiclError('desktop_application_launch_failed', `Desktop application ${application} exited during launch.`, 500);
+      let finish!: () => void;
+      const finished = new Promise<void>((resolveFinished) => { finish = resolveFinished; });
+      const tracked: TrackedDesktopApplication = {
+        applicationId,
+        application,
+        child,
+        openedAt: new Date().toISOString(),
+        finished,
+        completed: false,
+        ...(runtimeDirectory ? { runtimeDirectory } : {}),
+      };
+      this.applications.set(applicationId, tracked);
+      child.once('exit', () => this.complete(tracked, finish));
+      const started = new Promise<void>((resolveStarted, reject) => {
+        child.once('spawn', resolveStarted);
+        child.once('error', (error) => {
+          this.complete(tracked, finish);
+          if (runtimeDirectory) void rm(runtimeDirectory, { recursive: true, force: true });
+          reject(new QubiclError('desktop_application_launch_failed', `Could not launch desktop application ${application}: ${error.message}`, 500));
+        });
+      });
+      await started;
+      child.unref();
+      if (tracked.completed) {
+        throw new QubiclError('desktop_application_launch_failed', `Desktop application ${application} exited during launch.`, 500);
+      }
+      return publicRecord(tracked);
+    } finally {
+      this.pendingApplications -= 1;
     }
-    return publicRecord(tracked);
   }
 
   list(): DesktopApplicationRecord[] {
     return [...this.applications.values()].filter(({ completed }) => !completed).map(publicRecord);
   }
 
-  async close(applicationId: string): Promise<{
+  async available(): Promise<AvailableDesktopApplication[]> {
+    if (!this.supportsApplications) return [];
+    return discoverDesktopApplications(this.root, this.builtinApplications, this.definitions);
+  }
+
+  async close(applicationId: string, discardUnsavedChanges = false): Promise<{
     applicationId: string;
     application: DesktopApplicationName;
     state: 'closed';
@@ -191,6 +220,13 @@ export class DesktopApplicationManager {
     const tracked = this.applications.get(applicationId);
     if (!tracked || tracked.completed) {
       throw new QubiclError('desktop_application_not_found', `Desktop application ${applicationId} was not found.`, 404);
+    }
+    if (!discardUnsavedChanges) {
+      throw new QubiclError(
+        'desktop_application_close_confirmation_required',
+        'Closing a desktop application may discard unsaved changes. Retry with discardUnsavedChanges=true after reviewing the visible application.',
+        409,
+      );
     }
     const forcedKill = await terminateGroup(tracked, GRACEFUL_CLOSE_MS, FORCED_CLOSE_MS);
     this.applications.delete(applicationId);
@@ -235,7 +271,9 @@ export class DesktopApplicationManager {
       throw new QubiclError('desktop_application_path_unsafe', `Desktop application paths must resolve under ${this.root}.`, 400);
     }
     const info = await lstat(canonicalPath);
-    if ((definition.allowedPathKind === 'file' && !info.isFile()) || (definition.allowedPathKind === 'directory' && !info.isDirectory())) {
+    if ((definition.allowedPathKind === 'file' && !info.isFile())
+      || (definition.allowedPathKind === 'directory' && !info.isDirectory())
+      || (definition.allowedPathKind === 'either' && !info.isFile() && !info.isDirectory())) {
       throw new QubiclError('desktop_application_path_invalid', `${canonicalPath} is not an allowed ${definition.allowedPathKind} path for this desktop application.`, 400);
     }
     if (definition.allowedExtensions && !definition.allowedExtensions.includes(extname(canonicalPath).toLowerCase())) {
@@ -251,6 +289,99 @@ export class DesktopApplicationManager {
     if (tracked.runtimeDirectory) void rm(tracked.runtimeDirectory, { recursive: true, force: true });
     finish();
   }
+}
+
+async function installedApplicationDefinition(application: string, home: string): Promise<DesktopApplicationDefinition> {
+  const allowedDirectories = [resolve(home, '.local/bin'), '/usr/local/bin', '/usr/bin', '/bin'];
+  for (const directory of allowedDirectories) {
+    const candidate = resolve(directory, application);
+    try {
+      await access(candidate, constants.X_OK);
+      const executable = await realpath(candidate);
+      const info = await lstat(executable);
+      if (!info.isFile() || !allowedDirectories.some((root) => isWithinOrEqual(root, executable))) continue;
+      return { executable, fixedArguments: [], allowedPathKind: 'either' };
+    } catch {
+      // Try the next executable directory.
+    }
+  }
+  throw new QubiclError('desktop_application_not_found', `Installed desktop application ${application} was not found.`, 404);
+}
+
+async function discoverDesktopApplications(
+  home: string,
+  builtins: ReadonlySet<string>,
+  definitions: Readonly<Record<string, DesktopApplicationDefinition>>,
+): Promise<AvailableDesktopApplication[]> {
+  const found = new Map<string, AvailableDesktopApplication>();
+  for (const application of [...builtins].sort()) {
+    if (!definitions[application]) continue;
+    found.set(application, { application, label: application, source: 'builtin' });
+  }
+  const directories = [
+    { path: resolve(home, '.local', 'share', 'applications'), source: 'user' as const, confinedTo: home },
+    { path: '/usr/local/share/applications', source: 'system' as const },
+    { path: '/usr/share/applications', source: 'system' as const },
+  ];
+  let inspected = 0;
+  for (const directory of directories) {
+    if (found.size >= 256 || inspected >= 2_048) break;
+    try {
+      const directoryInfo = await lstat(directory.path);
+      if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) continue;
+      const canonical = await realpath(directory.path);
+      if (directory.confinedTo && !isWithinOrEqual(await realpath(directory.confinedTo), canonical)) continue;
+      const names = (await readdir(canonical)).filter((name) => name.endsWith('.desktop')).sort().slice(0, 2_048 - inspected);
+      inspected += names.length;
+      for (const name of names) {
+        if (found.size >= 256) break;
+        try {
+          const path = resolve(canonical, name);
+          const info = await lstat(path);
+          if (!info.isFile() || info.isSymbolicLink() || info.size > 65_536) continue;
+          const fields = desktopEntryFields(await readFile(path, 'utf8'));
+          if (fields.Hidden === 'true' || fields.NoDisplay === 'true' || !fields.Exec) continue;
+          const executableToken = desktopExecutableToken(fields.Exec);
+          if (!executableToken) continue;
+          const application = executableToken.split('/').pop() ?? '';
+          if (!/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u.test(application) || found.has(application)) continue;
+          await installedApplicationDefinition(application, home);
+          const label = (fields.Name ?? application).replaceAll(/[\r\n\t]/gu, ' ').trim().slice(0, 120) || application;
+          found.set(application, { application, label, source: directory.source });
+        } catch {
+          // A disappearing or malformed entry does not hide the rest.
+        }
+      }
+    } catch {
+      // Missing, unreadable, or malformed application entries are omitted.
+    }
+  }
+  return [...found.values()].sort((left, right) => left.label.localeCompare(right.label) || left.application.localeCompare(right.application));
+}
+
+function desktopEntryFields(contents: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  let inDesktopEntry = false;
+  for (const line of contents.split(/\r?\n/u)) {
+    if (line.startsWith('[')) {
+      inDesktopEntry = line.trim() === '[Desktop Entry]';
+      continue;
+    }
+    if (!inDesktopEntry || line.startsWith('#')) continue;
+    const separator = line.indexOf('=');
+    if (separator <= 0) continue;
+    const key = line.slice(0, separator);
+    if (['Name', 'Exec', 'Hidden', 'NoDisplay'].includes(key) && result[key] === undefined) result[key] = line.slice(separator + 1);
+  }
+  return result;
+}
+
+function desktopExecutableToken(value: string): string | undefined {
+  const trimmed = value.trim();
+  const match = /^(?:"([^"\\]*(?:\\.[^"\\]*)*)"|'([^']*)'|([^\s]+))/u.exec(trimmed);
+  const token = match?.[1] ?? match?.[2] ?? match?.[3];
+  if (!token || token.includes('%') || token.includes('\0')) return undefined;
+  return token.replaceAll(/\\(["\\])/gu, '$1');
 }
 
 function publicRecord(tracked: TrackedDesktopApplication): DesktopApplicationRecord {
@@ -270,7 +401,7 @@ function sanitizedDesktopEnvironment(root: string, source: NodeJS.ProcessEnv): N
     HOME: root,
     USER: 'qubicl',
     LOGNAME: 'qubicl',
-    PATH: '/usr/local/bin:/usr/bin:/bin',
+    PATH: `${resolve(root, '.local/bin')}:/usr/local/bin:/usr/bin:/bin`,
     DISPLAY: display,
     LANG: 'C.UTF-8',
     LC_ALL: 'C.UTF-8',

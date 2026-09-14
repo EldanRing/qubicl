@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,12 +21,17 @@ test('devcontainer inspect accepts bounded JSONC and rejects privilege-bearing f
     await writeFile(path, `{
       // Qubicl imports only the workload identity and literal environment.
       "image": "example/qubicl-compatible:1",
-      "containerEnv": { "PROJECT_MODE": "test" },
+      "containerEnv": { "PROJECT_MODE": "test", "LITERAL": "keep ,} and ,] exactly" },
     }\n`);
     const inspected = await exec(process.execPath, [cli, 'devcontainer', 'inspect', root], { env: { ...process.env, QUBICL_HOME: join(root, 'unused-state') } });
     const result = JSON.parse(inspected.stdout) as { image: string; environment: Record<string, string> };
     assert.equal(result.image, 'example/qubicl-compatible:1');
-    assert.deepEqual(result.environment, { PROJECT_MODE: 'test' });
+    assert.deepEqual(result.environment, { PROJECT_MODE: 'test', LITERAL: 'keep ,} and ,] exactly' });
+
+    await writeFile(path, JSON.stringify({ image: 'example/qubicl-compatible:1', workspaceFolder: '/home/qubicl/../outside' }));
+    const escapedWorkspace = await exec(process.execPath, [cli, 'devcontainer', 'inspect', root], { env: { ...process.env, QUBICL_HOME: join(root, 'unused-state') } })
+      .then(() => undefined, (error) => error as { stderr: string });
+    assert.match(escapedWorkspace?.stderr ?? '', /workspaceFolder/);
 
     await writeFile(path, JSON.stringify({ image: 'example/qubicl-compatible:1', privileged: true }));
     const rejected = await exec(process.execPath, [cli, 'devcontainer', 'inspect', root], { env: { ...process.env, QUBICL_HOME: join(root, 'unused-state') } })
@@ -37,18 +42,31 @@ test('devcontainer inspect accepts bounded JSONC and rejects privilege-bearing f
   }
 });
 
-test('host-side Git import, status, diff, and patch stay inside one durable home', async () => {
+test('Git workflows execute repository operations inside the computer', async () => {
   const root = await mkdtemp(join(tmpdir(), 'qubicl-git-workflow-'));
   const source = join(root, 'source');
   const stateRoot = join(root, 'state');
   try {
-    await mkdir(source);
-    await exec('git', ['init', '--initial-branch=main'], { cwd: source });
-    await exec('git', ['config', 'user.email', 'qubicl-test@example.invalid'], { cwd: source });
-    await exec('git', ['config', 'user.name', 'Qubicl Test'], { cwd: source });
-    await writeFile(join(source, 'README.md'), 'initial\n');
-    await exec('git', ['add', 'README.md'], { cwd: source });
-    await exec('git', ['commit', '-m', 'initial'], { cwd: source });
+    await mkdir(join(source, '.git', 'hooks'), { recursive: true });
+    const escapedMarker = join(root, 'host-command-ran');
+    await writeFile(join(source, '.git', 'config'), `[core]\n\tfsmonitor = touch ${escapedMarker}\n`);
+    await writeFile(join(source, '.git', 'hooks', 'post-checkout'), `#!/bin/sh\ntouch ${escapedMarker}\n`);
+    await chmod(join(source, '.git', 'hooks', 'post-checkout'), 0o755);
+    await writeFile(join(source, 'README.md'), 'untrusted repository\n');
+
+    const bin = join(root, 'bin');
+    const dockerLog = join(root, 'docker.jsonl');
+    await mkdir(bin);
+    const fakeDocker = join(bin, 'docker');
+    await writeFile(fakeDocker, `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.QUBICL_TEST_DOCKER_LOG, JSON.stringify(args) + '\\n');
+if (args[0] === 'inspect') process.stdout.write('running\\n');
+if (args[0] === 'exec' && args.includes('status')) process.stdout.write('## main\\n M README.md\\n');
+if (args[0] === 'exec' && args.includes('diff')) process.stdout.write('diff --git a/README.md b/README.md\\n+changed\\n');
+if (args[0] === 'exec' && args.includes('rev-parse')) process.stdout.write('.git\\n');
+`, { mode: 0o755 });
 
     const state = await initializeState(statePaths(stateRoot));
     const computer = addConfiguredComputer(state, 'git-test');
@@ -56,11 +74,9 @@ test('host-side Git import, status, diff, and patch stay inside one durable home
     await mkdir(join(computerDirectory, 'home', 'qubicl'), { recursive: true, mode: 0o700 });
     await saveMetadata(state.paths, computer);
     await saveState(state);
-    const env = { ...process.env, QUBICL_HOME: stateRoot };
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}`, QUBICL_HOME: stateRoot, QUBICL_TEST_DOCKER_LOG: dockerLog };
 
     await exec(process.execPath, [cli, 'git', 'import', computer.name, source, '--directory', 'project'], { env });
-    const repository = join(computerDirectory, 'home', 'qubicl', 'project');
-    await writeFile(join(repository, 'README.md'), 'initial\nchanged\n');
     const status = await exec(process.execPath, [cli, 'git', 'status', computer.name, '--repo', 'project'], { env });
     assert.match(status.stdout, /M README\.md/);
     const diff = await exec(process.execPath, [cli, 'git', 'diff', computer.name, '--repo', 'project'], { env });
@@ -68,13 +84,11 @@ test('host-side Git import, status, diff, and patch stay inside one durable home
     const patch = join(root, 'change.patch');
     await exec(process.execPath, [cli, 'git', 'patch', computer.name, '--repo', 'project', '--output', patch], { env });
     assert.match(await readFile(patch, 'utf8'), /\+changed/);
-
-    const outside = join(root, 'outside');
-    await mkdir(outside);
-    await symlink(outside, join(computerDirectory, 'home', 'qubicl', 'escape'));
-    const escaped = await exec(process.execPath, [cli, 'git', 'import', computer.name, source, '--directory', 'escape/imported'], { env })
-      .then(() => undefined, (error) => error as { stderr?: string; message?: string });
-    assert.match(escaped?.stderr || escaped?.message || '', /escapes the computer home through a symbolic link/);
+    await assert.rejects(readFile(escapedMarker), /ENOENT/);
+    const calls = (await readFile(dockerLog, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string[]);
+    assert.ok(calls.some((call) => call[0] === 'cp' && call[1] === `${source}/.`));
+    assert.ok(calls.filter((call) => call.includes('git')).every((call) => call[0] === 'exec'));
+    assert.ok(calls.some((call) => call.includes('protocol.file.allow=always')));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

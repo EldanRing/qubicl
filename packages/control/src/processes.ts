@@ -12,26 +12,30 @@ import {
   readFileSync,
   readSync,
   readdirSync,
+  renameSync,
   rmdirSync,
+  fsyncSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
-import { join, parse, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { QubiclError } from './errors.js';
 import { workloadEnvironment } from './environments.js';
 import type { LeaseProof } from './lease.js';
+import { BoundedFileSystem, BoundedPathError } from './bounded-files.js';
+import { PtyManager, type PtyManagerOptions, type PtyPage, type PtySummary } from './pty.js';
 
 const DEFAULT_MAX_PROCESSES = 32;
 const DEFAULT_MAX_COMPLETED_PROCESSES = 64;
 const DEFAULT_MAX_RETAINED_OUTPUT_BYTES = 64 * 1024 * 1024;
-const DEFAULT_COMPLETED_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_COMPLETED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_FULL_OUTPUT_BYTES = 100 * 1024 * 1024;
 const DEFAULT_MAX_AGGREGATE_OUTPUT_BYTES = 256 * 1024 * 1024;
 const DEFAULT_MAX_JOURNAL_RECORDS = 16_384;
 const DEFAULT_MAX_AGGREGATE_JOURNAL_RECORDS = 131_072;
-const DEFAULT_MAX_LIFETIME_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_MAX_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_OUTPUT_PARENT = '/tmp';
-const DEFAULT_OUTPUT_TTL_MS = 60 * 60 * 1000;
+const DEFAULT_OUTPUT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_COMMAND_BYTES = 64 * 1024;
 const MAX_INPUT_BYTES = 64 * 1024;
 const MAX_STDIN_QUEUE_BYTES = 256 * 1024;
@@ -40,6 +44,7 @@ const MAX_STATUS_WAIT_MS = 30_000;
 const MAX_PAGE_RECORDS = 1_000;
 const MAX_PAGE_BYTES = 256 * 1024;
 const MAX_JOURNAL_RECORD_BYTES = 64 * 1024;
+const MAX_TASK_RECORD_BYTES = 1024 * 1024;
 
 interface OutputChunk {
   data: Buffer;
@@ -78,6 +83,8 @@ interface OutputDirectoryState {
 
 interface ManagedProcess {
   id: string;
+  label: string;
+  lifecycle: ProcessLifecycle;
   command: string;
   cwd: string;
   sessionId: string | null;
@@ -122,9 +129,14 @@ interface ManagedProcess {
 
 export type StopSignal = 'SIGTERM' | 'SIGINT' | 'SIGHUP';
 export type ProcessOutputMode = 'combined' | 'split';
+export type ProcessLifecycle = 'session' | 'task' | 'service';
 
 export interface ProcessResult {
   processId: string;
+  label: string;
+  lifecycle: ProcessLifecycle;
+  survivesDisconnect: boolean;
+  survivesHumanTakeover: boolean;
   running: boolean;
   terminalState: 'running' | 'exited' | 'signaled' | 'timed_out' | 'failed';
   output?: string;
@@ -133,7 +145,7 @@ export interface ProcessResult {
   truncation?: {
     inline?: { limitBytes: number; streams: Array<'stdout' | 'stderr'> };
     retainedLog?: { limitBytes: number };
-    continuation?: { path: string; retainedLogTruncated: boolean };
+    continuation?: { processId: string; path: string; retainedLogTruncated: boolean };
   };
   exitCode?: number;
   signal?: NodeJS.Signals;
@@ -169,10 +181,43 @@ export interface CompatibilityProcessOutput extends CompatibilityProcessSummary 
 /** Safe host-operator metadata. It deliberately excludes commands, paths, output, and lease proofs. */
 export interface ManagementProcessSummary {
   id: string;
-  status: 'running' | 'exited' | 'signaled' | 'timed-out' | 'stopped';
+  status: 'running' | 'exited' | 'signaled' | 'timed-out' | 'stopped' | 'interrupted';
   startedAt: string;
   finishedAt?: string;
-  owner: 'agent';
+  label: string;
+  lifecycle: ProcessLifecycle;
+  owner: 'agent' | 'computer';
+  ownerGeneration: number;
+}
+
+export interface AgentProcessSummary extends ManagementProcessSummary {}
+
+interface PersistedTaskRecord extends ManagementProcessSummary {
+  version: 1 | 2;
+  outputPath: string;
+  outputTruncated?: boolean;
+}
+
+export interface ProcessOutputPage {
+  processId: string;
+  offset: number;
+  nextOffset: number;
+  size: number;
+  complete: boolean;
+  truncated: boolean;
+  encoding: 'utf8' | 'base64';
+  data: string;
+}
+
+interface PersistedServiceDefinition {
+  version: 1;
+  id: string;
+  label: string;
+  command: string;
+  cwd: string;
+  maxOutputBytes: number;
+  outputMode: ProcessOutputMode;
+  timeoutMs?: number;
   ownerGeneration: number;
 }
 
@@ -200,6 +245,8 @@ export interface ProcessManagerOptions {
   spawnUid?: number;
   spawnGid?: number;
   fenceUid?: number;
+  persistTaskRecords?: boolean;
+  pty?: PtyManagerOptions;
 }
 
 export class ProcessManager {
@@ -217,6 +264,8 @@ export class ProcessManager {
   private readonly outputParent: string;
   private readonly outputTtlMs: number;
   private readonly environment: NodeJS.ProcessEnv;
+  private readonly durableHome: string;
+  private readonly outputWorkspace: BoundedFileSystem;
   private readonly spawnUid: number | undefined;
   private readonly spawnGid: number | undefined;
   private readonly fenceUid: number | undefined;
@@ -226,6 +275,10 @@ export class ProcessManager {
   private outputSequence = 0;
   private outputDirectory: OutputDirectoryState | undefined;
   private readonly outputFiles = new Set<string>();
+  private readonly taskHistory = new Map<string, PersistedTaskRecord>();
+  private readonly taskRecordPath: string | undefined;
+  private readonly serviceRecordDirectory: string | undefined;
+  private readonly terminals: PtyManager;
 
   constructor(options: ProcessManagerOptions = {}) {
     this.maxProcesses = options.maxProcesses ?? DEFAULT_MAX_PROCESSES;
@@ -239,8 +292,18 @@ export class ProcessManager {
     this.maxLifetimeMs = options.maxLifetimeMs ?? DEFAULT_MAX_LIFETIME_MS;
     this.stdinWriteTimeoutMs = options.stdinWriteTimeoutMs ?? DEFAULT_STDIN_WRITE_TIMEOUT_MS;
     this.outputParent = resolve(options.outputDirectory ?? DEFAULT_OUTPUT_PARENT);
+    this.taskRecordPath = options.persistTaskRecords ? join(this.outputParent, 'task-records.jsonl') : undefined;
+    this.serviceRecordDirectory = options.persistTaskRecords ? join(this.outputParent, 'services') : undefined;
     this.outputTtlMs = options.outputTtlMs ?? DEFAULT_OUTPUT_TTL_MS;
     this.environment = workloadEnvironment(options.environment ?? process.env, options.home);
+    this.durableHome = resolve(this.environment.HOME ?? '/home/qubicl');
+    this.outputWorkspace = new BoundedFileSystem(this.durableHome);
+    this.terminals = new PtyManager({
+      home: this.durableHome,
+      environment: this.environment,
+      ...(options.spawnUid === undefined ? undefined : { spawnUid: options.spawnUid, spawnGid: options.spawnGid }),
+      ...options.pty,
+    });
     this.spawnUid = options.spawnUid;
     this.spawnGid = options.spawnGid;
     this.fenceUid = options.fenceUid;
@@ -257,6 +320,8 @@ export class ProcessManager {
     positiveInteger(this.maxLifetimeMs, 'maxLifetimeMs');
     positiveInteger(this.stdinWriteTimeoutMs, 'stdinWriteTimeoutMs');
     positiveInteger(this.outputTtlMs, 'outputTtlMs');
+    if (this.taskRecordPath) this.loadTaskHistory();
+    if (this.serviceRecordDirectory) this.loadServices();
   }
 
   async exec(
@@ -267,11 +332,21 @@ export class ProcessManager {
     owner: LeaseProof,
     timeoutMs?: number,
     outputMode: ProcessOutputMode = 'combined',
+    lifecycle: ProcessLifecycle = 'session',
+    label = 'Task',
   ): Promise<ProcessResult> {
-    const managed = this.start(command, cwd, owner, maxOutputBytes, timeoutMs, outputMode, null, false);
+    const id = lifecycle === 'service' ? randomBytes(12).toString('base64url') : undefined;
+    if (id) this.persistServiceDefinition({ version: 1, id, label, command, cwd, maxOutputBytes, outputMode, ...(timeoutMs === undefined ? {} : { timeoutMs }), ownerGeneration: owner.generation });
+    let managed: ManagedProcess;
+    try {
+      managed = this.start(command, cwd, owner, maxOutputBytes, timeoutMs, outputMode, null, false, lifecycle, label, id);
+    } catch (error) {
+      if (id) this.removeServiceDefinition(id);
+      throw error;
+    }
     await Promise.race([managed.finished, delay(yieldTimeMs)]);
     const result = this.consume(managed);
-    if (!result.running) await this.discard(managed, true);
+    if (!result.running && lifecycle !== 'service') await this.discard(managed, true);
     return result;
   }
 
@@ -288,7 +363,10 @@ export class ProcessManager {
     const managed = this.owned(id, owner);
     await this.terminate(managed, signal, 'stop');
     const result = this.consume(managed);
-    if (!result.running) await this.discard(managed, true);
+    if (!result.running) {
+      if (managed.lifecycle === 'service') this.removeServiceDefinition(managed.id);
+      await this.discard(managed, true);
+    }
     return result;
   }
 
@@ -303,7 +381,7 @@ export class ProcessManager {
     const waitMs = boundedInteger(options.waitMs ?? 0, 0, MAX_STATUS_WAIT_MS, 'wait');
     const offset = boundedInteger(options.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
     const tail = options.tail === undefined ? undefined : boundedInteger(options.tail, 1, MAX_PAGE_RECORDS, 'tail');
-    const managed = this.start(command, cwd, owner, MAX_PAGE_BYTES, undefined, 'combined', sessionId, true);
+    const managed = this.start(command, cwd, owner, MAX_PAGE_BYTES, undefined, 'combined', sessionId, true, 'session', 'Open Terminal session');
     try {
       if (waitMs > 0) await Promise.race([managed.finished, delay(waitMs)]);
       return this.compatibilityPage(this.ownedCompatibility(managed.id, owner), offset, tail);
@@ -363,9 +441,10 @@ export class ProcessManager {
   async terminateOwner(owner: LeaseProof | undefined): Promise<{ terminatedManagedProcesses: number }> {
     if (!owner && this.fenceUid === undefined) return { terminatedManagedProcesses: 0 };
     const matching = owner
-      ? [...this.processes.values()].filter((managed) => sameOwner(managed.owner, owner))
-      : [...this.processes.values()];
-    const terminatedManagedProcesses = matching.filter((managed) => !managed.completed).length;
+      ? [...this.processes.values()].filter((managed) => managed.lifecycle === 'session' && sameOwner(managed.owner, owner))
+      : [...this.processes.values()].filter((managed) => managed.lifecycle === 'session');
+    const terminatedTerminals = await this.terminals.terminateOwner(owner);
+    const terminatedManagedProcesses = matching.filter((managed) => !managed.completed).length + terminatedTerminals;
     let groupError: unknown;
     await Promise.all(matching.map(async (managed) => {
       try {
@@ -375,36 +454,107 @@ export class ProcessManager {
         groupError ??= error;
       }
     }));
-    if (this.fenceUid !== undefined) await terminateUidPopulation(this.fenceUid);
     const surviving = matching.filter((managed) => processGroupMembers(managed.child.pid).length > 0);
     if (surviving.length) {
       groupError ??= new QubiclError('process_fencing_failed', `Could not confirm termination of ${surviving.length} managed process group${surviving.length === 1 ? '' : 's'}.`, 500);
     }
-    if (this.fenceUid !== undefined && surviving.length === 0) groupError = undefined;
     if (groupError) throw groupError;
     for (const managed of matching) this.deleteRecord(managed, !managed.compatibilitySession);
     return { terminatedManagedProcesses };
   }
 
   count(): number {
-    return [...this.processes.values()].filter((managed) => !managed.completed).length;
+    return [...this.processes.values()].filter((managed) => !managed.completed).length + this.terminals.list().filter(({ running }) => running).length;
   }
 
+  terminalOpen(command: string, cwd: string, rows: number, columns: number, owner: LeaseProof, lifecycle: 'session' | 'task', label: string): Promise<PtySummary> {
+    return this.terminals.open(command, cwd, rows, columns, owner, lifecycle, label);
+  }
+  terminalList(): PtySummary[] { return this.terminals.list(); }
+  terminalRead(id: string, owner: LeaseProof, offset: number, maxBytes: number, waitMs: number, encoding: 'utf8' | 'base64'): Promise<PtyPage> {
+    return this.terminals.read(id, owner, offset, maxBytes, waitMs, encoding);
+  }
+  terminalWrite(id: string, owner: LeaseProof, input: string): Promise<{ terminalId: string; acceptedBytes: number }> { return this.terminals.write(id, owner, input); }
+  terminalResize(id: string, owner: LeaseProof, rows: number, columns: number): Promise<{ terminalId: string; rows: number; columns: number }> { return this.terminals.resize(id, owner, rows, columns); }
+  terminalSignal(id: string, owner: LeaseProof, signal: StopSignal): Promise<{ terminalId: string; signal: StopSignal }> { return this.terminals.signal(id, owner, signal); }
+  terminalClose(id: string, owner: LeaseProof, force: boolean): Promise<PtySummary> { return this.terminals.close(id, owner, force); }
+
   listForManagement(): ManagementProcessSummary[] {
-    return [...this.processes.values()]
-      .sort((left, right) => left.startedAt - right.startedAt || left.id.localeCompare(right.id))
-      .map((managed) => managementSummary(managed));
+    const current = [...this.processes.values()].map((managed) => managementSummary(managed));
+    const liveIds = new Set(current.map(({ id }) => id));
+    return [...current, ...this.terminals.listForManagement(), ...[...this.taskHistory.values()].filter(({ id }) => !liveIds.has(id)).map(stripPersistedTask)]
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
+  }
+
+  listForAgent(): AgentProcessSummary[] {
+    return this.listForManagement();
   }
 
   async stopForManagement(id: string): Promise<{ id: string; status: 'stopped' }> {
     const managed = this.processes.get(id);
-    if (!managed) throw new QubiclError('process_not_found', `Managed process ${id} was not found.`, 404);
+    if (!managed) {
+      if (await this.terminals.closeForManagement(id)) return { id, status: 'stopped' };
+      throw new QubiclError('process_not_found', `Managed process or terminal ${id} was not found.`, 404);
+    }
     if (!managed.completed) await this.terminate(managed, 'SIGTERM', 'stop');
     if (!managed.completed) {
       throw new QubiclError('process_fencing_failed', `Could not confirm termination of managed process ${id}; its tracking record was retained.`, 500);
     }
+    if (managed.lifecycle === 'service') this.removeServiceDefinition(managed.id);
     await this.discard(managed, false);
     return { id, status: 'stopped' };
+  }
+
+  readOutput(id: string, offset: number, maxBytes: number, tailBytes: number | undefined, encoding: 'utf8' | 'base64'): ProcessOutputPage {
+    const safeOffset = boundedInteger(offset, 0, Number.MAX_SAFE_INTEGER, 'offset');
+    const safeMaximum = boundedInteger(maxBytes, 1, 1_000_000, 'maxBytes');
+    const safeTail = tailBytes === undefined ? undefined : boundedInteger(tailBytes, 1, 1_000_000, 'tailBytes');
+    const output = this.openRetainedOutput(id);
+    try {
+      const start = safeTail === undefined ? Math.min(safeOffset, output.size) : Math.max(0, output.size - safeTail);
+      const length = Math.min(safeMaximum, output.size - start);
+      const data = Buffer.alloc(length);
+      const bytes = length ? readExactlySync(output.descriptor, data, start) : 0;
+      if (bytes !== length) throw new QubiclError('process_output_unavailable', `Managed task ${id} output changed while it was read.`, 409);
+      return {
+        processId: id,
+        offset: start,
+        nextOffset: start + bytes,
+        size: output.size,
+        complete: output.complete,
+        truncated: output.truncated || start + bytes < output.size,
+        encoding,
+        data: data.toString(encoding),
+      };
+    } finally {
+      closeSync(output.descriptor);
+    }
+  }
+
+  readOutputBuffer(id: string, maxBytes: number): { data: Buffer; complete: boolean; truncated: boolean; size: number } {
+    const safeMaximum = boundedInteger(maxBytes, 1, DEFAULT_MAX_FULL_OUTPUT_BYTES, 'maxBytes');
+    const output = this.openRetainedOutput(id);
+    try {
+      if (output.size > safeMaximum) throw new QubiclError('process_output_too_large', `Managed task ${id} output is ${output.size} bytes; increase maxBytes up to ${DEFAULT_MAX_FULL_OUTPUT_BYTES} or save a bounded page.`, 413, { size: output.size, maximumBytes: safeMaximum });
+      const data = Buffer.alloc(output.size);
+      const bytes = output.size ? readExactlySync(output.descriptor, data, 0) : 0;
+      if (bytes !== output.size) throw new QubiclError('process_output_unavailable', `Managed task ${id} output changed while it was read.`, 409);
+      return { data, complete: output.complete, truncated: output.truncated, size: output.size };
+    } finally {
+      closeSync(output.descriptor);
+    }
+  }
+
+  async saveOutput(id: string, target: string, maxBytes: number): Promise<{ processId: string; path: string; bytes: number; complete: boolean; sourceTruncated: boolean }> {
+    const output = this.readOutputBuffer(id, maxBytes);
+    let path: string;
+    try { path = this.outputWorkspace.absolutePath(target); }
+    catch (error) {
+      if (error instanceof BoundedPathError) throw new QubiclError('path_outside_home', `Saved task output must stay beneath ${this.durableHome}.`, 403);
+      throw error;
+    }
+    await this.outputWorkspace.writeFile(path, output.data, { createParents: true });
+    return { processId: id, path, bytes: output.data.length, complete: output.complete, sourceTruncated: output.truncated };
   }
 
   retainedOutputBytes(): number {
@@ -417,6 +567,15 @@ export class ProcessManager {
 
   journalRecordCount(): number {
     return this.aggregateJournalRecords;
+  }
+
+  limits(): { maxConcurrent: number; maxLifetimeSeconds: number; maxOutputBytes: number; completedRetentionSeconds: number } {
+    return {
+      maxConcurrent: this.maxProcesses,
+      maxLifetimeSeconds: Math.floor(this.maxLifetimeMs / 1000),
+      maxOutputBytes: this.maxFullOutputBytes,
+      completedRetentionSeconds: Math.floor(this.outputTtlMs / 1000),
+    };
   }
 
   private ensureOutputDirectory(): OutputDirectoryState {
@@ -455,11 +614,15 @@ export class ProcessManager {
     outputMode: ProcessOutputMode,
     sessionId: string | null,
     compatibilitySession: boolean,
+    lifecycle: ProcessLifecycle,
+    label: string,
+    idOverride?: string,
   ): ManagedProcess {
     if (this.count() >= this.maxProcesses) {
       throw new QubiclError('process_limit', `This computer already has ${this.maxProcesses} managed processes. Read or stop an existing process before starting another.`, 429);
     }
-    const id = randomBytes(12).toString('base64url');
+    const id = idOverride ?? randomBytes(12).toString('base64url');
+    if (this.processes.has(id)) throw new QubiclError('process_conflict', `Managed process ${id} already exists.`, 409);
     const outputDirectory = this.ensureOutputDirectory();
     const outputName = `${id}.log`;
     const outputPath = join(outputDirectory.path, outputName);
@@ -496,6 +659,8 @@ export class ProcessManager {
     const finished = new Promise<void>((resolve) => { finish = resolve; });
     const managed: ManagedProcess = {
       id,
+      label,
+      lifecycle,
       command,
       cwd,
       sessionId,
@@ -548,7 +713,8 @@ export class ProcessManager {
       finish();
     });
     this.processes.set(id, managed);
-    if (compatibilitySession) {
+    if (lifecycle === 'task') this.persistTask(managed);
+    if (compatibilitySession || lifecycle === 'task') {
       managed.lifetimeTimer = setTimeout(() => {
         if (managed.completed) return;
         managed.timedOut = true;
@@ -570,7 +736,9 @@ export class ProcessManager {
   private owned(id: string, owner: LeaseProof): ManagedProcess {
     const managed = this.processes.get(id);
     if (!managed) throw new QubiclError('process_not_found', `Managed process ${id} was not found.`, 404);
-    if (!sameOwner(managed.owner, owner)) throw new QubiclError('stale_process_owner', 'This process belongs to a different lease generation.', 409);
+    if (managed.lifecycle === 'session' && !sameOwner(managed.owner, owner)) {
+      throw new QubiclError('stale_process_owner', 'This session process belongs to a different lease generation.', 409);
+    }
     return managed;
   }
 
@@ -703,6 +871,10 @@ export class ProcessManager {
     const hasTruncation = truncatedStreams.length > 0 || managed.outputFileTruncated;
     const result: ProcessResult = {
       processId: managed.id,
+      label: managed.label,
+      lifecycle: managed.lifecycle,
+      survivesDisconnect: managed.lifecycle !== 'session',
+      survivesHumanTakeover: managed.lifecycle !== 'session',
       running: !managed.completed,
       terminalState: processTerminalState(managed),
       ...(managed.outputMode === 'split' ? { stdout, stderr } : { output }),
@@ -710,7 +882,7 @@ export class ProcessManager {
         truncation: {
           ...(truncatedStreams.length ? { inline: { limitBytes: managed.maxOutputBytes, streams: truncatedStreams } } : {}),
           ...(managed.outputFileTruncated ? { retainedLog: { limitBytes: this.maxFullOutputBytes } } : {}),
-          ...(truncatedStreams.length ? { continuation: { path: managed.outputPath, retainedLogTruncated: managed.outputFileTruncated } } : {}),
+          ...(truncatedStreams.length ? { continuation: { processId: managed.id, path: managed.outputPath, retainedLogTruncated: managed.outputFileTruncated } } : {}),
         },
       } : {}),
       ...(managed.exitCode !== null ? { exitCode: managed.exitCode } : {}),
@@ -748,7 +920,7 @@ export class ProcessManager {
         const record = managed.journal[nextOffset]!;
         if (bytes + record.length > MAX_PAGE_BYTES) break;
         const buffer = Buffer.allocUnsafe(record.length);
-        const read = readSync(descriptor, buffer, 0, record.length, record.offset);
+        const read = readExactlySync(descriptor, buffer, record.offset);
         if (read !== record.length) throw new Error('Managed process journal was truncated unexpectedly.');
         output.push({ type: record.type, data: buffer.toString('utf8') });
         bytes += record.length;
@@ -845,16 +1017,19 @@ export class ProcessManager {
     if (managed.timeoutTimer) clearTimeout(managed.timeoutTimer);
     if (managed.lifetimeTimer) clearTimeout(managed.lifetimeTimer);
     closeOutputDescriptor(managed);
+    if (managed.lifecycle === 'task') this.persistTask(managed);
     this.notify(managed);
     managed.outputCleanupTimer = setTimeout(
       () => this.cleanupOutput(managed),
       Math.max(this.outputTtlMs, managed.compatibilitySession ? this.completedTtlMs : 0),
     );
     managed.outputCleanupTimer.unref();
-    managed.expiryTimer = setTimeout(() => {
-      void this.discard(managed, !managed.compatibilitySession).catch(() => undefined);
-    }, this.completedTtlMs);
-    managed.expiryTimer.unref();
+    if (managed.lifecycle !== 'service') {
+      managed.expiryTimer = setTimeout(() => {
+        void this.discard(managed, !managed.compatibilitySession).catch(() => undefined);
+      }, this.completedTtlMs);
+      managed.expiryTimer.unref();
+    }
     if (managed.compatibilitySession) void this.pruneCompleted().catch(() => undefined);
   }
 
@@ -988,6 +1163,258 @@ export class ProcessManager {
       throw new QubiclError('process_fencing_failed', `Could not terminate surviving members of managed process group ${group}.`, 500);
     }
   }
+
+  private loadTaskHistory(): void {
+    if (!this.taskRecordPath) return;
+    ensureNoSymlinkDirectory(this.outputParent);
+    let raw: string;
+    try {
+      const info = lstatSync(this.taskRecordPath, { bigint: true });
+      if (info.isSymbolicLink() || !info.isFile() || info.nlink !== 1n || (info.mode & 0o077n) !== 0n) {
+        throw new Error('The retained task record must be a private regular file.');
+      }
+      raw = readFileSync(this.taskRecordPath, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    for (const line of raw.split('\n')) {
+      if (!line) continue;
+      const parsed = parsePersistedTask(line);
+      if (parsed) this.taskHistory.set(parsed.id, parsed);
+    }
+    for (const record of [...this.taskHistory.values()]) {
+      if (record.status !== 'running') continue;
+      const interrupted: PersistedTaskRecord = {
+        ...record,
+        status: 'interrupted',
+        finishedAt: new Date().toISOString(),
+      };
+      this.appendTaskRecord(interrupted);
+      this.taskHistory.set(interrupted.id, interrupted);
+    }
+    if (Buffer.byteLength(raw) > MAX_TASK_RECORD_BYTES) this.compactTaskRecords();
+  }
+
+  private persistTask(managed: ManagedProcess): void {
+    const record: PersistedTaskRecord = {
+      version: 2,
+      ...managementSummary(managed),
+      outputPath: managed.outputPath,
+      outputTruncated: managed.outputFileTruncated,
+    };
+    this.appendTaskRecord(record);
+    this.taskHistory.set(record.id, record);
+  }
+
+  private openRetainedOutput(id: string): { descriptor: number; size: number; complete: boolean; truncated: boolean } {
+    if (!/^[A-Za-z0-9_-]{16}$/u.test(id)) throw new QubiclError('invalid_arguments', 'processId must be an exact managed task identifier.', 400);
+    const managed = this.processes.get(id);
+    const historical = this.taskHistory.get(id);
+    if (!managed && !historical) throw new QubiclError('process_not_found', `Managed task ${id} was not found or its retained output expired.`, 404);
+    const outputPath = managed?.outputPath ?? historical!.outputPath;
+    const relativePath = relative(this.outputParent, outputPath);
+    const parentName = basename(dirname(outputPath));
+    if (isAbsolute(relativePath) || relativePath.startsWith(`..${sep}`) || relativePath === '..'
+      || !/^\.qubicl-command-output-[A-Za-z0-9_-]+$/u.test(parentName)
+      || basename(outputPath) !== `${id}.log`
+      || dirname(dirname(outputPath)) !== this.outputParent) {
+      throw new QubiclError('process_output_unavailable', `Managed task ${id} has an invalid retained-output location.`, 500);
+    }
+    let directory: number | undefined;
+    let descriptor: number | undefined;
+    try {
+      directory = openSync(dirname(outputPath), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      const openedDirectory = fstatSync(directory, { bigint: true });
+      const namedDirectory = lstatSync(dirname(outputPath), { bigint: true });
+      if (!openedDirectory.isDirectory() || namedDirectory.isSymbolicLink() || !sameIdentity(identity(openedDirectory), identity(namedDirectory))) throw new Error('retained-output directory identity changed');
+      descriptor = openSync(join(descriptorPath(directory), basename(outputPath)), constants.O_RDONLY | constants.O_NOFOLLOW);
+      const info = fstatSync(descriptor, { bigint: true });
+      if (!info.isFile() || info.nlink !== 1n || (info.mode & 0o077n) !== 0n || info.size > BigInt(DEFAULT_MAX_FULL_OUTPUT_BYTES)) throw new Error('retained-output file is not a private bounded regular file');
+      closeSync(directory);
+      directory = undefined;
+      return {
+        descriptor,
+        size: Number(info.size),
+        complete: managed ? managed.completed : historical!.status !== 'running',
+        truncated: managed?.outputFileTruncated ?? historical?.outputTruncated ?? false,
+      };
+    } catch (error) {
+      if (descriptor !== undefined) try { closeSync(descriptor); } catch { /* best effort */ }
+      throw new QubiclError('process_output_unavailable', `Managed task ${id} output is unavailable: ${(error as Error).message}`, 500);
+    } finally {
+      if (directory !== undefined) try { closeSync(directory); } catch { /* best effort */ }
+    }
+  }
+
+  private appendTaskRecord(record: PersistedTaskRecord): void {
+    if (!this.taskRecordPath) return;
+    ensureNoSymlinkDirectory(this.outputParent);
+    const descriptor = openSync(
+      this.taskRecordPath,
+      constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | constants.O_NOFOLLOW,
+      0o600,
+    );
+    let compact = false;
+    try {
+      fchmodSync(descriptor, 0o600);
+      const info = fstatSync(descriptor, { bigint: true });
+      if (!info.isFile() || info.nlink !== 1n) throw new Error('The retained task record is not a private regular file.');
+      writeAllSync(descriptor, Buffer.from(`${JSON.stringify(record)}\n`));
+      compact = Number(info.size) > MAX_TASK_RECORD_BYTES;
+    } finally {
+      closeSync(descriptor);
+    }
+    if (compact) this.compactTaskRecords(record);
+  }
+
+  private compactTaskRecords(extra?: PersistedTaskRecord): void {
+    if (!this.taskRecordPath) return;
+    const latest = new Map(this.taskHistory);
+    if (extra) latest.set(extra.id, extra);
+    const running = [...latest.values()].filter((record) => record.status === 'running');
+    const completed = [...latest.values()].filter((record) => record.status !== 'running')
+      .sort((left, right) => Date.parse(right.finishedAt ?? right.startedAt) - Date.parse(left.finishedAt ?? left.startedAt) || right.id.localeCompare(left.id))
+      .slice(0, this.maxCompletedProcesses);
+    const retained = [...running, ...completed].sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
+    const temporary = join(this.outputParent, `.task-records-${randomBytes(8).toString('hex')}.tmp`);
+    const descriptor = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    try {
+      fchmodSync(descriptor, 0o600);
+      writeAllSync(descriptor, Buffer.from(retained.map((record) => JSON.stringify(record)).join('\n') + (retained.length ? '\n' : '')));
+      fsyncSync(descriptor);
+    } finally { closeSync(descriptor); }
+    renameSync(temporary, this.taskRecordPath);
+    this.taskHistory.clear();
+    for (const record of retained) this.taskHistory.set(record.id, record);
+  }
+
+  private loadServices(): void {
+    const directory = this.serviceRecordDirectory;
+    if (!directory) return;
+    ensureNoSymlinkDirectory(directory);
+    const directoryInfo = lstatSync(directory, { bigint: true });
+    if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink() || (directoryInfo.mode & 0o077n) !== 0n) {
+      throw new Error('The durable service directory must be private.');
+    }
+    const names = readdirSync(directory).filter((name) => /^[A-Za-z0-9_-]{16}\.json$/u.test(name)).sort();
+    if (names.length > this.maxProcesses) throw new Error('Too many durable service definitions.');
+    for (const name of names) {
+      const path = join(directory, name);
+      const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      let definition: PersistedServiceDefinition;
+      try {
+        const info = fstatSync(descriptor, { bigint: true });
+        if (!info.isFile() || info.nlink !== 1n || (info.mode & 0o077n) !== 0n || info.size > BigInt(MAX_COMMAND_BYTES + 8192)) {
+          throw new Error('A durable service definition is unsafe.');
+        }
+        definition = parsePersistedService(readFileSync(descriptor, 'utf8'), this.durableHome);
+      } finally {
+        closeSync(descriptor);
+      }
+      if (`${definition.id}.json` !== name) throw new Error('A durable service definition has a mismatched identity.');
+      this.start(
+        definition.command,
+        definition.cwd,
+        { id: 'durable-service', generation: definition.ownerGeneration, epoch: 'computer' },
+        definition.maxOutputBytes,
+        definition.timeoutMs,
+        definition.outputMode,
+        null,
+        false,
+        'service',
+        definition.label,
+        definition.id,
+      );
+    }
+  }
+
+  private persistServiceDefinition(definition: PersistedServiceDefinition): void {
+    const directory = this.serviceRecordDirectory;
+    if (!directory) throw new QubiclError('service_persistence_unavailable', 'Durable services are unavailable in this runtime.', 409);
+    assertUtf8Limit(definition.command, MAX_COMMAND_BYTES, 'command');
+    parsePersistedService(JSON.stringify(definition), this.durableHome);
+    ensureNoSymlinkDirectory(directory);
+    const path = join(directory, `${definition.id}.json`);
+    const descriptor = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    try {
+      fchmodSync(descriptor, 0o600);
+      const info = fstatSync(descriptor, { bigint: true });
+      if (!info.isFile() || info.nlink !== 1n) throw new Error('The durable service definition is not a private regular file.');
+      writeAllSync(descriptor, Buffer.from(`${JSON.stringify(definition)}\n`));
+    } catch (error) {
+      try { unlinkSync(path); } catch { /* leave ambiguous state for operator review */ }
+      throw error;
+    } finally {
+      closeSync(descriptor);
+    }
+  }
+
+  private removeServiceDefinition(id: string): void {
+    if (!this.serviceRecordDirectory) return;
+    const path = join(this.serviceRecordDirectory, `${id}.json`);
+    try {
+      const info = lstatSync(path, { bigint: true });
+      if (info.isSymbolicLink() || !info.isFile() || info.nlink !== 1n) throw new Error('The durable service definition changed identity.');
+      unlinkSync(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+}
+
+function stripPersistedTask(record: PersistedTaskRecord): ManagementProcessSummary {
+  const { version: _version, outputPath: _outputPath, ...summary } = record;
+  return summary;
+}
+
+function parsePersistedTask(line: string): PersistedTaskRecord | undefined {
+  try {
+    const value = JSON.parse(line) as Partial<PersistedTaskRecord>;
+    if (
+      (value.version !== 1 && value.version !== 2)
+      || typeof value.id !== 'string'
+      || !/^[A-Za-z0-9_-]{16}$/u.test(value.id)
+      || typeof value.label !== 'string'
+      || value.lifecycle !== 'task'
+      || !['running', 'exited', 'signaled', 'timed-out', 'stopped', 'interrupted'].includes(value.status ?? '')
+      || typeof value.startedAt !== 'string'
+      || typeof value.outputPath !== 'string'
+      || value.owner !== 'computer'
+      || !Number.isSafeInteger(value.ownerGeneration)
+    ) return undefined;
+    if (value.outputTruncated !== undefined && typeof value.outputTruncated !== 'boolean') return undefined;
+    return value as PersistedTaskRecord;
+  } catch {
+    return undefined;
+  }
+}
+
+function parsePersistedService(raw: string, durableHome: string): PersistedServiceDefinition {
+  let value: Partial<PersistedServiceDefinition>;
+  try { value = JSON.parse(raw) as Partial<PersistedServiceDefinition>; }
+  catch { throw new Error('A durable service definition is invalid JSON.'); }
+  if (
+    value.version !== 1
+    || typeof value.id !== 'string'
+    || !/^[A-Za-z0-9_-]{16}$/u.test(value.id)
+    || typeof value.label !== 'string'
+    || !value.label.trim()
+    || value.label.length > 120
+    || typeof value.command !== 'string'
+    || Buffer.byteLength(value.command) > MAX_COMMAND_BYTES
+    || typeof value.cwd !== 'string'
+    || (resolve(value.cwd ?? '') !== durableHome && !resolve(value.cwd ?? '').startsWith(`${durableHome}${sep}`))
+    || !Number.isSafeInteger(value.maxOutputBytes)
+    || (value.maxOutputBytes ?? 0) < 1024
+    || (value.maxOutputBytes ?? 0) > 50_000
+    || !['combined', 'split'].includes(value.outputMode ?? '')
+    || (value.timeoutMs !== undefined && (!Number.isSafeInteger(value.timeoutMs) || value.timeoutMs < 1 || value.timeoutMs > 86_400_000))
+    || !Number.isSafeInteger(value.ownerGeneration)
+    || (value.ownerGeneration ?? 0) < 1
+    || Object.keys(value).some((key) => !['version', 'id', 'label', 'command', 'cwd', 'maxOutputBytes', 'outputMode', 'timeoutMs', 'ownerGeneration'].includes(key))
+  ) throw new Error('A durable service definition is invalid.');
+  return value as PersistedServiceDefinition;
 }
 
 function ensureNoSymlinkDirectory(path: string): void {
@@ -1086,6 +1513,16 @@ function writeAllSync(descriptor: number, data: Buffer): void {
   }
 }
 
+function readExactlySync(descriptor: number, target: Buffer, position: number): number {
+  let offset = 0;
+  while (offset < target.length) {
+    const read = readSync(descriptor, target, offset, target.length - offset, position + offset);
+    if (read === 0) break;
+    offset += read;
+  }
+  return offset;
+}
+
 function completeUtf8PrefixLength(data: Buffer): number {
   if (!data.length) return 0;
   let continuationBytes = 0;
@@ -1142,47 +1579,14 @@ function managementSummary(managed: ManagedProcess): ManagementProcessSummary {
           : 'exited';
   return {
     id: managed.id,
+    label: managed.label,
+    lifecycle: managed.lifecycle,
     status,
     startedAt: new Date(managed.startedAt).toISOString(),
     ...(managed.finishedAt === null ? {} : { finishedAt: new Date(managed.finishedAt).toISOString() }),
-    owner: 'agent',
+    owner: managed.lifecycle === 'session' ? 'agent' : 'computer',
     ownerGeneration: managed.owner.generation,
   };
-}
-
-async function terminateUidPopulation(uid: number): Promise<void> {
-  const deadline = Date.now() + 2_000;
-  for (;;) {
-    const pids = await processesForUid(uid);
-    if (!pids.length) return;
-    for (const pid of pids) {
-      try { process.kill(pid, 'SIGSTOP'); } catch { /* exited concurrently */ }
-    }
-    for (const pid of pids) {
-      try { process.kill(pid, 'SIGKILL'); } catch { /* exited concurrently */ }
-    }
-    if (Date.now() >= deadline) {
-      const surviving = await processesForUid(uid);
-      if (surviving.length) throw new QubiclError('process_fencing_failed', `Could not empty the isolated workload boundary; ${surviving.length} process${surviving.length === 1 ? '' : 'es'} survived.`, 500);
-      return;
-    }
-    await delay(10);
-  }
-}
-
-async function processesForUid(uid: number): Promise<number[]> {
-  const entries = await import('node:fs/promises').then(({ readdir }) => readdir('/proc', { withFileTypes: true }));
-  const matches: number[] = [];
-  await Promise.all(entries.filter((entry) => entry.isDirectory() && /^\d+$/u.test(entry.name)).map(async (entry) => {
-    const pid = Number(entry.name);
-    if (pid === process.pid) return;
-    try {
-      const status = await import('node:fs/promises').then(({ readFile }) => readFile(`/proc/${pid}/status`, 'utf8'));
-      const found = status.match(/^Uid:\s+(\d+)/mu);
-      if (found && Number(found[1]) === uid) matches.push(pid);
-    } catch { /* process exited or is not inspectable */ }
-  }));
-  return matches;
 }
 
 function processTerminalState(managed: ManagedProcess): ProcessResult['terminalState'] {

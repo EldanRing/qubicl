@@ -4,7 +4,7 @@ import { browserForCompatibility, type DesktopApplicationName, type Preset } fro
 import { DesktopApplicationManager } from './desktop-applications.js';
 import { errorPayload, QubiclError } from './errors.js';
 import type { LeaseProof } from './lease.js';
-import { ProcessManager, type ProcessOutputMode, type StopSignal } from './processes.js';
+import { ProcessManager, type ProcessLifecycle, type ProcessOutputMode, type StopSignal } from './processes.js';
 import { BrowserManager } from './browser.js';
 import { discoverListeningPorts } from './ports.js';
 import { readEffectiveResourceLimits } from './resource-limits.js';
@@ -28,6 +28,14 @@ export function createInternalRunner(): InternalRunner {
   const processes = role === 'executor' ? new ProcessManager({
     spawnUid: uid,
     spawnGid: gid,
+    home: '/home/qubicl',
+    outputDirectory: '/home/qubicl/.qubicl-tasks',
+    persistTaskRecords: true,
+    maxProcesses: configuredInteger('QUBICL_TASK_MAX_CONCURRENT', 32, 1, 128),
+    maxLifetimeMs: configuredInteger('QUBICL_TASK_MAX_LIFETIME_SECONDS', 604_800, 60, 2_592_000) * 1000,
+    maxFullOutputBytes: configuredInteger('QUBICL_TASK_MAX_OUTPUT_BYTES', 100_000_000, 1_000_000, 500_000_000),
+    outputTtlMs: configuredInteger('QUBICL_TASK_COMPLETED_RETENTION_SECONDS', 604_800, 60, 2_592_000) * 1000,
+    completedTtlMs: configuredInteger('QUBICL_TASK_COMPLETED_RETENTION_SECONDS', 604_800, 60, 2_592_000) * 1000,
     ...(process.env.QUBICL_EXECUTOR_FENCE_UID === '0' ? {} : { fenceUid: uid }),
   }) : undefined;
   const applications = role === 'session'
@@ -38,6 +46,7 @@ export function createInternalRunner(): InternalRunner {
     ? new BrowserManager(browserForCompatibility(requiredCompatibility()), {
       executable: process.env.QUBICL_BROWSER_EXECUTABLE ?? '/usr/local/bin/qubicl-chromium',
       environment: process.env,
+      maxTabs: configuredInteger('QUBICL_BROWSER_MAX_TABS', 24, 1, 128),
       ...(pointerPublisher ? { publishViewerPointer: pointerPublisher } : {}),
     })
     : undefined;
@@ -97,6 +106,7 @@ async function handleExecutor(
       send(response, 200, {
         managedProcesses: processes.count(),
         effectiveResourceLimits: await readEffectiveResourceLimits(),
+        taskLimits: processes.limits(),
       });
       return;
     case 'POST /v1/process/exec':
@@ -108,13 +118,56 @@ async function handleExecutor(
         proof(body.owner),
         optionalNumber(body.timeoutMs, 'timeoutMs'),
         body.outputMode === 'split' ? 'split' : 'combined' as ProcessOutputMode,
+        (body.lifecycle === 'task' || body.lifecycle === 'service' ? body.lifecycle : 'session') as ProcessLifecycle,
+        typeof body.label === 'string' ? body.label : 'Task',
       ));
+      return;
+    case 'GET /v1/process/agent-list':
+      send(response, 200, processes.listForAgent());
       return;
     case 'POST /v1/process/write':
       send(response, 200, await processes.write(string(body.id, 'id'), string(body.input, 'input'), Boolean(body.close), number(body.yieldTimeMs, 'yieldTimeMs'), proof(body.owner)));
       return;
     case 'POST /v1/process/stop':
       send(response, 200, await processes.stop(string(body.id, 'id'), proof(body.owner), stopSignal(body.signal)));
+      return;
+    case 'POST /v1/process/output':
+      send(response, 200, processes.readOutput(
+        string(body.id, 'id'),
+        number(body.offset, 'offset'),
+        number(body.maxBytes, 'maxBytes'),
+        optionalNumber(body.tailBytes, 'tailBytes'),
+        body.encoding === 'base64' ? 'base64' : 'utf8',
+      ));
+      return;
+    case 'POST /v1/process/output-save':
+      send(response, 200, await processes.saveOutput(string(body.id, 'id'), string(body.path, 'path'), number(body.maxBytes, 'maxBytes')));
+      return;
+    case 'POST /v1/terminal/open':
+      send(response, 200, await processes.terminalOpen(
+        string(body.command, 'command'), string(body.cwd, 'cwd'), number(body.rows, 'rows'), number(body.columns, 'columns'),
+        proof(body.owner), body.lifecycle === 'session' ? 'session' : 'task', typeof body.label === 'string' ? body.label : 'Terminal',
+      ));
+      return;
+    case 'GET /v1/terminal/list':
+      send(response, 200, processes.terminalList());
+      return;
+    case 'POST /v1/terminal/read':
+      send(response, 200, await processes.terminalRead(
+        string(body.id, 'id'), proof(body.owner), number(body.offset, 'offset'), number(body.maxBytes, 'maxBytes'), number(body.waitMs, 'waitMs'), body.encoding === 'base64' ? 'base64' : 'utf8',
+      ));
+      return;
+    case 'POST /v1/terminal/write':
+      send(response, 200, await processes.terminalWrite(string(body.id, 'id'), proof(body.owner), string(body.input, 'input')));
+      return;
+    case 'POST /v1/terminal/resize':
+      send(response, 200, await processes.terminalResize(string(body.id, 'id'), proof(body.owner), number(body.rows, 'rows'), number(body.columns, 'columns')));
+      return;
+    case 'POST /v1/terminal/signal':
+      send(response, 200, await processes.terminalSignal(string(body.id, 'id'), proof(body.owner), stopSignal(body.signal)));
+      return;
+    case 'POST /v1/terminal/close':
+      send(response, 200, await processes.terminalClose(string(body.id, 'id'), proof(body.owner), Boolean(body.force)));
       return;
     case 'POST /v1/process/compatibility-execute':
       send(response, 200, await processes.executeCompatibility(
@@ -170,13 +223,13 @@ async function handleSession(
       send(response, 200, { desktopApplications: applications.count() });
       return;
     case 'GET /v1/applications':
-      send(response, 200, { applications: applications.list() });
+      send(response, 200, { applications: applications.list(), availableApplications: await applications.available() });
       return;
     case 'POST /v1/applications/open':
       send(response, 200, await applications.open(string(body.application, 'application') as DesktopApplicationName, stringArray(body.paths, 'paths')));
       return;
     case 'POST /v1/applications/close':
-      send(response, 200, await applications.close(string(body.applicationId, 'applicationId')));
+      send(response, 200, await applications.close(string(body.applicationId, 'applicationId'), body.discardUnsavedChanges === true));
       return;
     case 'POST /v1/browser/invoke': {
       const method = browserMethod(body.method);
@@ -239,6 +292,16 @@ function requiredIdentity(name: string): number {
   return value;
 }
 
+function configuredInteger(name: string, fallback: number, minimum: number, maximum: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${name} must be an integer from ${minimum} to ${maximum}.`);
+  }
+  return value;
+}
+
 function requiredCompatibility(): Preset {
   const value = process.env.QUBICL_COMPATIBILITY;
   if (!['file-system', 'browser', 'computer', 'workstation'].includes(value ?? '')) throw new Error('QUBICL_COMPATIBILITY is invalid.');
@@ -246,9 +309,10 @@ function requiredCompatibility(): Preset {
 }
 
 const BROWSER_METHODS = [
-  'navigate', 'snapshot', 'screenshot', 'click', 'clickWithViewerPointer', 'type', 'select', 'press', 'scroll', 'history', 'wait',
+  'health', 'navigate', 'snapshot', 'screenshot', 'click', 'clickWithViewerPointer', 'type', 'select', 'press', 'scroll', 'history', 'wait',
   'tabs', 'useTab', 'newTab', 'closeTab', 'reset', 'clickAt', 'hoverAt', 'drag', 'scrollAt', 'typeFocused',
-  'inspectAt', 'computer', 'computerWithViewerPointers', 'shutdown',
+  'inspectAt', 'computer', 'computerWithViewerPointers', 'upload', 'listDownloads', 'cancelDownload',
+  'listDialogs', 'respondDialog', 'permissions', 'browserDiagnostics', 'setViewport', 'shutdown',
   'renderForExtraction',
 ] as const;
 type BrowserMethod = typeof BROWSER_METHODS[number];

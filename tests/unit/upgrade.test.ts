@@ -9,7 +9,7 @@ test('upgrading replaces only the image contract and preserves durable operator 
     name: 'open-webui-qubicl',
     runtimeName: 'open-webui-qubicl',
     createdAt: '2026-08-20T12:00:00.000Z',
-    network: { profile: 'custom', allowDomains: ['example.com'], denyDomains: ['blocked.test'], temporaryApprovals: [] },
+    network: { profile: 'custom', allowDomains: ['example.com'], denyDomains: ['blocked.test'], allowCidrs: ['10.42.0.10/32'], allowTcpPorts: [5432], temporaryApprovals: [] },
     ssh: {
       enabled: true,
       port: 22222,

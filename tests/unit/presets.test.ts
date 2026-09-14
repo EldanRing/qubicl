@@ -42,15 +42,15 @@ test('all curated presets have exact cumulative capability and tool contracts', 
     assert.deepEqual(Object.keys(openApi.paths).sort(), manifest.tools.map((name) => `/v1/tools/${name}`).sort());
   }
   assert.deepEqual(PRESET_DEFINITIONS['file-system'].capabilities, CAPABILITY_IDS.slice(0, 3));
-  assert.equal(CONTROL_PROTOCOL_VERSION, 10);
+  assert.equal(CONTROL_PROTOCOL_VERSION, 11);
   const fileSystemTools = enabledToolNames(PRESET_DEFINITIONS['file-system'].capabilities);
   const browserTools = enabledToolNames(PRESET_DEFINITIONS.browser.capabilities);
   const computerTools = enabledToolNames(PRESET_DEFINITIONS.computer.capabilities);
   assert.equal(fileSystemTools.includes('take_screenshot'), false);
-  assert.equal(fileSystemTools.length, 25);
-  assert.equal(browserTools.length, 52);
+  assert.equal(fileSystemTools.length, 38);
+  assert.equal(browserTools.length, 73);
   assert.equal(browserTools.includes('open_desktop_application'), false);
-  assert.equal(computerTools.length, 55);
+  assert.equal(computerTools.length, 76);
   assert.equal(computerTools.includes('open_desktop_application'), true);
   assert.equal(computerTools.includes('list_desktop_applications'), true);
   assert.equal(computerTools.includes('close_desktop_application'), true);

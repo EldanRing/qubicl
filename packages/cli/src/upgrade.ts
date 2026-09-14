@@ -20,6 +20,7 @@ export function upgradedComputer(computer: ComputerConfig, imageDefaults: Comput
     capabilityContractVersion: imageDefaults.capabilityContractVersion,
     capabilities: [...imageDefaults.capabilities],
     controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
+    browser: structuredClone(computer.browser ?? { maxTabs: 24 }),
     cpus: computer.cpus,
     memory: computer.memory,
     toolPolicy: maximum.filter((tool) => (computer.toolPolicy ?? maximum).includes(tool)),

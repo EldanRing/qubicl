@@ -23,13 +23,18 @@ interface AppState {
   plan: ManagementPlan | undefined;
   activeJob: ManagementJob | undefined;
   busy: boolean;
+  execution: { planId: string; idempotencyKey: string; uncertain: boolean } | undefined;
+  pendingClientSecret: { planId: string; clientId: string; token: string } | undefined;
 }
 
-const state: AppState = { session: undefined, snapshot: undefined, plan: undefined, activeJob: undefined, busy: false };
+const state: AppState = { session: undefined, snapshot: undefined, plan: undefined, activeJob: undefined, busy: false, execution: undefined, pendingClientSecret: undefined };
 const RECOVERY_SAFE_OPERATIONS = new Set<ManagementOperation>(['recovery.resume', 'dashboard.restart', 'dashboard.revoke']);
 let refreshTimer: number | undefined;
 let eventStream: EventSubscription | undefined;
 let lastSessionActivity = 0;
+let navigationGeneration = 0;
+let snapshotUpdatedAt: number | undefined;
+let snapshotStale = false;
 
 window.addEventListener('hashchange', () => void navigate());
 document.addEventListener('visibilitychange', () => {
@@ -61,12 +66,17 @@ async function boot(): Promise<void> {
 async function refreshSnapshot(navigateAfter: boolean): Promise<void> {
   try {
     state.snapshot = await api.snapshot();
+    snapshotUpdatedAt = Date.now();
+    snapshotStale = false;
     if (navigateAfter) await navigate();
     else {
       updateStatusRail();
-      if ((currentRoute()[0] ?? 'fleet') === 'fleet' && !state.plan && !state.activeJob) {
+      const route = currentRoute();
+      if ((route[0] ?? 'fleet') === 'fleet' && !state.plan && !state.activeJob) {
         const outlet = document.querySelector<HTMLElement>('#view');
         if (outlet) renderFleet(outlet);
+      } else if (route[0] === 'computers' && route[1] && !state.plan && !state.activeJob) {
+        await refreshActiveComputerDetail(route[1], route[2] ?? 'overview');
       }
     }
   } catch (error) {
@@ -74,11 +84,33 @@ async function refreshSnapshot(navigateAfter: boolean): Promise<void> {
       endSession('Your session ended. Sign in again.');
       return;
     }
+    snapshotStale = true;
+    updateStatusRail();
     showToast(errorMessage(error), 'error');
   }
 }
 
+async function refreshActiveComputerDetail(id: string, section: string): Promise<void> {
+  const sectionRoot = document.querySelector<HTMLElement>('#computer-section');
+  if (!sectionRoot || sectionRoot.querySelector(':focus') instanceof HTMLInputElement || sectionRoot.querySelector(':focus') instanceof HTMLTextAreaElement || sectionRoot.querySelector(':focus') instanceof HTMLSelectElement) return;
+  const generation = navigationGeneration;
+  try {
+    const computer = await api.computer(id);
+    if (generation !== navigationGeneration || currentRoute()[1] !== id || (currentRoute()[2] ?? 'overview') !== section) return;
+    if (section === 'processes') await renderProcesses(sectionRoot, computer);
+    else if (section === 'previews') await renderPreviews(sectionRoot, computer);
+    else if (section === 'overview') renderOverview(sectionRoot, computer);
+    else return;
+    sectionRoot.dataset.stale = 'false';
+  } catch {
+    if (generation !== navigationGeneration || !sectionRoot.isConnected) return;
+    sectionRoot.dataset.stale = 'true';
+    sectionRoot.querySelector('[data-detail-freshness]')?.replaceChildren(document.createTextNode('Update failed · showing earlier data'));
+  }
+}
+
 async function navigate(): Promise<void> {
+  const generation = navigationGeneration += 1;
   if (!state.session?.authenticated) return renderLogin();
   if (!state.snapshot) return refreshSnapshot(true);
   const route = currentRoute();
@@ -101,8 +133,10 @@ async function navigate(): Promise<void> {
     else if (route[0] === 'settings') await renderSettings(outlet);
     else renderFleet(outlet);
   } catch (error) {
+    if (generation !== navigationGeneration) return;
     outlet.innerHTML = errorPanel(errorMessage(error));
   }
+  if (generation !== navigationGeneration) return;
   finishRouteNavigation(outlet);
 }
 
@@ -141,7 +175,7 @@ function applyRecoveryRestrictions(outlet: HTMLElement): void {
     form.setAttribute('aria-disabled', 'true');
     for (const button of form.querySelectorAll<HTMLButtonElement>('button[type="submit"]')) button.disabled = true;
   }
-  for (const button of outlet.querySelectorAll<HTMLButtonElement>('[data-action="restore-backup"], [data-action="update-skill"]')) {
+  for (const button of outlet.querySelectorAll<HTMLButtonElement>('[data-action="restore-backup"], [data-action="verify-encrypted-backup"], [data-action="restore-encrypted-backup"], [data-action="update-skill"]')) {
     button.disabled = true;
     button.title = reason;
   }
@@ -203,7 +237,8 @@ function navLink(route: string, label: string, glyph: string): string {
 
 function statusRail(snapshot: ManagementSnapshot): string {
   const docker = snapshot.docker.available ? 'online' : 'offline';
-  return `<div class="status-rail"><span class="status-dot ${docker}"></span><span>Docker ${docker}</span><span class="rail-divider"></span><span>Gateway ${escapeHtml(snapshot.gateway.status)}</span></div>`;
+  const freshness = snapshotStale ? 'Status stale' : snapshotUpdatedAt ? `Updated ${relativeTime(snapshotUpdatedAt)}` : 'Updating';
+  return `<div class="status-rail"><span class="status-dot ${snapshotStale ? 'offline' : docker}"></span><span>Docker ${docker}</span><span class="rail-divider"></span><span>Gateway ${escapeHtml(snapshot.gateway.status)}</span><span class="rail-divider"></span><span>${escapeHtml(freshness)}</span></div>`;
 }
 
 function updateStatusRail(): void {
@@ -230,7 +265,7 @@ function renderFleet(outlet: HTMLElement): void {
     <div class="computer-grid">
       ${snapshot.computers.map(computerCard).join('') || emptyState('No computers yet', 'Each computer gets its own durable home, policy, and runtime.', '<a class="primary-button" href="#/new">Create a computer</a>')}
     </div>
-    ${snapshot.trash.length ? `<section class="subsection"><div class="section-heading"><div><h2>Recoverable</h2><p>Deleted homes stay here until explicitly purged from the CLI.</p></div></div><div class="table-wrap"><table><thead><tr><th>Name</th><th>ID</th><th></th></tr></thead><tbody>${snapshot.trash.map((entry) => `<tr><td><strong>${escapeHtml(entry.name)}</strong></td><td class="mono">${shortId(entry.id)}</td><td>${actionButton('computer.restore', entry.id, 'Restore', 'text-button')}</td></tr>`).join('')}</tbody></table></div></section>` : ''}`;
+    ${snapshot.trash.length ? `<section class="subsection"><div class="section-heading"><div><h2>Recoverable</h2><p>Deleted homes stay here until explicitly purged from the CLI.</p></div></div><div class="table-wrap"><table><thead><tr><th>Name</th><th>ID</th><th></th></tr></thead><tbody>${snapshot.trash.map((entry) => `<tr><td><strong>${escapeHtml(entry.name)}</strong>${entry.diagnostic ? `<small>${escapeHtml(entry.diagnostic)}</small>` : ''}</td><td class="mono">${shortId(entry.id)}</td><td>${entry.status === 'available' ? actionButton('computer.restore', entry.id, 'Restore', 'text-button') : 'Needs local review'}</td></tr>`).join('')}</tbody></table></div></section>` : ''}`;
 }
 
 function computerCard(computer: ManagementComputer): string {
@@ -253,7 +288,7 @@ function renderSetup(outlet: HTMLElement): void {
   const presets = state.snapshot?.presets ?? [];
   outlet.innerHTML = `<div class="narrow-page"><header class="page-header"><p class="eyebrow">First run</p><h1>Set up Qubicl</h1><p class="lede">Choose a starting profile. Qubicl will present a complete plan before changing the host.</p></header>
     <form class="paper-form" data-plan="setup">
-      <fieldset><legend>Starting profile</legend><div class="choice-grid">${presets.map((preset, index) => `<label class="choice-card"><input type="radio" name="preset" value="${escapeAttr(preset.id)}" ${index === 0 ? 'checked' : ''}><span><strong>${escapeHtml(titleCase(preset.id))}</strong><small>${escapeHtml(String(preset.cpus))} CPU · ${escapeHtml(preset.memory)}</small><small>${escapeHtml(preset.capabilities.join(', '))}</small></span></label>`).join('')}</div></fieldset>
+      <fieldset><legend>Starting profile</legend><div class="choice-grid">${presets.map((preset) => `<label class="choice-card"><input type="radio" name="preset" value="${escapeAttr(preset.id)}" ${preset.id === state.snapshot?.defaultPreset ? 'checked' : ''}><span><strong>${escapeHtml(titleCase(preset.id))}</strong><small>${escapeHtml(preset.purpose)}</small><small>${escapeHtml(String(preset.cpus))} CPU · ${escapeHtml(preset.memory)}</small></span></label>`).join('')}</div></fieldset>
       <div class="field-row"><label>CPU limit <input name="cpus" inputmode="decimal" placeholder="Use preset"></label><label>Memory limit <input name="memory" placeholder="Use preset, e.g. 4g"></label></div>
       <label>Local gateway port <input name="gatewayPort" type="number" min="1024" max="65535" placeholder="3211"></label>
       <label>First computer name <input name="createName" autocomplete="off" placeholder="Optional"></label>
@@ -266,7 +301,7 @@ function renderCreate(outlet: HTMLElement): void {
   outlet.innerHTML = `<div class="narrow-page"><a class="back-link" href="#/fleet">${icon('arrow-left')} Fleet</a><header class="page-header"><p class="eyebrow">New computer</p><h1>Create a durable workspace</h1><p class="lede">The image and runtime can be replaced later. The home persists.</p></header>
     <form class="paper-form" data-plan="computer.create">
       <label>Computer name <input name="name" required minlength="1" maxlength="63" autocomplete="off" placeholder="research"></label>
-      <fieldset><legend>Preset</legend><div class="choice-grid">${presets.map((preset, index) => `<label class="choice-card"><input type="radio" name="preset" value="${escapeAttr(preset.id)}" ${index === 0 ? 'checked' : ''}><span><strong>${escapeHtml(titleCase(preset.id))}</strong><small>${escapeHtml(preset.capabilities.join(', '))}</small></span></label>`).join('')}</div></fieldset>
+      <fieldset><legend>Preset</legend><div class="choice-grid">${presets.map((preset) => `<label class="choice-card"><input type="radio" name="preset" value="${escapeAttr(preset.id)}" ${preset.id === state.snapshot?.defaultPreset ? 'checked' : ''}><span><strong>${escapeHtml(titleCase(preset.id))}</strong><small>${escapeHtml(preset.purpose)}</small><small>${escapeHtml(preset.description)}</small></span></label>`).join('')}</div></fieldset>
       <div class="field-row"><label>CPU limit <input name="cpus" inputmode="decimal" placeholder="Use preset"></label><label>Memory limit <input name="memory" placeholder="Use preset"></label></div>
       <button class="primary-button" type="submit">Review create plan</button>
     </form></div>`;
@@ -297,26 +332,40 @@ function renderOverview(outlet: HTMLElement, computer: ManagementComputer): void
     ? 'None'
     : `${titleCase(controllerKind)} · generation ${metricValue(controller.generation)}${actor.untrustedLabel ? ` · Source provided: ${stringValue(actor.untrustedLabel)}` : ''}${actor.protocol ? ` · ${stringValue(actor.protocol)}` : ''}`;
   const resources = record(computer.resources);
-  outlet.innerHTML = `<section class="detail-grid"><div class="panel"><div class="section-heading"><div><h2>Runtime</h2><p>Durable intent and the latest host observation.</p></div></div>
+  const browser = record(computer.browser);
+  const browserPanel = Object.keys(browser).length ? `<section class="panel subsection"><div class="section-heading"><div><h2>Browser security and compatibility</h2><p>The effective runtime posture. Recent diagnostics are sanitized; inspect them with <span class="mono">browser_diagnostics</span>.</p></div></div>${objectDetails({
+    state: browser.state,
+    engineVersion: browser.engineVersion ?? 'Available after browser start',
+    sandbox: browser.sandbox,
+    profile: browser.profile,
+    extensions: browser.extensions,
+    passwordStore: browser.passwordStore,
+    publicExtraction: browser.publicExtraction,
+    agentTabLimit: record(browser.tabPolicy).agentOpenLimit,
+    automaticTabEviction: record(browser.tabPolicy).automaticEviction,
+    recentDiagnosticCount: browser.recentDiagnosticCount,
+    lastDiagnostic: record(browser.lastDiagnostic).detail,
+  })}</section>` : '';
+  outlet.innerHTML = `<section class="detail-grid"><div class="panel"><div class="section-heading"><div><h2>Runtime</h2><p>Durable intent and the latest host observation.</p></div><small data-detail-freshness>Updated ${relativeTime(Date.now())}</small></div>
       <dl class="detail-list"><div><dt>Status</dt><dd>${escapeHtml(displayStatus(computer.status))}</dd></div><div><dt>Health</dt><dd>${escapeHtml(computer.health ?? 'unknown')}</dd></div><div><dt>Controller</dt><dd>${escapeHtml(controllerDetail)}</dd></div>${controller.expiresAt ? `<div><dt>Lease expires</dt><dd>${formatTime(controller.expiresAt)}</dd></div>` : ''}<div><dt>Managed processes</dt><dd>${escapeHtml(metricValue(resources.managedProcesses ?? 0))}</dd></div><div><dt>Active previews</dt><dd>${escapeHtml(metricValue(resources.activePreviews ?? 0))}</dd></div><div><dt>Image</dt><dd class="mono wrap">${escapeHtml(computer.image.resolved || computer.image.requested)}</dd></div></dl>
       ${controllerKind === 'human' ? actionButton('control.release', computer.id, 'Release human control', 'secondary-button') : ''}
     </div><div class="panel"><div class="section-heading"><div><h2>Resources</h2><p>Changing limits recreates the disposable runtime.</p></div></div>
       <form data-plan="computer.resources" data-target="${escapeAttr(computer.id)}"><div class="field-row"><label>CPUs <input name="cpus" required inputmode="decimal" value="${escapeAttr(String(computer.cpus))}"></label><label>Memory <input name="memory" required value="${escapeAttr(computer.memory)}"></label></div><button class="secondary-button" type="submit">Review resource change</button></form>
-    </div></section>
+    </div></section>${browserPanel}
     <section class="panel subsection"><div class="section-heading"><div><h2>Identity</h2><p>The computer ID and home remain stable through a rename.</p></div></div><form data-plan="computer.rename" data-target="${escapeAttr(computer.id)}" class="inline-form"><label><span class="sr-only">New name</span><input name="name" required value="${escapeAttr(computer.name)}"></label><button class="secondary-button" type="submit">Review rename</button></form><hr><div class="section-heading"><div><h3>Clone durable home</h3><p>Create a verified checkpoint and restore it as a new, stopped computer.</p></div></div><form data-plan="computer.clone" data-target="${escapeAttr(computer.id)}" class="inline-form"><label><span class="sr-only">Clone name</span><input name="name" required placeholder="clone-name" autocomplete="off"></label><button class="secondary-button" type="submit">Review clone</button></form></section>
     <section class="panel danger-zone"><div><h2>Delete computer</h2><p>Moves the durable home to recoverable trash and invalidates access.</p></div>${actionButton('computer.delete', computer.id, 'Review delete', 'danger-button')}</section>`;
 }
 
 async function renderProcesses(outlet: HTMLElement, computer: ManagementComputer): Promise<void> {
   const { items } = await api.processes(computer.id);
-  outlet.innerHTML = `<div class="section-heading"><div><h2>Processes</h2><p>Bounded metadata for retained commands. Process input and output are not shown here.</p></div><span class="count-badge">${items.length}</span></div>
-    ${items.length ? `<div class="table-wrap"><table><thead><tr><th>Process</th><th>Status</th><th>Started</th><th>Owner</th><th></th></tr></thead><tbody>${items.map((item) => `<tr><td><strong>Managed process</strong><small class="mono">${escapeHtml(shortId(item.id))}</small></td><td>${statusPill(item.status)}${item.finishedAt ? `<small>Finished ${formatTime(item.finishedAt)}</small>` : ''}</td><td>${formatTime(item.startedAt)}</td><td>${escapeHtml(`${titleCase(item.owner)} · generation ${item.ownerGeneration}`)}</td><td>${isTerminalStatus(item.status) ? '' : actionButton('process.stop', computer.id, 'Stop', 'text-button', { processId: item.id })}</td></tr>`).join('')}</tbody></table></div>` : emptyState('No retained processes', 'Processes started by connected agents will appear here.')}`;
+  outlet.innerHTML = `<div class="section-heading"><div><h2>Processes</h2><p>Bounded metadata for retained commands. Process input and output are not shown here.</p><small data-detail-freshness>Updated ${relativeTime(Date.now())}</small></div><span class="count-badge">${items.length}</span></div>
+    ${items.length ? `<div class="table-wrap"><table><thead><tr><th>Task</th><th>Status</th><th>Started</th><th>Owner</th><th></th></tr></thead><tbody>${items.map((item) => `<tr><td><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(titleCase(item.lifecycle))} · <span class="mono">${escapeHtml(shortId(item.id))}</span></small></td><td>${statusPill(item.status)}${item.finishedAt ? `<small>Finished ${formatTime(item.finishedAt)}</small>` : ''}</td><td>${formatTime(item.startedAt)}</td><td>${escapeHtml(`${titleCase(item.owner)} · generation ${item.ownerGeneration}`)}</td><td>${isTerminalStatus(item.status) ? '' : actionButton('process.stop', computer.id, 'Stop', 'text-button', { processId: item.id })}</td></tr>`).join('')}</tbody></table></div>` : emptyState('No retained processes', 'Processes started by connected agents will appear here.')}`;
 }
 
 async function renderPreviews(outlet: HTMLElement, computer: ManagementComputer): Promise<void> {
   const { items } = await api.previews(computer.id);
-  outlet.innerHTML = `<div class="section-heading"><div><h2>Previews</h2><p>Only active, explicitly published ports are reachable.</p></div><span class="count-badge">${items.length}</span></div>
-    ${items.length ? `<div class="card-list">${items.map((item) => `<article class="row-card"><div><strong>${escapeHtml(item.kind === 'port' && item.port ? `Port ${item.port}` : 'File preview')}</strong><p>${escapeHtml(titleCase(item.status))} · expires ${formatTime(item.expiresAt)}</p><small class="mono">${escapeHtml(shortId(item.id))}</small></div><div class="row-actions"><button class="secondary-button" type="button" data-action="preview-open" data-computer="${escapeAttr(computer.id)}" data-target="${escapeAttr(item.id)}">Open</button>${actionButton('preview.revoke', computer.id, 'Revoke', 'text-button', { previewId: item.id })}</div></article>`).join('')}</div>` : emptyState('No active previews', 'Agents can publish bounded local ports when a policy allows it.')}`;
+  outlet.innerHTML = `<div class="section-heading"><div><h2>Previews</h2><p>Local owner access follows the app. Remote shares are separate and expire.</p><small data-detail-freshness>Updated ${relativeTime(Date.now())}</small></div><span class="count-badge">${items.length}</span></div>
+    ${items.length ? `<div class="card-list">${items.map((item) => `<article class="row-card"><div><strong>${escapeHtml(item.kind === 'port' && item.port ? `Port ${item.port}` : 'File preview')}</strong><p>${escapeHtml(titleCase(item.status))} · ${item.lifetime === 'while-listening' ? 'follows listening app' : `expires ${formatTime(item.expiresAt!)}`}${item.shareExpiresAt ? ` · shared until ${formatTime(item.shareExpiresAt)}` : ''}</p><small class="mono">${escapeHtml(shortId(item.id))}</small></div><div class="row-actions"><button class="secondary-button" type="button" data-action="preview-open" data-computer="${escapeAttr(computer.id)}" data-target="${escapeAttr(item.id)}">Open</button>${item.kind === 'port' ? item.shareExpiresAt ? actionButton('preview.unshare', computer.id, 'Revoke share', 'text-button', { previewId: item.id }) : `<form class="inline-form" data-plan="preview.share" data-target="${escapeAttr(computer.id)}"><input type="hidden" name="previewId" value="${escapeAttr(item.id)}"><label><span class="sr-only">Share duration</span><select name="duration" aria-label="Share duration"><option value="900">15 minutes</option><option value="3600" selected>1 hour</option><option value="14400">4 hours</option><option value="86400">24 hours</option></select></label><button class="text-button" type="submit">Review share</button></form>` : ''}${actionButton('preview.revoke', computer.id, 'Revoke publication', 'text-button', { previewId: item.id })}</div></article>`).join('')}</div>` : emptyState('No active previews', 'Agents can publish local app previews that follow the listening process.')}`;
 }
 
 async function renderTools(outlet: HTMLElement, computer: ManagementComputer): Promise<void> {
@@ -351,22 +400,31 @@ function renderNetwork(outlet: HTMLElement, computer: ManagementComputer): void 
 }
 
 async function renderAccess(outlet: HTMLElement, computer: ManagementComputer): Promise<void> {
-  const credentials = await api.credentials(computer.id).then(({ items }) => items).catch((error: unknown) => {
-    if (error instanceof ApiError && error.status === 404) return [];
-    throw error;
-  });
-  outlet.innerHTML = `<div class="section-heading"><div><h2>Access and credentials</h2><p>Credential values are write-only. They never return to this browser.</p></div></div>
+  const [credentials, clients] = await Promise.all([
+    api.credentials(computer.id).then(({ items }) => items).catch((error: unknown) => {
+      if (error instanceof ApiError && error.status === 404) return [];
+      throw error;
+    }),
+    api.clients(computer.id).then(({ items }) => items),
+  ]);
+  outlet.innerHTML = `<div class="section-heading"><div><h2>Access and credentials</h2><p>Each connected client can have its own identity, scopes, and revocation boundary.</p></div></div>
+    <section class="panel"><div class="section-heading"><div><h3>Client connections</h3><p>Scope names describe what the bearer can ask this computer to do. Operator authority remains separate.</p></div><span class="count-badge">${clients.length}</span></div>
+      <div class="card-list">${clients.map((client) => `<article class="row-card"><div><strong>${escapeHtml(client.label)}</strong><p>${escapeHtml(client.scopes.join(', '))}</p><small><span class="mono">${escapeHtml(client.id)}</span> · ${client.lastUsedAt ? `last used ${formatTime(client.lastUsedAt)}` : 'never used'}</small></div><div class="row-actions">${client.id === 'default' ? actionButton('token.rotate', computer.id, 'Rotate default', 'text-button') : `${actionButton('client.rotate', computer.id, 'Rotate', 'text-button', { id: client.id })}${actionButton('client.revoke', computer.id, 'Revoke', 'text-button', { id: client.id })}`}</div></article>`).join('')}</div>
+      <form class="subsection" data-plan="client.create" data-target="${escapeAttr(computer.id)}"><div class="field-row"><label>Client ID <input name="id" required pattern="[a-z0-9][a-z0-9-]{0,62}" autocomplete="off" placeholder="coding-agent"></label><label>Display label <input name="label" required maxlength="120" autocomplete="off" placeholder="Coding agent"></label></div><fieldset><legend>Allowed scopes</legend><div class="scope-grid">${['observe', 'files', 'tasks', 'interactive', 'publish'].map((scope) => `<label><input type="checkbox" name="scopes" value="${scope}" checked> ${titleCase(scope)}</label>`).join('')}</div></fieldset><button class="primary-button" type="submit">Review new client</button></form>
+      <div class="subsection"><h4>Connection guide</h4><p>Generate a client-specific HTTP or OpenAPI snippet on the host:</p><code class="command-example">qubicl connect ${escapeHtml(computer.name)} --client generic --transport http --credential &lt;client-id&gt;</code></div>
+    </section>
+    <section class="panel subsection"><div class="section-heading"><div><h3>Brokered API credentials</h3><p>Secret values are write-only. They never return to this browser.</p></div></div>
     ${credentials.length ? `<div class="credential-list">${credentials.map((credential) => `<article class="row-card"><div><strong>${escapeHtml(stringValue(credential.id, 'Credential'))}</strong><p>${escapeHtml(stringValue(credential.header, 'Header'))} · ${escapeHtml(stringList(credential.methods).join(', '))}</p><small>${escapeHtml(stringValue(credential.baseUrl))}${escapeHtml(stringValue(credential.pathPrefix, '/'))}</small></div>${actionButton('credential.remove', computer.id, 'Review removal', 'text-button', { id: stringValue(credential.id) })}</article>`).join('')}</div>` : '<p class="muted">No scoped credentials are configured.</p>'}
-    <section class="panel"><div class="section-heading"><div><h3>Add or replace scoped credential</h3><p>Scope every header to an HTTPS origin, path, and explicit methods.</p></div></div><form data-plan="credential.add" data-target="${escapeAttr(computer.id)}" data-sensitive="value"><label>Action <select name="_operation"><option value="credential.add">Add a new credential</option><option value="credential.replace">Replace an existing credential</option></select></label><div class="field-row"><label>Credential ID <input name="id" required autocomplete="off"></label><label>Header <input name="header" value="Authorization" required autocomplete="off"></label></div><label>HTTPS base URL <input type="url" name="baseUrl" required pattern="https://.*" placeholder="https://api.example.com"></label><div class="field-row"><label>Path prefix <input name="pathPrefix" value="/" required></label><label>Methods <select name="methods" multiple size="5"><option selected>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select></label></div><label>Secret value <input type="password" name="value" required autocomplete="new-password" spellcheck="false"></label><button class="primary-button" type="submit">Review credential</button></form></section>
+    <div class="subsection"><div class="section-heading"><div><h3>Add or replace scoped credential</h3><p>Scope every header to an HTTPS origin, path, and explicit methods.</p></div></div><form data-plan="credential.add" data-target="${escapeAttr(computer.id)}" data-sensitive="value"><label>Action <select name="_operation"><option value="credential.add">Add a new credential</option><option value="credential.replace">Replace an existing credential</option></select></label><div class="field-row"><label>Credential ID <input name="id" required autocomplete="off"></label><label>Header <input name="header" value="Authorization" required autocomplete="off"></label></div><label>HTTPS base URL <input type="url" name="baseUrl" required pattern="https://.*" placeholder="https://api.example.com"></label><div class="field-row"><label>Path prefix <input name="pathPrefix" value="/" required></label><label>Methods <select name="methods" multiple size="5"><option selected>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select></label></div><label>Secret value <input type="password" name="value" required autocomplete="new-password" spellcheck="false"></label><button class="primary-button" type="submit">Review credential</button></form></div>
     <section class="panel subsection"><div class="section-heading"><div><h3>Remove credential</h3><p>Enter the exact credential ID. The stored value stays hidden.</p></div></div><form data-plan="credential.remove" data-target="${escapeAttr(computer.id)}" class="inline-form"><label><span class="sr-only">Credential ID</span><input name="id" required placeholder="credential-id" autocomplete="off"></label><button class="secondary-button" type="submit">Review removal</button></form></section>
-    <section class="panel subsection split-panel"><div><h3>Rotate computer token</h3><p>Existing clients disconnect. Retrieve the new token separately through the local CLI.</p></div>${actionButton('token.rotate', computer.id, 'Review rotation', 'danger-button')}</section>`;
+    </section>`;
 }
 
 async function renderBackups(outlet: HTMLElement): Promise<void> {
   const { items } = await api.backups();
   const computers = state.snapshot?.computers ?? [];
   outlet.innerHTML = `<header class="page-header"><p class="eyebrow">Durable homes</p><h1>Backups</h1><p class="lede">Manual, checksummed copies of computer homes. Complete disaster recovery also requires a private copy of Qubicl's state root.</p></header>
-    <section class="panel"><div class="section-heading"><div><h2>Create home backup</h2><p>Quiesced pauses a running computer briefly. Stopped requires it to already be stopped.</p></div></div><form data-plan="backup.create"><div class="field-row"><label>Computer <select name="_target" required>${computerOptions(computers)}</select></label><label>Consistency <select name="consistency"><option value="quiesced">Quiesced</option><option value="stopped">Already stopped</option></select></label></div><button class="primary-button" type="submit">Review backup</button></form></section>
+    <section class="panel"><div class="section-heading"><div><h2>Create home backup</h2><p>Quiesced pauses a running computer briefly. Stopped requires it to already be stopped.</p></div></div><form data-plan="backup.create" data-sensitive="passphrase"><div class="field-row"><label>Computer <select name="_target" required>${computerOptions(computers)}</select></label><label>Consistency <select name="consistency"><option value="quiesced">Quiesced</option><option value="stopped">Already stopped</option></select></label></div><label class="confirmation"><input type="checkbox" name="encrypted" value="true"> <span>Encrypt this backup with a passphrase</span></label><label>Backup passphrase <input type="password" name="passphrase" minlength="12" maxlength="16384" autocomplete="new-password" spellcheck="false"><small>Required when encryption is selected. It is kept only in memory for this operation; losing it makes the backup unrecoverable.</small></label><button class="primary-button" type="submit">Review backup</button></form></section>
     <section class="panel subsection"><div class="section-heading"><div><h2>Create restore checkpoint</h2><p>Capture a verified home checkpoint for recovery work without creating an encrypted export.</p></div></div><form data-plan="checkpoint.create"><div class="field-row"><label>Computer <select name="_target" required>${computerOptions(computers)}</select></label><label>Consistency <select name="consistency"><option value="quiesced">Quiesced</option><option value="stopped">Already stopped</option></select></label></div><button class="secondary-button" type="submit">Review checkpoint</button></form></section>
     <div class="section-heading subsection"><div><h2>Available backups</h2><p>Restore always creates a new computer name.</p></div><span class="count-badge">${items.length}</span></div>
     ${items.length ? `<div class="card-list">${items.map(backupCard).join('')}</div>` : emptyState('No backups yet', 'Create a manual home backup before a risky workload change.')}
@@ -374,10 +432,11 @@ async function renderBackups(outlet: HTMLElement): Promise<void> {
 }
 
 function backupCard(backup: BackupItem): string {
+  if (backup.status === 'quarantined') return `<article class="row-card"><div><strong>${escapeHtml(backup.name)}</strong><p>Needs local review</p><small>${escapeHtml(backup.diagnostic ?? 'The metadata is not safe to use.')}</small><small class="mono">${escapeHtml(shortId(backup.id))}</small></div></article>`;
   const actions = backup.encrypted
-    ? '<span class="fine-print">Verify and restore with the local CLI</span>'
+    ? `<button class="text-button" type="button" data-action="verify-encrypted-backup" data-target="${escapeAttr(backup.id)}">Verify</button><button class="secondary-button" type="button" data-action="restore-encrypted-backup" data-target="${escapeAttr(backup.id)}" data-name="${escapeAttr(backup.name)}">Restore</button>`
     : `${actionButton('backup.verify', backup.id, 'Verify', 'text-button')}<button class="secondary-button" type="button" data-action="restore-backup" data-target="${escapeAttr(backup.id)}" data-name="${escapeAttr(backup.name)}">Restore</button>`;
-  return `<article class="row-card"><div><strong>${escapeHtml(backup.name)}</strong><p>${formatTime(backup.createdAt)} · ${escapeHtml(backup.consistency)}${backup.encrypted ? ' · encrypted' : ''}</p><small class="mono">${shortId(backup.id)}</small></div><div class="row-actions">${actions}</div></article>`;
+  return `<article class="row-card"><div><strong>${escapeHtml(backup.name)}</strong><p>${formatTime(backup.createdAt!)} · ${escapeHtml(backup.consistency!)}${backup.encrypted ? ' · encrypted' : ''}</p><small class="mono">${shortId(backup.id)}</small></div><div class="row-actions">${actions}</div></article>`;
 }
 
 async function renderUpdates(outlet: HTMLElement): Promise<void> {
@@ -438,6 +497,7 @@ async function renderSettings(outlet: HTMLElement): Promise<void> {
 
 function renderPlanDialog(plan: ManagementPlan): void {
   state.plan = plan;
+  if (state.execution?.planId !== plan.id) state.execution = { planId: plan.id, idempotencyKey: crypto.randomUUID(), uncertain: false };
   const dialog = document.querySelector<HTMLDialogElement>('#plan-dialog');
   if (!dialog) return;
   dialog.setAttribute('aria-labelledby', 'plan-dialog-title');
@@ -447,7 +507,13 @@ function renderPlanDialog(plan: ManagementPlan): void {
     ${plan.requiresInterruption ? `<label class="confirmation"><input type="checkbox" id="confirm-interruption"> <span>I understand this interrupts the running computer or service.</span></label>` : ''}
     ${plan.requiresReauthentication ? `<label>Admin password <input id="reauth-password" type="password" required autocomplete="current-password" spellcheck="false"><small>Required again for this sensitive action. It is not stored.</small></label>` : ''}
     <div class="dialog-actions"><button class="quiet-button" type="button" data-action="dismiss-dialog">Cancel</button><button class="primary-button" type="button" data-action="execute-plan">Execute plan</button></div></form>`;
-  dialog.addEventListener('close', () => { state.plan = undefined; dialog.innerHTML = ''; }, { once: true });
+  dialog.addEventListener('close', () => {
+    if (state.plan?.id === plan.id && !state.activeJob) void api.cancelPlan(plan.id).catch(() => undefined);
+    state.plan = undefined;
+    if (state.execution?.planId === plan.id) state.execution = undefined;
+    if (state.pendingClientSecret?.planId === plan.id && !state.activeJob) state.pendingClientSecret = undefined;
+    dialog.innerHTML = '';
+  }, { once: true });
   if (!dialog.open) dialog.showModal();
 }
 
@@ -458,7 +524,13 @@ function renderJobDialog(job: ManagementJob): void {
   if (!dialog) return;
   const finished = job.status !== 'running';
   dialog.setAttribute('aria-labelledby', 'plan-dialog-title');
-  dialog.innerHTML = `<div class="dialog-card job-dialog"><div class="job-orbit ${finished ? job.status : ''}" aria-hidden="true"></div><p class="eyebrow">${finished ? 'Operation complete' : 'Working'}</p><h2 id="plan-dialog-title">${escapeHtml(operationTitle(job.operation))}</h2><p role="status" aria-live="polite">${escapeHtml(job.message)}</p><div class="job-status">${statusPill(job.status)}<span>Updated ${formatTime(job.updatedAt)}</span></div>${finished ? '<button class="primary-button" type="button" data-action="close-job">Done</button>' : '<p class="fine-print">You can close this page. Accepted work continues on the host.</p>'}</div>`;
+  const outcomeLabel = job.status === 'succeeded' ? 'Succeeded' : job.status === 'failed' ? 'Failed' : job.status === 'recovery-required' ? 'Recovery required' : job.status === 'outcome-unknown' ? 'Outcome unknown' : 'Working';
+  const pendingClientSecret = state.pendingClientSecret;
+  let clientSecret = '';
+  if (job.status === 'succeeded' && pendingClientSecret && pendingClientSecret.planId === state.execution?.planId) {
+    clientSecret = `<section class="one-time-secret"><h3>Client token for ${escapeHtml(pendingClientSecret.clientId)}</h3><p>Copy it now. Qubicl keeps it in the protected host state, but this dashboard will clear its copy when you close the result.</p><code id="client-token-value">${escapeHtml(pendingClientSecret.token)}</code><button class="secondary-button" type="button" data-action="copy-client-token">Copy token</button></section>`;
+  }
+  dialog.innerHTML = `<div class="dialog-card job-dialog"><div class="job-orbit ${finished ? job.status : ''}" aria-hidden="true"></div><p class="eyebrow">${outcomeLabel}</p><h2 id="plan-dialog-title">${escapeHtml(operationTitle(job.operation))}</h2><p role="status" aria-live="polite">${escapeHtml(job.message)}</p><div class="job-status">${statusPill(job.status)}<span>Updated ${formatTime(job.updatedAt)}</span></div>${clientSecret}${finished ? '<button class="primary-button" type="button" data-action="close-job">Done</button>' : '<p class="fine-print">You can close this page. Accepted work continues on the host.</p>'}</div>`;
   if (!dialog.open) dialog.showModal();
   if (job.status === 'running') {
     if (!alreadyWatching) watchJob(job.id);
@@ -477,13 +549,20 @@ async function handleSubmit(event: SubmitEvent): Promise<void> {
   const operation = (typeof selectedOperation === 'string' && selectedOperation ? selectedOperation : form.dataset.plan) as ManagementOperation | undefined;
   if (!operation) return;
   const sensitiveValues = sensitiveFieldValues(form);
+  let generatedClient: { clientId: string; token: string } | undefined;
   setBusy(form, true);
   try {
     const { target, input } = formInput(form);
+    generatedClient = operation === 'client.create'
+      ? { clientId: String(input.id), token: generateClientToken() }
+      : undefined;
+    if (generatedClient) input.token = generatedClient.token;
     const plan = await requestPlan({ operation, ...(target ? { target } : {}), ...(Object.keys(input).length ? { input } : {}) });
+    state.pendingClientSecret = generatedClient ? { ...generatedClient, planId: plan.id } : undefined;
     clearSensitiveFields(form);
     renderPlanDialog(plan);
   } catch (error) {
+    if (generatedClient) state.pendingClientSecret = undefined;
     clearSensitiveFields(form);
     showToast(redactValues(errorMessage(error), sensitiveValues), 'error');
   } finally {
@@ -508,7 +587,10 @@ async function handleClick(event: MouseEvent): Promise<void> {
   else if (action === 'viewer') await openViewer(target.dataset.target ?? '');
   else if (action === 'preview-open') await openPreview(target.dataset.computer ?? '', target.dataset.target ?? '');
   else if (action === 'session-revoke') await revokeSession(target.dataset.target ?? '');
+  else if (action === 'copy-client-token') await copyClientToken();
   else if (action === 'restore-backup') renderRestorePrompt(target.dataset.target ?? '', target.dataset.name ?? 'backup');
+  else if (action === 'verify-encrypted-backup') renderEncryptedBackupPrompt('backup.verify', target.dataset.target ?? '', '');
+  else if (action === 'restore-encrypted-backup') renderEncryptedBackupPrompt('backup.restore', target.dataset.target ?? '', target.dataset.name ?? 'backup');
   else if (action === 'update-skill') renderSkillUpdatePrompt(target.dataset.target ?? '', target.dataset.skill ?? '', target.dataset.name ?? 'skill');
   else if (action === 'dismiss-dialog') target.closest<HTMLDialogElement>('dialog')?.close();
 }
@@ -521,11 +603,20 @@ async function prepareButtonPlan(button: HTMLElement): Promise<void> {
   if (button.dataset.input) {
     try { input = JSON.parse(button.dataset.input) as Record<string, unknown>; } catch { return showToast('This action has invalid input.', 'error'); }
   }
+  const generatedClient = operation === 'client.rotate' && typeof input?.id === 'string'
+    ? { clientId: input.id, token: generateClientToken() }
+    : undefined;
+  if (generatedClient) input = { ...input, token: generatedClient.token };
   state.busy = true;
   button.setAttribute('aria-busy', 'true');
   try {
-    renderPlanDialog(await requestPlan({ operation, ...(target ? { target } : {}), ...(input ? { input } : {}) }));
-  } catch (error) { showToast(errorMessage(error), 'error'); }
+    const plan = await requestPlan({ operation, ...(target ? { target } : {}), ...(input ? { input } : {}) });
+    state.pendingClientSecret = generatedClient ? { ...generatedClient, planId: plan.id } : undefined;
+    renderPlanDialog(plan);
+  } catch (error) {
+    if (generatedClient) state.pendingClientSecret = undefined;
+    showToast(errorMessage(error), 'error');
+  }
   finally { state.busy = false; button.removeAttribute('aria-busy'); }
 }
 
@@ -547,15 +638,21 @@ async function executePlan(): Promise<void> {
   try {
     if (plan.requiresReauthentication) await api.reauthenticate(password);
     if (reauth) reauth.value = '';
+    const execution = state.execution?.planId === plan.id ? state.execution : { planId: plan.id, idempotencyKey: crypto.randomUUID(), uncertain: false };
+    state.execution = execution;
     const { operationId } = await api.execute(plan.id, {
-      idempotencyKey: crypto.randomUUID(),
+      idempotencyKey: execution.idempotencyKey,
       ...(plan.requiresInterruption ? { confirmInterruption: true } : {}),
     });
+    execution.uncertain = false;
     const job = await api.operation(operationId);
     renderJobDialog(job);
   } catch (error) {
     if (reauth) reauth.value = '';
-    showToast(redactValues(errorMessage(error), password ? [password] : []), 'error');
+    const uncertain = !(error instanceof ApiError) || error.status >= 500;
+    if (state.execution?.planId === plan.id) state.execution.uncertain = uncertain;
+    const message = uncertain ? `Acceptance could not be confirmed. Retry this plan to check the same operation receipt. ${errorMessage(error)}` : errorMessage(error);
+    showToast(redactValues(message, password ? [password] : []), 'error');
   } finally { state.busy = false; }
 }
 
@@ -591,6 +688,8 @@ function closeJob(): void {
   eventStream = undefined;
   state.activeJob = undefined;
   state.plan = undefined;
+  state.execution = undefined;
+  state.pendingClientSecret = undefined;
   const dialog = document.querySelector<HTMLDialogElement>('#plan-dialog');
   dialog?.close();
   void refreshSnapshot(true);
@@ -641,6 +740,15 @@ function renderRestorePrompt(backupId: string, backupName: string): void {
   dialog.showModal();
 }
 
+function renderEncryptedBackupPrompt(operation: 'backup.verify' | 'backup.restore', backupId: string, backupName: string): void {
+  const dialog = document.querySelector<HTMLDialogElement>('#plan-dialog');
+  if (!dialog) return;
+  const restoring = operation === 'backup.restore';
+  dialog.setAttribute('aria-labelledby', 'plan-dialog-title');
+  dialog.innerHTML = `<form class="dialog-card" data-plan="${operation}" data-target="${escapeAttr(backupId)}" data-sensitive="passphrase"><div class="dialog-top"><div><p class="eyebrow">${restoring ? 'Restore encrypted backup' : 'Verify encrypted backup'}</p><h2 id="plan-dialog-title">${escapeHtml(backupName || shortId(backupId))}</h2></div><button class="icon-button" type="button" data-action="dismiss-dialog" aria-label="Close">${icon('close')}</button></div><p>The passphrase is held only in memory for this operation and is cleared when the dialog closes.</p>${restoring ? '<label>New computer name <input name="name" required autocomplete="off"></label>' : ''}<label>Backup passphrase <input type="password" name="passphrase" required minlength="12" maxlength="16384" autocomplete="current-password" spellcheck="false"></label><div class="dialog-actions"><button class="quiet-button" type="button" data-action="dismiss-dialog">Cancel</button><button class="primary-button" type="submit">Review ${restoring ? 'restore' : 'verification'} plan</button></div></form>`;
+  dialog.showModal();
+}
+
 function renderSkillUpdatePrompt(computerId: string, skillId: string, skillName: string): void {
   const dialog = document.querySelector<HTMLDialogElement>('#plan-dialog');
   if (!dialog) return;
@@ -656,7 +764,7 @@ async function logout(): Promise<void> {
 
 function renderLogin(message?: string): void {
   stopTimers();
-  const localSessionNote = location.protocol === 'http:' ? ' This local sign-in stays only in this tab, so reloading requires another sign-in.' : '';
+  const localSessionNote = location.protocol === 'http:' ? ' This local sign-in stays in this tab across refreshes and clears when the tab closes.' : '';
   root.innerHTML = `<main class="login-page"><section class="login-card"><a class="login-brand" href="https://qubicl.org" aria-label="Qubicl.org"><img src="/assets/qubicl-mark.svg" width="64" height="64" alt=""><span>Qubicl</span></a><div><p class="eyebrow">Owner console</p><h1>Welcome back</h1><p>Manage the computers on this host.</p></div>${message ? `<div class="notice warning">${escapeHtml(message)}</div>` : ''}<form id="login-form"><label>Admin password <input type="password" name="password" required autofocus autocomplete="current-password" spellcheck="false"></label><button class="primary-button wide" type="submit">Sign in</button></form><p class="fine-print">Your password stays on this host and is never written to browser storage.${localSessionNote}</p></section><aside class="login-art" aria-hidden="true"><div class="orbit one"></div><div class="orbit two"></div><p>Local computers.<br>Clear control.</p></aside></main>`;
   const form = document.querySelector<HTMLFormElement>('#login-form');
   form?.addEventListener('submit', (event) => void login(event));
@@ -668,6 +776,8 @@ function endSession(message?: string): void {
   state.snapshot = undefined;
   state.plan = undefined;
   state.activeJob = undefined;
+  state.execution = undefined;
+  state.pendingClientSecret = undefined;
   renderLogin(message);
 }
 
@@ -720,11 +830,12 @@ function formInput(form: HTMLFormElement): { target?: string; input: Record<stri
     input[form.dataset.collection] = data.getAll(form.dataset.collection).map(String);
     return { ...(explicitTarget ? { target: explicitTarget } : {}), input };
   }
-  const multi = new Set(['methods']);
+  const multi = new Set(['methods', 'scopes']);
   for (const [name, raw] of data) {
     if (name.startsWith('_') || raw instanceof File) continue;
-    const value = raw.trim();
-    if (!value) continue;
+    const preserveExact = name === 'value' || name === 'token' || name === 'passphrase';
+    const value = preserveExact ? raw : raw.trim();
+    if (!value && !preserveExact) continue;
     if (multi.has(name)) {
       input[name] = data.getAll(name).map(String);
       continue;
@@ -796,6 +907,10 @@ function stringValue(value: unknown, fallback = ''): string { return typeof valu
 function stringList(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []; }
 function record(value: unknown): Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function formatTime(value: unknown): string { if (typeof value !== 'string') return 'Unknown time'; const date = new Date(value); return Number.isNaN(date.valueOf()) ? value : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date); }
+function relativeTime(value: number): string {
+  const seconds = Math.max(0, Math.round((Date.now() - value) / 1000));
+  return seconds < 5 ? 'just now' : `${seconds}s ago`;
+}
 function safeUrl(value: unknown): string { if (typeof value !== 'string') return ''; try { const url = new URL(value, location.origin); return ['http:', 'https:'].includes(url.protocol) ? url.href : ''; } catch { return ''; } }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : 'The request could not be completed.'; }
 function redactValues(message: string, values: string[]): string { return values.filter((value) => value.length > 0).reduce((result, value) => result.replaceAll(value, '[redacted]'), message); }
@@ -817,6 +932,32 @@ function showToast(message: string, kind: 'info' | 'error' = 'info'): void {
   toast.textContent = message;
   region.append(toast);
   window.setTimeout(() => toast.remove(), 6000);
+}
+
+function generateClientToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `qubicl_${btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '')}`;
+}
+
+async function copyClientToken(): Promise<void> {
+  const token = state.pendingClientSecret?.token;
+  if (!token) return showToast('The one-time token is no longer available.', 'error');
+  try {
+    await navigator.clipboard.writeText(token);
+    showToast('Client token copied.');
+  } catch {
+    const value = document.querySelector<HTMLElement>('#client-token-value');
+    if (value) {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(value);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    }
+    showToast('Select and copy the highlighted token.', 'error');
+  }
 }
 
 function cycleTheme(): void {

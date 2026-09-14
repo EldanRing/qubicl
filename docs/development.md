@@ -13,13 +13,32 @@ npm run build:types
 node --test dist-tests/unit/contracts.test.js
 ```
 
-The repository pins npm 10.9.3 through `packageManager`/`devEngines`. `.nvmrc` pins normal Node development; release validation separately covers minimum Node 22 and Node 24 targets.
+The repository currently enforces npm 10.9.3 through `engines` and
+`devEngines`; `packageManager` records the same pin. `.nvmrc` selects the normal
+development Node version within the declared supported range. Release
+validation separately covers minimum Node 22 and Node 24 targets. A wider
+development npm range requires a manifest change and compatibility evidence;
+there is no documented bypass for the current pin.
 
 Use `npm run build` when bundled artifacts are needed. `npm run test:unit` runs all unit tests after type compilation. These commands are alternatives selected for the changed surface, not prerequisites to repeat before `npm run check`.
 
-`npm run check` performs strict TypeScript, Oxlint, unit/integration tests with coverage floors, and a high-severity npm audit. `npm run performance -- --no-build` reuses the existing bundle and records no build timing; use it only after verifying the bundle matches the source under measurement. The default `npm run performance` includes build timing and checks package/CLI/all-six-image size budgets; add `-- --runtime` for one controlled four-preset startup/workload/60-second-idle run.
+`npm run check` performs strict TypeScript, Oxlint, unit/integration tests with
+coverage floors, executable documentation/release-impact contract checks, and a
+high-severity npm audit. `npm run performance -- --no-build` reuses the existing
+bundle and records no build timing; use it only after verifying the bundle
+matches the source under measurement. The default `npm run performance`
+includes build timing and checks package/CLI/all-six-image size budgets; add
+`-- --runtime` for one controlled four-preset startup/workload/60-second-idle
+run.
 
-Run `npm run tokens:audit` to print exact compact tool-definition bytes for every preset and static profile. The command fails if the lease-transparent full `workstation` catalog reaches the 26,000-byte regression ceiling, including skills and native web research. Set `QUBICL_TOKEN_METRICS=1` on a control service or stdio bridge to log size-only per-tool result/catalog events to stderr without logging tool arguments or result content.
+Run `npm run tokens:audit` to print exact compact tool-definition bytes for
+every preset and static profile. The command fails if the lease-transparent full
+`workstation` catalog reaches the reviewed 38,000-byte 0.6 regression ceiling,
+including retained tasks, terminals, skills, and native web research. It also
+prints the smaller static profile sizes so clients can select a focused catalog.
+Set `QUBICL_TOKEN_METRICS=1` on a control service or stdio bridge to log
+size-only per-tool result/catalog events to stderr without logging tool
+arguments or result content.
 
 The pinned Python closure for the local web service is in `images/computer/web-requirements.txt`, including Trafilatura and the readability-lxml fallback. The smaller permissive browser PDF/OCR closure is in `images/computer/browser-skills-requirements.txt`; the fuller permissive document closure shared by `computer` and `workstation` is independently locked in `images/computer/skills-requirements.txt`. License summaries and retained dependency license texts ship with the relevant image. AGPL/commercial-only PyMuPDF packages are intentionally excluded. OCI SBOM and vulnerability gates inspect these installed packages, including the web extractor closure.
 
@@ -45,6 +64,38 @@ DOCX/PPTX fixtures, checks PDF text and page counts, and removes its files.
 The ordinary Office unit tests cover failures, limits, cancellation, and cleanup
 without requiring LibreOffice.
 
+## Choose checks for the change
+
+These are starting points, not a requirement to run every row. Report exact
+commands and outcomes, including skipped browser/hardware cases. Run a broader
+gate when shared behavior, dependencies, or unresolved failures justify it.
+
+| Changed surface | Focused verification | When to broaden |
+| --- | --- | --- |
+| Documentation only | `git diff --check`, inspect local links and anchors, compare claims and examples with the relevant source | Executable examples or package contents changed; no image rebuild for prose alone |
+| Dashboard frontend | Type compilation, lint for touched source, relevant dashboard tests, browser inspection of the affected flow | Helper/API contract, auth, responsive input, or accessibility behavior changed; qualify affected physical platforms for release |
+| Core schema or tool contract | Type compilation and contract, policy, migration, or adapter tests using that schema | A shared contract affects several transports, state readers, or runtime images |
+| Control, browser, gateway | Relevant unit/integration tests; real-browser regression when browser behavior changes | End-to-end ownership, credentials, egress, or socket lifetime crosses service/container boundaries |
+| Host CLI or lifecycle | Relevant CLI, state, and transaction tests | Mounts, Compose, image acquisition, recovery, or persistent data require isolated Docker acceptance |
+| Image packages or startup | Build/inspect affected runtime inputs and exercise the affected preset | Shared layers, manifests, catalogs, or release coupling invalidate additional artifacts |
+| Release tooling | Relevant manifest, signature, acceptance, and publisher tests | A candidate or publication policy changes; complete the enforced release gates before publication |
+| Platform-specific behavior | Tests for the changed host path and real acceptance on affected hardware | Service installation, Docker/WSL restart, networking, or mobile input cannot be established by mocks |
+
+After `npm run build:types`, run selected compiled files with
+`node --test dist-tests/unit/NAME.test.js` or the corresponding integration
+path. For touched-source lint, use `npx --no-install oxlint --deny-warnings PATH`.
+Reuse compilation and successful results while their source, dependencies,
+artifacts, environment, and relevant external evidence remain applicable.
+Recompile after changing a test or its source; do not test stale `dist` output.
+
+`npm run check` remains the full source gate. Full suites, Docker acceptance,
+all-image builds/scans, and candidate construction are distinct operations;
+do not run them merely to validate a documentation edit. Maintainers also follow
+their local approval and resource policy. For 0.6 and later, generate and verify
+the exact [release-impact document](decisions/0002-v0.6-capabilities-and-constraints.md)
+before candidate work. It selects required evidence, while the current publisher
+still requires a complete signed candidate.
+
 ## Image and setup acceptance
 
 Build all local development targets once:
@@ -53,7 +104,15 @@ Build all local development targets once:
 npm run images:build
 ```
 
-Use this full image build for acceptance that needs all presets. Focused source or documentation changes do not automatically require rebuilding every image. The command rebuilds the gateway, isolated dashboard, and all four preset images from the current checkout, then validates the dashboard asset contract and each preset's exact capability contract. If setup reports that a local `:dev` manifest digest does not match the catalog, rerun `npm run images:build` from the repository root before retrying setup.
+Use this full image build for initial source setup or acceptance that needs all
+presets. It rebuilds the gateway, isolated dashboard, and all four preset images,
+then validates the asset/capability contracts. The current `image build-system`
+CLI does not expose a per-preset switch. A source change alone does not require
+running it: first identify which bundle, image, or catalog changed. If setup
+actually reports a stale local `:dev` manifest/catalog identity, this full build
+is the supported refresh command. Do not bypass a contract mismatch or use it
+as a recovery command for a published image. Documentation-only verification
+requires no runtime refresh.
 
 The artifact harness covers state v1/v2 migration and recovery, sole `setup` onboarding, no-start/no-empty-gateway behavior, all four capability/startup profiles, custom derivation from every baseline, offline behavior, secret-free output, MCP/OpenAPI parity, viewer takeover, lifecycle continuity, persistence, and isolation:
 
@@ -98,8 +157,8 @@ are sufficient and avoid publishing local network topology.
 ## Secret and dependency review
 
 Release checks require a locally installed, checksum-verified Gitleaks 8.30.1,
-or a separately reviewed compatible build. The v0.5 candidate tooling also
-requires Trivy 0.74.0 and rejects a different scanner version. Confirm both
+or a separately reviewed compatible build. Candidate tooling requires Trivy
+0.74.0 and rejects a different scanner version. Confirm both
 executables before starting candidate work:
 
 ```sh
@@ -132,10 +191,19 @@ The isolated harness verifies running/stopped policy, stale lease rejection, pro
 
 ## Local candidate assembly
 
-From a clean reviewed Linux x64 checkout:
+From a clean reviewed checkout, generate the 0.6 impact document against the
+exact prior release commit:
 
 ```sh
-npm run candidate:preview
+npm run release:impact -- --base v0.5.1 --output /secure/release-impact-v0.6.0.json
+```
+
+The command fails on an unknown path by selecting `full`, refuses to overwrite
+its output, and records exact base and candidate commits. A preview prerelease
+then uses that document:
+
+```sh
+npm run candidate:preview -- --impact /secure/release-impact-v0.6.0.json
 ```
 
 This assembles an unsupported prerelease candidate. It rejects secrets and
@@ -147,19 +215,17 @@ For a stable pre-1.0 candidate using the focused signed `initial` acceptance
 profile:
 
 ```sh
-npm run candidate:release
+npm run candidate:release -- --impact /secure/release-impact-v0.6.0.json
 ```
 
 Its schema-2 release set contains the complete Linux x64 candidate. Publication
-still requires signed schema-4 Linux lifecycle and native-Linux remote-access
-evidence from the frozen bytes. Beginning with v0.5, it also requires all nine
-clients, all four protocols, and the complete Linux/macOS/iPhone dashboard
-matrix described below.
+still requires signed schema-4 lifecycle, client, remote-access, and dashboard
+evidence selected by the embedded impact document from the frozen bytes.
 
 For the strict full-matrix supported-release policy:
 
 ```sh
-npm run candidate:local
+npm run candidate:local -- --impact /secure/release-impact-v0.6.0.json
 ```
 
 The builder creates six multi-architecture OCI archives (gateway, dashboard, and four
@@ -202,7 +268,9 @@ diagnostic-only.
 Additional native hosts must use the exact generated catalog:
 
 ```sh
-node scripts/build-local-candidates.mjs --binary-only --catalog /path/to/image-catalog.json
+node scripts/build-local-candidates.mjs --binary-only \
+  --catalog /path/to/image-catalog.json \
+  --impact /secure/release-impact-v0.6.0.json
 ```
 
 Hardware not locally validated remains a supported-1.0 blocker. An initial or preview
@@ -239,7 +307,7 @@ The command refuses paths outside its candidate/package/SBOM/native allowlist, t
 - Do not add hosted workflows or register a development machine as a runner.
 
 
-## Dashboard development and v0.5 acceptance
+## Dashboard development and acceptance
 
 `npm run build` typechecks and bundles the static dashboard, asset server, and
 host helper. `node scripts/build-dashboard.mjs` builds only the static package;
@@ -248,11 +316,11 @@ image context, notices and dependency evidence in npm/native artifacts. Image
 catalog schema 2 binds the sixth image to its exact asset-manifest digest.
 
 Focused dashboard tests use disposable files and loopback/mock servers. They do
-not install services or mutate managed Docker state. A complete candidate now
-requires twelve architecture-specific image scan reports. For v0.5, even the
-initial release tier requires all nine client profiles, four protocol profiles,
-and retained Linux, macOS and real iPhone dashboard evidence with OS/browser
-versions. Source browser mocks do not satisfy these physical acceptance rows.
+not install services or mutate managed Docker state. A complete candidate
+requires twelve architecture-specific image scan reports. For v0.6 and later,
+the exact release-impact document selects affected client, protocol, platform,
+and mobile rows. Source browser mocks do not satisfy selected physical
+acceptance rows.
 
 Each dashboard row records `qubiclVersion` matching the release set, exact
 `osVersion` and `browserVersion`, and the normal `passed`, `testedBy`, `testedAt`

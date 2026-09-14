@@ -1,9 +1,10 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { NetworkPolicySchema } from './config.js';
+import { RuntimeClientCredentialSchema } from './client-credentials.js';
 import { CapabilityListSchema, ConfigPresetSchema, PresetSchema, ViewerAuthenticationSchema } from './presets.js';
 
-export const GATEWAY_PROTOCOL_VERSION = 2;
+export const GATEWAY_PROTOCOL_VERSION = 3;
 
 export const RuntimeRouteSchema = z.object({
   id: z.uuid(),
@@ -19,6 +20,7 @@ export const RuntimeRouteSchema = z.object({
   capabilities: CapabilityListSchema,
   manifestSha256: z.string().regex(/^[a-f0-9]{64}$/),
   tokenHash: z.string().regex(/^[a-f0-9]{64}$/),
+  clientCredentials: z.array(RuntimeClientCredentialSchema).max(65).default([]),
   internalKey: z.string().min(32),
   networkPolicy: NetworkPolicySchema.optional(),
 }).superRefine((route, context) => {
@@ -29,7 +31,7 @@ export const RuntimeRouteSchema = z.object({
 });
 
 export const RuntimeRoutesSchema = z.object({
-  version: z.literal(2),
+  version: z.literal(3),
   generatedAt: z.iso.datetime(),
   routes: z.array(RuntimeRouteSchema),
 });
@@ -49,6 +51,10 @@ export function tokenMatches(token: string, expectedHex: string): boolean {
   const actual = Buffer.from(hashToken(token), 'hex');
   const expected = Buffer.from(expectedHex, 'hex');
   return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+export function routeAcceptsTokenHash(route: RuntimeRoute, tokenHash: string): boolean {
+  return route.tokenHash === tokenHash || route.clientCredentials.some((credential) => credential.tokenHash === tokenHash);
 }
 
 /** Host-only preview origin. `*.localhost` is loopback but is not the viewer origin. */

@@ -5,7 +5,7 @@ import YAML from 'yaml';
 import { IMAGE_CATALOG, ImageIdentitySchema, catalogPlatformForHost, type ImageIdentity } from '@qubicl/core';
 import { packagedAssetsPath } from '../assets.js';
 import { docker, validateDocker } from '../docker.js';
-import { isPrimaryRuntimeRoot, projectName, runtimeNamespace } from '../runtime.js';
+import { projectName, runtimeNamespace } from '../runtime.js';
 import { atomicWrite, loadState, statePaths } from '../state.js';
 import { readProtectedJson, writeProtectedJson } from './storage.js';
 
@@ -35,7 +35,7 @@ export const DASHBOARD_SERVICE = 'qubicl.dashboard';
 export function dashboardConfigPath(root: string): string { return join(root, 'dashboard', 'config.json'); }
 export function dashboardComposePath(root: string): string { return join(root, 'dashboard', 'runtime', 'compose.yaml'); }
 export function dashboardContainerName(root: string, id: string): string {
-  return isPrimaryRuntimeRoot(root) ? DASHBOARD_SERVICE : `${runtimeNamespace(id, root)}.dashboard`;
+  return `${runtimeNamespace(id, root)}.dashboard`;
 }
 export function dashboardAssetNetworkName(root: string, id: string): string {
   return `${runtimeNamespace(id, root)}-dashboard-assets`;

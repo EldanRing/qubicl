@@ -14,15 +14,15 @@ test('release sets preserve v0.1 shape and enforce tier-specific native targets'
   const document = {
     schemaVersion: 1,
     createdAt: '2026-08-23T12:00:00.000Z',
-    version: '1.0.0',
+    version: '0.1.0',
     revision: 'a'.repeat(40),
     source: 'https://github.com/example/qubicl',
     imageCatalogSha256: 'b'.repeat(64),
     completeTarget: 'linux-x64',
     members: targets.map((target, index) => ({
       target, directory: target, candidateJsonSha256: 'c'.repeat(64), checksumsSha256: 'd'.repeat(64),
-      nativeArchive: { name: `qubicl-1.0.0-${target}.tar.gz`, bytes: 1, sha256: 'e'.repeat(64) },
-      nativeSbom: { name: `qubicl-1.0.0-${target}.spdx.json`, bytes: 1, sha256: 'f'.repeat(64) },
+      nativeArchive: { name: `qubicl-0.1.0-${target}.tar.gz`, bytes: 1, sha256: 'e'.repeat(64) },
+      nativeSbom: { name: `qubicl-0.1.0-${target}.spdx.json`, bytes: 1, sha256: 'f'.repeat(64) },
       complete: index === 0,
     })),
   };

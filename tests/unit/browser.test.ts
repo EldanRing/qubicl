@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { BrowserType, ElementHandle, Locator, Page } from 'playwright-core';
-import { BrowserManager, browserViewportToDisplayPoint } from '@qubicl/control/browser';
+import { BrowserManager, INTERACTIVE_BROWSER_IGNORED_DEFAULT_ARGS, browserViewportToDisplayPoint } from '@qubicl/control/browser';
 import type { ViewerPointerUpdate } from '@qubicl/control/viewer-actions';
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+X2NDWQAAAABJRU5ErkJggg==', 'base64');
@@ -22,6 +22,17 @@ test('browser manager provides the Terminal1 semantic, tab, and screenshot-groun
   assert.equal(manager.count(), 0);
   assert.deepEqual(await manager.navigate('https://example.test/start'), { url: 'https://example.test/start', title: 'Fake page' });
   assert.equal(manager.count(), 1);
+  assert.deepEqual(await manager.health(), {
+    state: 'attached',
+    sandbox: 'required',
+    profile: 'persistent',
+    extensions: 'enabled',
+    passwordStore: 'secret_service',
+    publicExtraction: 'isolated_context',
+    tabPolicy: { agentOpenLimit: 24, automaticEviction: false },
+    engineVersion: '140.0.0.0',
+    recentDiagnosticCount: 0,
+  });
 
   const snapshot = await manager.snapshot() as {
     snapshot: string;
@@ -49,7 +60,7 @@ test('browser manager provides the Terminal1 semantic, tab, and screenshot-groun
   await manager.history('forward');
   await manager.history('reload');
   await manager.wait(0);
-  assert.deepEqual(fake.locators[0]!.fills, ['', 'typed']);
+  assert.deepEqual(fake.locators[0]!.fills, ['typed']);
   assert.deepEqual(fake.locators[0]!.presses, ['Enter', 'Control+A']);
   assert.deepEqual(fake.locators[1]!.selections, [{ label: 'Selected' }]);
 
@@ -60,10 +71,14 @@ test('browser manager provides the Terminal1 semantic, tab, and screenshot-groun
 
   for (let index = 0; index < 6; index += 1) await manager.newTab(`https://example.test/${index}`);
   const tabs = await manager.tabs();
-  assert.equal(tabs.tabs.length, 5, 'old inactive tabs are discarded at the Terminal1 five-tab bound');
-  await manager.useTab(0);
+  assert.equal(tabs.tabs.length, 7, 'Qubicl does not silently discard inactive or human-created tabs');
+  assert.equal(new Set(tabs.tabs.map(({ tabId }) => tabId)).size, tabs.tabs.length);
+  const firstTabId = tabs.tabs[0]!.tabId;
+  await manager.useTab(firstTabId);
   await manager.closeTab(-1);
-  assert.equal((await manager.tabs()).tabs.length, 4);
+  const afterClose = await manager.tabs();
+  assert.equal(afterClose.tabs.length, 6);
+  assert.equal(afterClose.tabs.some(({ tabId }) => tabId === firstTabId), false);
   assert.equal((await manager.reset()).url, 'about:blank');
   assert.equal(fake.newPageExistingPageCounts.every((count) => count > 0), true);
 
@@ -122,9 +137,10 @@ test('snapshot refs retain node identity across insertion and reordering and rej
   fake.locators.reverse();
   await manager.type('g1e1', 'original only', false, false);
   await manager.press('Enter', 'g1e1');
-  assert.equal(original.clicks, 1);
-  assert.deepEqual(original.fills, ['original only']);
-  assert.deepEqual(original.presses, ['Enter']);
+  assert.equal(original.clicks, 2);
+  assert.deepEqual(original.fills, []);
+  assert.ok(fake.keyboardEvents.includes('type:original only'));
+  assert.deepEqual(original.presses, ['End', 'Enter']);
   assert.equal(inserted.clicks, 0);
   assert.deepEqual(inserted.fills, []);
 
@@ -225,7 +241,7 @@ test('browser manager launches Chromium with its Linux sandbox and dedicated sha
 
   await manager.navigate('https://example.test/sandboxed');
   assert.equal(fake.launchOptions?.chromiumSandbox, true);
-  assert.deepEqual(fake.launchOptions?.ignoreDefaultArgs, ['--disable-dev-shm-usage']);
+  assert.deepEqual(fake.launchOptions?.ignoreDefaultArgs, [...INTERACTIVE_BROWSER_IGNORED_DEFAULT_ARGS, '--disable-dev-shm-usage']);
   const args = fake.launchOptions?.args as string[];
   assert.equal(args.includes('--no-sandbox'), false);
   assert.equal(args.includes('--disable-dev-shm-usage'), false);
@@ -329,9 +345,9 @@ class FakePage {
   async bringToFront(): Promise<void> {}
   async waitForTimeout(): Promise<void> {}
   async screenshot(): Promise<Buffer> { return PNG; }
-  async goBack(): Promise<null> { this.urlValue = 'https://example.test/back'; return null; }
-  async goForward(): Promise<null> { this.urlValue = 'https://example.test/forward'; return null; }
-  async reload(): Promise<null> { return null; }
+  async goBack(): Promise<unknown> { this.urlValue = 'https://example.test/back'; return {}; }
+  async goForward(): Promise<unknown> { this.urlValue = 'https://example.test/forward'; return {}; }
+  async reload(): Promise<unknown> { return {}; }
   mainFrame(): object { return this; }
   on(event: string, listener: EventListener): void { this.listeners.set(event, [...this.listeners.get(event) ?? [], listener]); }
   once(event: string, listener: EventListener): void { this.on(event, listener); }
@@ -361,7 +377,7 @@ class FakePage {
       }) as Locator,
     } as unknown as Locator;
   }
-  async evaluate(_callback: unknown, argument?: { pointX?: number; pointY?: number; minimumMs?: number; maximumCharacters?: number; qubiclViewerMetrics?: boolean }): Promise<unknown> {
+  async evaluate(_callback: unknown, argument?: { pointX?: number; pointY?: number; minimumMs?: number; maximumCharacters?: number; qubiclViewerMetrics?: boolean; qubiclScreenshotDimensions?: boolean }): Promise<unknown> {
     if (argument && typeof argument.pointX === 'number') {
       return [{ tag: 'button', id: 'target', classes: ['primary'], role: 'button', name: 'Target', cursor: 'pointer', box: { x: 0, y: 0, width: 20, height: 20 } }];
     }
@@ -386,6 +402,7 @@ class FakePage {
         devicePixelRatio: 1,
       };
     }
+    if (argument?.qubiclScreenshotDimensions) return { width: 1_440, height: 900 };
     return { x: 4, y: 8 };
   }
 }
@@ -425,6 +442,7 @@ class FakeBrowserRuntime {
       return page as unknown as Page;
     },
     setDefaultTimeout: (): void => {},
+    browser: () => this.browser,
     on: (event: string, listener: EventListener): void => { this.contextListeners.set(event, [...this.contextListeners.get(event) ?? [], listener]); },
     close: async (): Promise<void> => {
       for (const page of [...this.pagesValue]) await page.close();
@@ -433,7 +451,23 @@ class FakeBrowserRuntime {
   };
 
   private readonly browser = {
+    version: () => '140.0.0.0',
     contexts: () => [this.context],
+    newContext: async () => {
+      let pages: FakePage[] = [];
+      const context = {
+        pages: (): Page[] => pages as unknown as Page[],
+        newPage: async (): Promise<Page> => {
+          const page = new FakePage(this, (closed) => { pages = pages.filter((candidate) => candidate !== closed); });
+          pages.push(page);
+          return page as unknown as Page;
+        },
+        close: async (): Promise<void> => {
+          for (const page of [...pages]) await page.close();
+        },
+      };
+      return context;
+    },
     on: (event: string, listener: EventListener): void => { this.browserListeners.set(event, [...this.browserListeners.get(event) ?? [], listener]); },
     close: async (): Promise<void> => {
       for (const listener of this.browserListeners.get('disconnected') ?? []) listener();

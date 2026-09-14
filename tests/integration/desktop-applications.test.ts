@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -23,6 +23,23 @@ test('allowlisted desktop-session applications survive takeover while generic co
   await writeFile(outsideDocument, 'outside');
   await writeFile(disallowedDocument, 'binary-shaped input');
   await symlink(outsideDocument, join(root, 'escaped.txt'));
+  await mkdir(join(root, '.local', 'bin'), { recursive: true });
+  await mkdir(join(root, '.local', 'share', 'applications'), { recursive: true });
+  const userGui = join(root, '.local', 'bin', 'user-gui');
+  await writeFile(userGui, '#!/bin/sh\nexit 0\n');
+  await chmod(userGui, 0o755);
+  await writeFile(join(root, '.local', 'share', 'applications', 'user-gui.desktop'), [
+    '[Desktop Entry]',
+    'Name=User GUI',
+    `Exec=${join(root, '.local', 'bin', 'user-gui')} %F`,
+    'Type=Application',
+  ].join('\n'));
+  await writeFile(join(root, '.local', 'share', 'applications', 'hidden.desktop'), [
+    '[Desktop Entry]',
+    'Name=Hidden GUI',
+    `Exec=${join(root, '.local', 'bin', 'user-gui')}`,
+    'NoDisplay=true',
+  ].join('\n'));
 
   const fakeApplication = [
     "const fs = require('node:fs');",
@@ -64,11 +81,17 @@ test('allowlisted desktop-session applications survive takeover while generic co
   await assert.rejects(desktopApplications.open('writer', [disallowedDocument]), /allowlisted/);
 
   const lease = await executor.call('acquire_lease', { durationSeconds: 60 }) as Lease;
-  const opened = await executor.call('open_desktop_application', {
+  const opening = executor.call('open_desktop_application', {
     lease,
     application: 'writer',
     paths: [document],
-  }) as OpenedApplication;
+  }) as Promise<OpenedApplication>;
+  await assert.rejects(executor.call('open_desktop_application', {
+    lease,
+    application: 'writer',
+    paths: [document],
+  }), /tracked applications/);
+  const opened = await opening;
   assert.equal(opened.application, 'writer');
   assert.equal(opened.lifecycle, 'desktop_session');
   assert.equal(opened.survivesHumanTakeover, true);
@@ -80,7 +103,7 @@ test('allowlisted desktop-session applications survive takeover while generic co
   };
   assert.equal(child.env.DISPLAY, ':9');
   assert.equal(child.env.HOME, root);
-  assert.equal(child.env.PATH, '/usr/local/bin:/usr/bin:/bin');
+  assert.equal(child.env.PATH, `${join(root, '.local/bin')}:/usr/local/bin:/usr/bin:/bin`);
   assert.equal(child.env.QUBICL_INTERNAL_KEY, undefined);
   assert.equal(child.env.QUBICL_GATEWAY_CREDENTIAL, undefined);
   assert.deepEqual(child.paths, [await realpath(document)]);
@@ -105,31 +128,54 @@ test('allowlisted desktop-session applications survive takeover while generic co
     lease,
     application: 'unknown',
     paths: [document],
-  }), /Invalid option/);
+  }), /not found|tracked applications/);
   await assert.rejects(desktopApplications.open('writer', [document]), /tracked applications/);
 
   const generic = await executor.call('exec_command', {
     lease,
     command: 'sleep 300',
+    label: 'retained build',
     cwd: root,
     yieldTimeMs: 25,
-  }) as { running: boolean };
+  }) as { processId: string; running: boolean; lifecycle: string; survivesHumanTakeover: boolean };
   assert.equal(generic.running, true);
+  assert.equal(generic.lifecycle, 'task');
+  assert.equal(generic.survivesHumanTakeover, true);
   const takeover = await executor.takeHumanControl() as {
     controller: string;
     terminatedManagedProcesses: number;
     preservedDesktopApplications: number;
   };
   assert.equal(takeover.controller, 'human');
-  assert.equal(takeover.terminatedManagedProcesses, 1);
+  assert.equal(takeover.terminatedManagedProcesses, 0);
   assert.equal(takeover.preservedDesktopApplications, 1);
   assert.equal(isAlive(child.pid), true);
-  await assert.rejects(executor.call('list_desktop_applications', { lease }), /stale/);
-  assert.throws(() => executor.leases.acquire(60), /human/);
+  const observed = await executor.call('list_desktop_applications', { lease }) as {
+    applications: unknown[];
+    availableApplications: Array<{ application: string; label: string; source: string }>;
+  };
+  assert.equal(observed.applications.length, 1);
+  assert.deepEqual(observed.availableApplications.find(({ application }) => application === 'user-gui'), {
+    application: 'user-gui', label: 'User GUI', source: 'user',
+  });
+  assert.equal(observed.availableApplications.some(({ label }) => label === 'Hidden GUI'), false);
+  const backgroundLease = executor.leases.acquire(60);
+  await assert.rejects(executor.call('open_desktop_application', { lease: backgroundLease, application: 'writer', paths: [] }), /human.*interactive/i);
+  await executor.leases.release(backgroundLease);
 
   executor.releaseHumanControl();
   assert.throws(() => executor.leases.verify(lease), /stale/);
   const freshLease = await executor.call('acquire_lease', { durationSeconds: 60 }) as Lease;
+  const retained = await executor.call('list_managed_processes', { lease: freshLease }) as {
+    processes: Array<{ id: string; label: string; lifecycle: string; status: string }>;
+  };
+  assert.deepEqual(retained.processes.map(({ id, label, lifecycle, status }) => ({ id, label, lifecycle, status })), [{
+    id: generic.processId,
+    label: 'retained build',
+    lifecycle: 'task',
+    status: 'running',
+  }]);
+  await executor.call('stop_process', { lease: freshLease, processId: generic.processId });
   const listed = await executor.call('list_desktop_applications', { lease: freshLease }) as {
     applications: Array<{ applicationId: string; application: string; state: string }>;
   };
@@ -142,9 +188,14 @@ test('allowlisted desktop-session applications survive takeover while generic co
     lease: freshLease,
     applicationId: 'x'.repeat(16),
   }), /not found/);
+  await assert.rejects(executor.call('close_desktop_application', {
+    lease: freshLease,
+    applicationId: opened.applicationId,
+  }), /unsaved changes/);
   const closed = await executor.call('close_desktop_application', {
     lease: freshLease,
     applicationId: opened.applicationId,
+    discardUnsavedChanges: true,
   }) as { state: string };
   assert.equal(closed.state, 'closed');
   await waitFor(() => !isAlive(child.pid));

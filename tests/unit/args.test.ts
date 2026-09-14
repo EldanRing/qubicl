@@ -73,3 +73,14 @@ test('dashboard foreground and isolated asset port options are parsed without co
   assert.equal(parsed.options.get('foreground'), true);
   assert.equal(parsed.options.get('asset-port'), '4321');
 });
+
+test('argument parsing accepts every value-bearing 0.6 management option', () => {
+  const values = new Map([
+    ['viewer-reconnect-grace', '30'], ['target-root', '/tmp/imported'],
+    ['max-concurrent', '8'], ['max-lifetime', '3600'], ['max-output', '10000000'], ['retention', '7200'],
+    ['home-warning', '20g'], ['backup-warning', '50g'],
+    ['allow-cidrs', '10.0.0.0/24'], ['allow-tcp-ports', '3000,5432'], ['template', 'github'],
+  ]);
+  const parsed = parseArgs([...values].flatMap(([name, value]) => [`--${name}`, value]));
+  assert.deepEqual(parsed.options, values);
+});

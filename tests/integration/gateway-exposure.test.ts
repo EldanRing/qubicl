@@ -63,7 +63,7 @@ test('external gateway is TLS-only, origin-bound, token-isolated, bounded, and s
   const directory = await mkdtemp(join(tmpdir(), 'qubicl-external-gateway-'));
   const routesPath = join(directory, 'routes.json');
   await writeFile(routesPath, JSON.stringify({
-    version: 2,
+    version: 3,
     generatedAt: new Date().toISOString(),
     routes: [runtimeRoute(backendPort), runtimeRoute(backendPort, secondId, 'second-token')],
   }));
@@ -248,7 +248,7 @@ test('external network denial and invalid exposure retain a healthy local listen
   const tls = await createTlsMaterial({ allowedNetworks: ['10.0.0.0/8'] });
   const directory = await mkdtemp(join(tmpdir(), 'qubicl-external-deny-'));
   const routesPath = join(directory, 'routes.json');
-  await writeFile(routesPath, JSON.stringify({ version: 2, generatedAt: new Date().toISOString(), routes: [] }));
+  await writeFile(routesPath, JSON.stringify({ version: 3, generatedAt: new Date().toISOString(), routes: [] }));
   const denied = new Gateway(new RouteStore(routesPath), 1_000, 10_000, { external: { ...tls, listenPort: 0 } });
   await denied.start(0);
   context.after(() => denied.close());
@@ -259,7 +259,7 @@ test('external network denial and invalid exposure retain a healthy local listen
 
   const failedDirectory = await mkdtemp(join(tmpdir(), 'qubicl-external-failed-'));
   const failedRoutes = join(failedDirectory, 'routes.json');
-  await writeFile(failedRoutes, JSON.stringify({ version: 2, generatedAt: new Date().toISOString(), routes: [] }));
+  await writeFile(failedRoutes, JSON.stringify({ version: 3, generatedAt: new Date().toISOString(), routes: [] }));
   const failed = new Gateway(new RouteStore(failedRoutes), 1_000, 10_000, { externalFailureCode: 'tls_material_mismatch' });
   await failed.start(0);
   context.after(() => failed.close());
@@ -284,7 +284,7 @@ test('configured client CA requires a validated TLS client certificate', async (
   };
   const directory = await mkdtemp(join(tmpdir(), 'qubicl-external-mtls-'));
   const routesPath = join(directory, 'routes.json');
-  await writeFile(routesPath, JSON.stringify({ version: 2, generatedAt: new Date().toISOString(), routes: [] }));
+  await writeFile(routesPath, JSON.stringify({ version: 3, generatedAt: new Date().toISOString(), routes: [] }));
   const gateway = new Gateway(new RouteStore(routesPath), 1_000, 10_000, {
     external: {
       ...tls,

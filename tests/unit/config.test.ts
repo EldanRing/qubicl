@@ -3,10 +3,14 @@ import test from 'node:test';
 import {
   ConfigSchema,
   ComputerConfigSchema,
+  DEFAULT_STORAGE_POLICY,
+  DEFAULT_TASK_POLICY,
   ManifestSchema,
   NetworkPolicySchema,
   SecretsSchema,
   StateMigrationSchema,
+  StoragePolicySchema,
+  TaskPolicySchema,
   allocateName,
   assertStateComputerIdsMatch,
   assertValidName,
@@ -28,9 +32,14 @@ function computer(config: ReturnType<typeof defaultConfig>, id: string, name: st
 test('configuration validation rejects unsafe names and limits', () => {
   const config = defaultConfig();
   assert.equal(ConfigSchema.parse(config).gateway.port, 3211);
-  assert.equal(config.version, 4);
+  assert.equal(ConfigSchema.parse(config).gateway.viewerReconnectGraceSeconds, 10);
+  assert.equal(config.version, 5);
   assert.throws(() => assertValidName('Bad Name'));
   assert.throws(() => ConfigSchema.parse({ ...config, gateway: { ...config.gateway, port: 70000 } }));
+  assert.equal(ConfigSchema.parse({ ...config, gateway: { ...config.gateway, viewerReconnectGraceSeconds: 5 } }).gateway.viewerReconnectGraceSeconds, 5);
+  assert.equal(ConfigSchema.parse({ ...config, gateway: { ...config.gateway, viewerReconnectGraceSeconds: 300 } }).gateway.viewerReconnectGraceSeconds, 300);
+  assert.throws(() => ConfigSchema.parse({ ...config, gateway: { ...config.gateway, viewerReconnectGraceSeconds: 4 } }));
+  assert.throws(() => ConfigSchema.parse({ ...config, gateway: { ...config.gateway, viewerReconnectGraceSeconds: 301 } }));
   const duplicate = computer(config, '00000000-0000-4000-8000-000000000001', 'same');
   assert.throws(() => ConfigSchema.parse({ ...config, computers: [duplicate, duplicate] }), /unique/);
   assert.throws(() => ConfigSchema.parse({
@@ -41,6 +50,14 @@ test('configuration validation rejects unsafe names and limits', () => {
     ...config,
     computers: [{ ...duplicate, viewerAuthentication: 'header-v1' }],
   }), /unrecognized key/i);
+});
+
+test('retained-task and storage policy limits reject ineffective or unbounded values', () => {
+  assert.deepEqual(TaskPolicySchema.parse(DEFAULT_TASK_POLICY), DEFAULT_TASK_POLICY);
+  assert.deepEqual(StoragePolicySchema.parse(DEFAULT_STORAGE_POLICY), DEFAULT_STORAGE_POLICY);
+  assert.throws(() => TaskPolicySchema.parse({ ...DEFAULT_TASK_POLICY, maxConcurrent: 0 }));
+  assert.throws(() => TaskPolicySchema.parse({ ...DEFAULT_TASK_POLICY, maxLifetimeSeconds: 31 * 24 * 60 * 60 }));
+  assert.throws(() => StoragePolicySchema.parse({ ...DEFAULT_STORAGE_POLICY, homeWarningBytes: -1 }));
 });
 
 test('daily-driver policy schemas reject credential, environment, and network boundary escapes', () => {
@@ -86,11 +103,11 @@ test('config, secrets, and migration journals require the same computer IDs', ()
   assert.throws(() => assertStateComputerIdsMatch(config, secrets), /missing secrets.*000000000001.*orphan secrets.*000000000002/);
 
   const migration = {
-    version: 3,
+    version: 4,
     id: '00000000-0000-4000-8000-000000000003',
     createdAt: '2026-08-19T12:00:00.000Z',
     sourceVersion: 2,
-    targetVersion: 4,
+    targetVersion: 5,
     backupName: 'backup-v2',
     config,
     secrets,

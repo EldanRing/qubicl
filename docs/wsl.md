@@ -143,7 +143,6 @@ git clone https://github.com/EldanRing/qubicl.git
 cd qubicl
 npm install --global npm@10.9.3
 npm ci
-npm run check
 npm run images:build
 npm install --global --prefix "$HOME/.local" ./packages/cli
 export PATH="$HOME/.local/bin:$PATH"
@@ -152,7 +151,10 @@ qubicl version
 
 Persist `$HOME/.local/bin` in the shell profile if it is not already on `PATH`.
 The image build creates the gateway, dashboard, and all four preset images from
-the same source revision as the CLI.
+the same source revision as the CLI. This is a complete source-install recipe,
+not the verification requirement for every edit. Use the
+[change-to-check guide](development.md#choose-checks-for-the-change) for focused
+development; the full source gate is `npm run check`.
 
 For a private checkout, use an SSH key or authenticated credential helper. Do
 not place a token in the clone URL or repository configuration. If GitHub CLI
@@ -251,8 +253,10 @@ Record exact Windows, WSL, distribution, Docker Desktop, Docker Engine,
 Compose, Node, and npm versions with the candidate. A Windows support claim
 requires all of the following on the candidate bytes:
 
-1. Run `npm run check`, build all six release images, install the candidate CLI, and
-   complete setup on a WSL Linux path.
+1. Generate the exact release-impact document, complete its required source and
+   candidate gates, install the candidate CLI, and complete setup on a WSL Linux
+   path. A 0.6 change touching shared contracts can still require all six
+   release images.
 2. Confirm `qubicl doctor` has no failures, and preserve its secret-free JSON
    output with `qubicl doctor --json`.
 3. Reach gateway health from WSL with `curl` and from PowerShell with
@@ -297,8 +301,12 @@ contents, or viewer URLs in the acceptance evidence.
   listener as a workaround.
 - **Viewer does not open:** use `--no-open`, paste the printed URL immediately,
   and check interop with `explorer.exe https://example.com`.
-- **Source identity changed:** rebuild all development images and reinstall the
-  CLI before retrying setup.
+- **Source identity changed:** first check which CLI bundle, image, or catalog
+  is stale. Reinstall a changed CLI bundle; refresh development images when
+  setup/doctor reports their identity no longer matches the catalog. The current
+  supported `npm run images:build` command refreshes all development targets;
+  it is not required for documentation-only checks. See
+  [image and setup acceptance](development.md#image-and-setup-acceptance).
 - **A report is needed:** save `qubicl doctor --json` locally, review it, and
   share only the fields needed for diagnosis. Do not upload it automatically or
   include protected state, viewer URLs, tokens, or computer-home contents.

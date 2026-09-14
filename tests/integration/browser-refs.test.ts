@@ -54,6 +54,9 @@ test('real browser refs survive sibling changes and reject replaced DOM nodes', 
   assert.equal(await page.locator('#other-input').inputValue(), '');
   assert.equal(await page.locator('#choice').inputValue(), 'B');
 
+  await manager.type(ref('Input'), ' appended', false, false);
+  assert.equal(await page.locator('#input').inputValue(), 'original only appended');
+
   await page.evaluate(() => {
     for (const id of ['original', 'input', 'choice']) {
       const element = document.getElementById(id)!;

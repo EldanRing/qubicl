@@ -411,9 +411,8 @@ test('Open Terminal compatibility provides native files through a transparent fe
   assert.match(JSON.stringify(await missing.json()), /path_not_found/);
 
   await executor.takeHumanControl();
-  const fenced = await fetch(`${base}/files/list?directory=${encodeURIComponent(home)}`);
-  assert.equal(fenced.status, 409);
-  assert.match(JSON.stringify(await fenced.json()), /human_control_active/);
+  const observed = await fetch(`${base}/files/list?directory=${encodeURIComponent(home)}`);
+  assert.equal(observed.status, 200);
   executor.releaseHumanControl();
   assert.equal((await fetch(`${base}/files/list?directory=${encodeURIComponent(home)}`)).status, 200);
 
@@ -829,7 +828,7 @@ test('an invalid remote fence acknowledgement leaves ambiguous process work fail
   assert.throws(() => executor.leases.verify(lease), /stale/u);
   assert.throws(
     () => executor.leases.acquire(60),
-    (error: unknown) => error instanceof QubiclError && error.code === 'lease_transition',
+    (error: unknown) => error instanceof QubiclError && error.code === 'lease_fencing_failed',
   );
   assert.equal(executeCalls, 1);
   assert.equal(fenceCalls, 1);
@@ -888,7 +887,7 @@ test('a late ambiguous start re-fences its exact expired owner and keeps a faile
   assert.throws(() => executor.leases.verify(lease), /stale/u);
   assert.throws(
     () => executor.leases.acquire(60),
-    (error: unknown) => error instanceof QubiclError && error.code === 'lease_transition',
+    (error: unknown) => error instanceof QubiclError && error.code === 'lease_fencing_failed',
   );
 });
 

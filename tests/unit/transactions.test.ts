@@ -482,9 +482,9 @@ test('a pending version-1 lifecycle journal is backed up, upgraded, and recovere
   await writeFile(fixture.paths.journal, contents, { mode: 0o600 });
 
   const pending = await readPendingTransaction(fixture.paths);
-  assert.equal(pending?.version, 4);
+  assert.equal(pending?.version, 5);
   assert.equal(pending?.config.installationId, fixture.transaction.id);
-  assert.equal(YAML.parse(await readFile(fixture.paths.journal, 'utf8')).version, 4);
+  assert.equal(YAML.parse(await readFile(fixture.paths.journal, 'utf8')).version, 5);
   const backups = await readdir(fixture.paths.backups);
   const transactionBackups = await Promise.all(backups.map(async (name) => {
     try { return await readFile(join(fixture.paths.backups, name, 'transaction.yaml'), 'utf8'); }
@@ -494,7 +494,7 @@ test('a pending version-1 lifecycle journal is backed up, upgraded, and recovere
 
   await recoverPendingTransaction(fixture.paths, { runtime: fakeRuntime });
   const recovered = await loadState(fixture.paths);
-  assert.equal(recovered.config.version, 4);
+  assert.equal(recovered.config.version, 5);
   assert.equal(recovered.config.installationId, fixture.transaction.id);
   await assert.rejects(lstat(fixture.paths.journal), { code: 'ENOENT' });
   await rm(fixture.paths.root, { recursive: true, force: true });
@@ -513,7 +513,7 @@ test('read-only status inspection neither migrates a legacy journal nor resurrec
 
   const status = await lifecycleUpdateStatus(state, 'linux/amd64');
   assert.equal(status.recoveryRequired, true);
-  assert.equal((await inspectPendingTransaction(fixture.paths))?.version, 4, 'legacy migration is parsed only in memory');
+  assert.equal((await inspectPendingTransaction(fixture.paths))?.version, 5, 'legacy migration is parsed only in memory');
   assert.equal(await readFile(fixture.paths.journal, 'utf8'), contents);
   assert.deepEqual((await readdir(fixture.paths.backups)).toSorted(), backupsBefore);
 

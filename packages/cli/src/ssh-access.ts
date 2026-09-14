@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, rename, rm } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -22,9 +22,24 @@ function findComputer(state: LoadedState, name: string): ComputerConfig {
   return computer;
 }
 
-function keyPaths(state: LoadedState, computer: ComputerConfig): { privateKey: string; publicKey: string } {
+function keyPaths(state: LoadedState, computer: ComputerConfig): { privateKey: string; publicKey: string; knownHosts: string } {
   const directory = join(state.paths.computers, computer.id, 'ssh');
-  return { privateKey: join(directory, 'id_ed25519'), publicKey: join(directory, 'id_ed25519.pub') };
+  return { privateKey: join(directory, 'id_ed25519'), publicKey: join(directory, 'id_ed25519.pub'), knownHosts: join(directory, 'known_hosts') };
+}
+
+function hostPublicKeyPath(state: LoadedState, computer: ComputerConfig): string {
+  return join(state.paths.computers, computer.id, 'home', 'qubicl', '.local', 'share', 'qubicl', 'ssh-host-keys', 'ssh_host_ed25519_key.pub');
+}
+
+function hostKeyAlias(computer: ComputerConfig): string { return `qubicl-${computer.id}`; }
+
+async function refreshKnownHost(state: LoadedState, computer: ComputerConfig): Promise<void> {
+  const publicKey = (await readFile(hostPublicKeyPath(state, computer), 'utf8')).trim();
+  if (!/^ssh-ed25519 [A-Za-z0-9+/=]+(?:\s.*)?$/u.test(publicKey)) throw new Error('Computer SSH server returned an invalid Ed25519 host key.');
+  const material = publicKey.split(/\s+/u).slice(0, 2).join(' ');
+  const paths = keyPaths(state, computer);
+  await writeFile(paths.knownHosts, `${hostKeyAlias(computer)} ${material}\n`, { mode: 0o600 });
+  await chmod(paths.knownHosts, 0o600);
 }
 
 async function run(command: string, args: string[]): Promise<string> {
@@ -87,13 +102,15 @@ async function waitForSshReady(state: LoadedState, computer: ComputerConfig): Pr
   let lastError: unknown;
   while (Date.now() < deadline) {
     try {
+      await refreshKnownHost(state, computer);
       await run('ssh', [
         '-i', keyPaths(state, computer).privateKey,
         '-p', `${computer.ssh.port}`,
         '-o', 'BatchMode=yes',
         '-o', 'ConnectTimeout=2',
-        '-o', 'StrictHostKeyChecking=no',
-        '-o', 'UserKnownHostsFile=/dev/null',
+        '-o', 'StrictHostKeyChecking=yes',
+        '-o', `UserKnownHostsFile=${keyPaths(state, computer).knownHosts}`,
+        '-o', `HostKeyAlias=${hostKeyAlias(computer)}`,
         '-o', 'LogLevel=ERROR',
         'qubicl@127.0.0.1',
         'true',
@@ -111,7 +128,7 @@ async function waitForSshReady(state: LoadedState, computer: ComputerConfig): Pr
 function printConfig(state: LoadedState, computer: ComputerConfig): void {
   if (!computer.ssh?.enabled) throw new Error(`SSH access is not enabled for ${computer.name}.`);
   const privateKey = keyPaths(state, computer).privateKey;
-  console.log(`Host qubicl-${computer.name}\n  HostName 127.0.0.1\n  Port ${computer.ssh.port}\n  User qubicl\n  IdentityFile ${privateKey}\n  IdentitiesOnly yes\n  StrictHostKeyChecking accept-new`);
+  console.log(`Host qubicl-${computer.name}\n  HostName 127.0.0.1\n  Port ${computer.ssh.port}\n  User qubicl\n  IdentityFile ${privateKey}\n  IdentitiesOnly yes\n  HostKeyAlias ${hostKeyAlias(computer)}\n  UserKnownHostsFile ${keyPaths(state, computer).knownHosts}\n  StrictHostKeyChecking yes`);
   console.log(`\nConnect: ssh -i ${JSON.stringify(privateKey)} -p ${computer.ssh.port} qubicl@127.0.0.1`);
   console.log('This loopback-only SSH endpoint works with VS Code/Cursor Remote SSH, JetBrains Gateway, Zed, ssh, and scp.');
 }
@@ -157,7 +174,7 @@ export async function sshCommand(args: ParsedArgs): Promise<void> {
       await executeStateTransaction(state.paths, createStateTransaction('config', state), { includeRuntime: false });
       await refreshSsh(state, computer);
       const keys = keyPaths(state, computer);
-      await Promise.all([rm(keys.privateKey, { force: true }), rm(keys.publicKey, { force: true })]);
+      await Promise.all([rm(keys.privateKey, { force: true }), rm(keys.publicKey, { force: true }), rm(keys.knownHosts, { force: true })]);
       console.log(`Disabled SSH access for ${computer.name} and removed its independent SSH key pair.`);
       return;
     }

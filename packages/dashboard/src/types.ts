@@ -2,10 +2,10 @@ export const MANAGEMENT_OPERATIONS = [
   'setup', 'computer.create', 'computer.start', 'computer.stop', 'computer.restart',
   'computer.rename', 'computer.delete', 'computer.restore', 'computer.resources',
   'computer.upgrade', 'computers.stop', 'upgrade.all', 'gateway.start', 'gateway.restart',
-  'control.release', 'process.stop', 'preview.revoke', 'tools.set', 'skills.set',
+  'control.release', 'process.stop', 'preview.revoke', 'preview.share', 'preview.unshare', 'tools.set', 'skills.set',
   'skill.import', 'skill.update', 'skill.reset', 'skill.remove', 'skill.restore',
   'network.set', 'network.approve', 'network.revoke', 'credential.add',
-  'credential.replace', 'credential.remove', 'token.rotate', 'backup.create',
+  'credential.replace', 'credential.remove', 'client.create', 'client.rotate', 'client.revoke', 'token.rotate', 'backup.create',
   'backup.verify', 'backup.restore', 'backup.prune', 'checkpoint.create', 'computer.clone',
   'recovery.resume', 'dashboard.restart', 'dashboard.revoke', 'gateway.revoke',
 ] as const;
@@ -34,7 +34,7 @@ export interface ManagementJob {
   id: string;
   operation: ManagementOperation;
   target?: string;
-  status: 'running' | 'succeeded' | 'failed' | 'recovery-required';
+  status: 'running' | 'succeeded' | 'failed' | 'recovery-required' | 'outcome-unknown';
   createdAt: string;
   updatedAt: string;
   message: string;
@@ -53,10 +53,31 @@ export interface ManagementComputer {
   capabilities: string[];
   controller?: OperatorController;
   resources?: { managedProcesses?: number; activePreviews?: number };
+  browser?: {
+    state?: string;
+    sandbox?: string;
+    profile?: string;
+    extensions?: string;
+    passwordStore?: string;
+    publicExtraction?: string;
+    engineVersion?: string;
+    recentDiagnosticCount?: number;
+    lastDiagnostic?: { at?: string; type?: string; detail?: string };
+    tabPolicy?: { agentOpenLimit?: number; automaticEviction?: boolean };
+  };
   tools: string[];
   skills: string[];
   network: unknown;
+  clients: ClientCredentialItem[];
   [key: string]: unknown;
+}
+
+export interface ClientCredentialItem {
+  id: string;
+  label: string;
+  scopes: string[];
+  createdAt: string;
+  lastUsedAt?: string;
 }
 
 export interface ManagementSnapshot {
@@ -67,9 +88,10 @@ export interface ManagementSnapshot {
   docker: { available: boolean; message?: string };
   gateway: { status: string };
   computers: ManagementComputer[];
-  trash: Array<{ id: string; name: string }>;
+  trash: Array<{ id: string; name: string; status: 'available' | 'quarantined'; diagnostic?: string }>;
   operations: ManagementJob[];
-  presets: Array<{ id: string; cpus: number; memory: string; capabilities: string[] }>;
+  defaultPreset: string;
+  presets: Array<{ id: string; purpose: string; description: string; cpus: number; memory: string; capabilities: string[] }>;
   release: string;
 }
 
@@ -102,10 +124,12 @@ export interface OperatorController {
 
 export interface ManagedProcess {
   id: string;
+  label: string;
+  lifecycle: 'session' | 'task' | 'service';
   status: string;
   startedAt: string;
   finishedAt?: string;
-  owner: 'agent';
+  owner: 'agent' | 'computer';
   ownerGeneration: number;
 }
 
@@ -114,7 +138,9 @@ export interface PublishedPreview {
   kind: 'port' | 'file';
   status: 'published';
   createdAt: string;
-  expiresAt: string;
+  lifetime: 'while-listening' | 'expiring';
+  expiresAt?: string;
+  shareExpiresAt?: string;
   port?: number;
 }
 
@@ -130,7 +156,7 @@ export interface SkillItem {
   drifted?: boolean;
   resetAvailable?: boolean;
 }
-export interface BackupItem { id: string; name: string; createdAt: string; encrypted: boolean; consistency: string }
+export interface BackupItem { id: string; name: string; status: 'available' | 'quarantined'; createdAt?: string; encrypted?: boolean; consistency?: string; diagnostic?: string }
 
 export interface AssetManifestEntry {
   path: string;

@@ -32,8 +32,11 @@ Qubicl turns local Docker into observable computers for external AI agents.
 The agent stays in Codex, Claude, Open WebUI, Cursor, VS Code, or another MCP or
 OpenAPI client. Qubicl supplies the machine it works on.
 
-Qubicl 0.5 adds a [local management dashboard](docs/dashboard.md) with a native
-host helper, private administration, operation previews and recovery.
+Qubicl 0.6 adds retained tasks, bounded interactive terminals, named client
+credentials, normal persistent browsing, scoped internal networking, safer app
+previews, and a supported encrypted installation export/import workflow. The
+[local management dashboard](docs/dashboard.md) provides private administration,
+operation previews, encrypted home backups, and recovery.
 
 ```text
 your model or agent
@@ -101,6 +104,9 @@ export PATH="$HOME/.local/bin:$PATH"
 qubicl setup
 ```
 
+This recipe builds all six development images for a complete source install.
+For ordinary edits, use [focused development checks](docs/development.md#choose-checks-for-the-change).
+
 </details>
 
 ## Choose a computer
@@ -145,9 +151,10 @@ smaller file, semantic-browser, visual-browser, or desktop catalog.
 
 For Open WebUI, copy the generated configuration into **Admin Panel → Settings
 → Integrations → Open Terminal**. Qubicl supplies native durable-file browsing
-and search, bounded ZIP downloads, non-PTY managed processes, filesystem-backed
-chat uploads, screenshots, browser tools, and explicitly published local
-previews without joining Open WebUI's Docker network.
+and search, bounded ZIP downloads, retained managed tasks, bounded interactive
+terminal sessions, filesystem-backed chat uploads, screenshots, browser tools,
+and explicitly published local previews without joining Open WebUI's Docker
+network.
 
 See [Client setup](docs/clients.md) for exact instructions.
 
@@ -164,10 +171,11 @@ origin policy, and persists until `qubicl gateway revoke`. Binding
 qubicl view computer-name
 ```
 
-Observation is passive. **Take control** fences agent tools and terminates its
-ordinary managed commands before handing you the keyboard and mouse. The
-persistent browser and explicitly managed desktop applications remain visible,
-so you can continue the exact task instead of starting over.
+Observation is passive. **Take control** fences queued and future agent GUI
+input before handing you the keyboard and mouse. Retained tasks and services
+continue; lease-scoped session commands and session terminals stop. The
+persistent browser and managed desktop applications remain visible so you can
+continue the same task.
 
 While the agent is acting, the viewer keeps Qubicl's green pointer at its latest
 desktop or managed-browser position and briefly pulses the exact click target.
@@ -194,8 +202,10 @@ images additionally require a gateway-injected internal credential for both
 noVNC files and WebSocket traffic; the computer exposes no raw TCP VNC listener,
 and that internal credential is not passed to workload child processes.
 
-If a controlling viewer disappears, Qubicl releases abandoned control after a
-short reconnect grace period. The operator can always recover explicitly:
+If a controlling viewer disappears, Qubicl shows the reconnect countdown and
+releases control after the configured grace period (10 seconds by default).
+Change it from 5 to 300 seconds with `qubicl config set
+--viewer-reconnect-grace SECONDS`. The operator can always recover explicitly:
 
 ```sh
 qubicl control release computer-name
@@ -206,13 +216,23 @@ qubicl control release computer-name
 - Publish an agent-started web app through an authenticated local preview and,
   when explicitly configured, a separately isolated remote preview origin.
 - Back up, verify, encrypt, restore, clone, and checkpoint durable homes.
+- Export, inspect, and import a stopped full installation as a mandatory
+  passphrase-encrypted bundle without overwriting the source installation.
+- Run reconnectable retained tasks, bounded interactive terminals, declared
+  restartable services, and explicit `tasks stop-all` cleanup.
+- Create named client credentials with observe/files/tasks/interactive/publish
+  scopes, one-time display, last-use attribution, and selective revocation.
+- Inspect home, cache, download, task, audit, and backup storage with honest
+  warning thresholds instead of pretending Docker provides portable quotas.
 - Preview and deliberately wipe one durable Chromium profile without deleting Downloads.
 - Apply `offline`, `web-only`, `developer`, or custom egress policies.
 - Broker narrowly scoped credentials without placing the secret in the workload.
-- Import bounded devcontainer definitions and use host-mediated Git workflows.
+- Import bounded devcontainer definitions and run Git workflows inside the computer.
 - Enable loopback-only SSH for editors and ordinary `ssh`/`scp`.
-- Inspect a private, content-free audit trail and diagnose topology with `doctor`.
-- Preview pending curated image updates and their acquisition sizes with `status`.
+- Inspect private operation metadata and diagnose topology with `doctor`; review
+  audit exports and the [current limitations](docs/security-model.md#limitations) before sharing them.
+- Preview pending curated image updates with `status`, or explicitly compare the
+  installed CLI/catalog with npm using `qubicl update check`.
 - Upgrade one computer or use confirmed `upgrade --all` while preserving IDs,
   tokens, policies, resources, homes, and prior running/stopped/absent state.
 - Preview exact cleanup candidates; ambiguous daemon-global images and Docker
@@ -220,10 +240,12 @@ qubicl control release computer-name
 
 Use `qubicl help` or `qubicl <command> --help` to explore the full CLI.
 
-Update notices are local, default off, and compare only against the catalog
+Automatic update notices are local, default off, and compare only against the catalog
 bundled with the installed CLI. Enable or disable them explicitly with
 `qubicl config set --update-notifications on|off`; they perform no network
-check, telemetry, image pull, or automatic mutation.
+check, telemetry, image pull, or automatic mutation. `qubicl update check`
+performs one explicit bounded registry lookup unless `--offline` is supplied;
+it never downloads or applies an update.
 
 ## Security boundary
 
@@ -231,7 +253,8 @@ Qubicl keeps every computer inside one explicit Docker resource and filesystem
 boundary. Computers run without privileged mode, a Docker socket, host
 namespaces, arbitrary mounts, or passwordless elevation. The gateway listens
 only on `127.0.0.1` by default; an operator can deliberately add a distinct
-TLS-only listener without exposing computer ports. Chromium retains its Linux namespace and renderer
+TLS-only listener for gateway traffic. Separately enabled SSH publishes only on
+host loopback. Chromium retains its Linux namespace and renderer
 seccomp-BPF sandboxes; model-facing files are confined to the durable home.
 Controller and workload processes share the computer container, so human
 takeover is a cooperative managed-process fence rather than a hostile-code boundary.
@@ -244,12 +267,17 @@ compromise, or another user who controls the host account. The default
 
 ## Release status
 
-Qubicl `0.5.x` is a public pre-1.0 series intended for real use, but its
+The [0.6 design](docs/decisions/0002-v0.6-capabilities-and-constraints.md) is
+implemented in this source tree. A public 0.6 release still requires a frozen
+reviewed commit and its separately approved candidate, security, client,
+platform, accessibility, mobile, and publication evidence.
+
+Qubicl `0.6.x` is a pre-1.0 series intended for real use, but its
 interfaces and state format may still evolve before 1.0. The supported-host
 policy covers Linux x64, Apple Silicon macOS with Docker Desktop, and Windows 11
 x64 through Ubuntu 24.04 on WSL 2 with Docker Desktop. Their directly tested
 classifications record historical v0.1.0 evidence baselines; they do not mean
-every current candidate repeats the full macOS and Windows matrices. The v0.5
+every current candidate repeats the full macOS and Windows matrices. The 0.6
 initial release uses Linux x64 for general platform acceptance and separately requires
 dashboard-specific native Linux x64, Apple Silicon macOS, and physical iPhone
 Safari evidence. Linux ARM64, Intel macOS, Windows on ARM, and other WSL 2
@@ -259,6 +287,17 @@ Qubicl computers remain Linux containers on every host. The versioned
 computer homes before upgrades.
 
 ## Documentation
+
+Start with the workflow you want to complete:
+
+| Goal | Guide |
+| --- | --- |
+| Create a computer and connect an agent | [Quick start](#quick-start) · [Client setup](docs/clients.md) |
+| Browse, work with documents, and hand off control | [Browser and document handoff](docs/daily-driver.md#browser-and-document-handoff) |
+| Develop an app and open its preview | [Ports](docs/daily-driver.md#ports) · [SSH and editors](docs/daily-driver.md#ssh-and-editors) · [Devcontainers and Git](docs/daily-driver.md#devcontainers-and-git) |
+| Back up or recover work | [Backup, checkpoint, clone](docs/daily-driver.md#backup-checkpoint-clone) · [Persistence](docs/persistence.md) |
+| Manage computers or access remotely | [Dashboard](docs/dashboard.md) · [Remote access](docs/remote-access.md) |
+| Understand an unavailable action | [Find the blocker](docs/troubleshooting.md#find-what-is-blocking-the-action) · [Constraints and reasons](docs/constraints.md) |
 
 | Topic | Guide |
 | --- | --- |

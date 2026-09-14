@@ -1,4 +1,5 @@
 export * from './config.js';
+export * from './client-credentials.js';
 export * from './presets.js';
 export * from './runtime.js';
 export * from './tools.js';

@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/prom
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
+import { create as createTar } from 'tar';
 import { ComputerConfigSchema, defaultConfig, defaultSecrets, type ComputerConfig, type RuntimeContainerBinding } from '@qubicl/core';
 import {
   createBackup,
@@ -23,7 +24,7 @@ test('backup creation publishes a complete staged directory atomically', async (
     archive: async (_command, args) => {
       stagedArchive = args[1]!;
       assert.match(basename(dirname(stagedArchive)), /^\.creating-[0-9a-f-]+$/u);
-      await writeFile(stagedArchive, 'deterministic archive bytes', { mode: 0o600 });
+      await createTar({ gzip: true, file: stagedArchive, cwd: args.at(-2)! }, ['.']);
       return '';
     },
   };
@@ -40,7 +41,7 @@ test('backup creation publishes a complete staged directory atomically', async (
   assert.deepEqual(entries, [manifest.id]);
   const finalDirectory = join(fixture.state.paths.backups, manifest.id);
   assert.equal((await stat(finalDirectory)).mode & 0o777, 0o700);
-  assert.equal(await readFile(join(finalDirectory, manifest.archive), 'utf8'), 'deterministic archive bytes');
+  assert.deepEqual([...await readFile(join(finalDirectory, manifest.archive)).then((bytes) => bytes.subarray(0, 2))], [0x1f, 0x8b]);
   assert.deepEqual(JSON.parse(await readFile(join(finalDirectory, 'manifest.json'), 'utf8')), manifest);
   await assert.rejects(stat(join(fixture.state.paths.runtime, 'backup-create.json')), { code: 'ENOENT' });
 });
@@ -189,7 +190,7 @@ test('backup recovery verifies an already-published archive before clearing its 
     observe: async () => ({ group: 'absent', status: 'absent', containers: [] }),
     docker: async () => '',
     archive: async (_command, args) => {
-      await writeFile(args[1]!, 'complete archive', { mode: 0o600 });
+      await createTar({ gzip: true, file: args[1]!, cwd: args.at(-2)! }, ['.']);
       return '';
     },
   };

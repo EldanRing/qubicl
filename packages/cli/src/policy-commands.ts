@@ -38,21 +38,21 @@ import {
 } from './skill-store.js';
 
 export const TOOL_CATEGORIES: ReadonlyArray<{ id: string; label: string; tools: readonly ComputerToolName[] }> = [
-  { id: 'control', label: 'Control & status', tools: ['get_computer_status', 'acquire_lease', 'renew_lease', 'release_lease'] },
-  { id: 'terminal', label: 'Terminal & processes', tools: ['exec_command', 'write_stdin', 'stop_process'] },
-  { id: 'previews', label: 'Ports & previews', tools: ['list_ports', 'publish_port', 'list_previews', 'unpublish_port'] },
+  { id: 'control', label: 'Control & status', tools: ['get_computer_status', 'explain_capability', 'acquire_lease', 'renew_lease', 'release_lease'] },
+  { id: 'terminal', label: 'Terminal & processes', tools: ['exec_command', 'list_managed_processes', 'process_output', 'save_process_output', 'write_stdin', 'stop_process', 'terminal_open', 'terminal_list', 'terminal_read', 'terminal_write', 'terminal_resize', 'terminal_signal', 'terminal_close'] },
+  { id: 'previews', label: 'Ports & previews', tools: ['list_ports', 'publish_port', 'list_previews', 'unpublish_port', 'share_preview', 'revoke_preview_share'] },
   { id: 'credentials', label: 'Credential broker', tools: ['broker_request'] },
   { id: 'skills', label: 'Skills', tools: ['skills_list', 'skill_view', 'skill_manage'] },
   { id: 'web', label: 'Web', tools: ['web_search', 'web_extract'] },
   { id: 'files', label: 'Files', tools: ['list_files', 'get_file_info', 'read_file', 'write_file', 'edit_file', 'copy_path', 'move_path', 'delete_path'] },
   { id: 'desktop', label: 'Desktop interaction', tools: ['take_screenshot', 'control_computer'] },
-  { id: 'browser-semantic', label: 'Browser — semantic', tools: ['browser_navigate', 'browser_snapshot', 'browser_screenshot', 'browser_click', 'browser_type', 'browser_select', 'browser_press', 'browser_scroll', 'browser_history', 'browser_wait', 'browser_tabs', 'browser_use_tab', 'browser_new_tab', 'browser_close_tab', 'browser_reset'] },
+  { id: 'browser-semantic', label: 'Browser — semantic', tools: ['browser_navigate', 'browser_snapshot', 'browser_screenshot', 'browser_click', 'browser_type', 'browser_select', 'browser_press', 'browser_scroll', 'browser_history', 'browser_wait', 'browser_tabs', 'browser_use_tab', 'browser_new_tab', 'browser_close_tab', 'browser_reset', 'browser_upload', 'browser_downloads', 'browser_cancel_download', 'browser_dialogs', 'browser_respond_dialog', 'browser_permissions', 'browser_diagnostics', 'browser_set_viewport'] },
   { id: 'browser-visual', label: 'Browser — visual', tools: ['browser_click_at', 'browser_double_click_at', 'browser_hover_at', 'browser_drag', 'browser_scroll_at', 'browser_type_focused', 'browser_inspect_at', 'browser_computer'] },
   { id: 'clipboard', label: 'Clipboard', tools: ['read_clipboard', 'write_clipboard'] },
   { id: 'desktop-apps', label: 'Desktop applications', tools: ['open_desktop_application', 'list_desktop_applications', 'close_desktop_application'] },
 ];
 
-const LOCKED_TOOLS = new Set<ComputerToolName>(['get_computer_status', 'acquire_lease', 'renew_lease', 'release_lease']);
+const LOCKED_TOOLS = new Set<ComputerToolName>(['get_computer_status', 'explain_capability', 'acquire_lease', 'renew_lease', 'release_lease']);
 const SKILL_ACTIONS = new Set(['import', 'inspect', 'update', 'enable', 'disable', 'reset', 'remove', 'restore']);
 
 export async function skillsCommand(args: ParsedArgs): Promise<void> {
@@ -304,6 +304,7 @@ async function updatePolicy(name: string, kind: 'skills' | 'tools', args: Parsed
     } else {
       const maximum = toolsForCapabilities(computer.capabilities);
       const selected = new Set<ComputerToolName>(profile ? toolSelection(profile, computer) : computer.toolPolicy ?? maximum);
+      for (const locked of LOCKED_TOOLS) if (maximum.includes(locked)) selected.add(locked);
       for (const value of enable) for (const tool of expandTool(value, maximum)) selected.add(tool);
       for (const value of disable) for (const tool of expandTool(value, maximum)) if (!LOCKED_TOOLS.has(tool)) selected.delete(tool);
       computer.toolPolicy = ToolPolicySchema.parse(maximum.filter((tool) => selected.has(tool)));
@@ -340,6 +341,7 @@ function skillsView(computer: ComputerConfig, installed: SkillStatus[], catalog:
 function toolsView(computer: ComputerConfig): Record<string, unknown> {
   const maximum = toolsForCapabilities(computer.capabilities);
   const enabled = new Set(computer.toolPolicy ?? maximum);
+  for (const locked of LOCKED_TOOLS) if (maximum.includes(locked)) enabled.add(locked);
   return {
     computer: computer.name,
     categories: TOOL_CATEGORIES.map(({ id, label, tools }) => ({ id, label, tools: tools.filter((tool) => maximum.includes(tool)).map((tool) => ({ name: tool, enabled: enabled.has(tool), locked: LOCKED_TOOLS.has(tool) })) })).filter(({ tools }) => tools.length),

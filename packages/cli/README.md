@@ -31,9 +31,12 @@ Qubicl turns local Docker into observable computers for external AI agents.
 The agent stays in Codex, Claude, Open WebUI, Cursor, VS Code, or another MCP or
 OpenAPI client. Qubicl supplies the machine it works on.
 
-Qubicl 0.5 adds a [local management dashboard](https://github.com/EldanRing/qubicl/blob/main/docs/dashboard.md)
-with a native host helper, private administration, operation previews and
-recovery.
+Qubicl 0.6 adds retained tasks, bounded interactive terminals, named client
+credentials, normal persistent browsing, scoped internal networking, safer app
+previews, and a supported encrypted installation export/import workflow. The
+[local management dashboard](https://github.com/EldanRing/qubicl/blob/main/docs/dashboard.md)
+provides private administration, operation previews, encrypted home backups,
+and recovery.
 
 ```text
 your model or agent
@@ -124,9 +127,9 @@ a bearer token.
 
 For Open WebUI, copy the generated configuration into **Admin Panel → Settings
 → Integrations → Open Terminal**. Qubicl supplies native durable-file browsing,
-bounded ZIP downloads, non-PTY managed processes, chat uploads, screenshots,
-browser tools, and explicitly published local previews without joining Open
-WebUI's Docker network.
+bounded ZIP downloads, retained managed tasks, bounded interactive terminal
+sessions, chat uploads, screenshots, browser tools, and explicitly published
+local previews without joining Open WebUI's Docker network.
 
 The gateway remains on `127.0.0.1` unless the host operator explicitly adds a
 second TLS-only listener with `qubicl gateway expose`. The opt-in uses the same
@@ -151,10 +154,15 @@ qubicl config set --update-notifications on
 ```
 
 They compare only with the CLI's bundled catalog and never use telemetry, make a
-network check, pull an image, or apply an update. `qubicl cleanup --orphans
+network check, pull an image, or apply an update. `qubicl update check` performs
+one explicit bounded npm lookup unless `--offline` is supplied; it does not
+download or apply anything. `qubicl cleanup --orphans
 [--images]` likewise previews exact verified candidates; Docker images and
 volumes remain manual because daemon-global or name-only resources cannot be
 proven exclusive to one installation.
+
+`--images` removes only eligible private image-contract cache records; it does
+not remove Docker image bytes.
 
 ## Watch and take over
 
@@ -162,8 +170,9 @@ proven exclusive to one installation.
 qubicl view computer-name
 ```
 
-Observation is passive. **Take control** fences agent tools and terminates its
-ordinary managed commands before handing you the keyboard and mouse. Persistent
+Observation is passive. **Take control** fences queued and future agent GUI
+input before handing you the keyboard and mouse. Retained tasks and services
+continue; lease-scoped session commands and session terminals stop. Persistent
 browser and managed desktop applications remain visible so you can continue the
 same task. Qubicl's green pointer shows the agent's latest desktop or browser
 position in the viewer. The viewer states that Chromium's profile is durable
@@ -176,21 +185,44 @@ durable profile. A host operator can separately run `qubicl browser profile
 wipe COMPUTER` to preview domains with stored cookies/site data and the exact
 removal/preservation scope before explicit confirmation; Downloads remain.
 
+The viewer shows a reconnect countdown and releases disconnected human control
+after 10 seconds by default. Configure 5–300 seconds with `qubicl config set
+--viewer-reconnect-grace SECONDS`; `qubicl control release COMPUTER` remains the
+authenticated operator recovery path.
+
+## Daily controls
+
+- `qubicl tasks show|set|stop-all` manages retained tasks, services, session
+  commands, and interactive terminals with explicit time/output/retention limits.
+- `qubicl token create|list|show|rotate|revoke` manages named client credentials
+  with observe/files/tasks/interactive/publish scopes and selective revocation.
+- `qubicl storage show|set` accounts for home, downloads, browser state, task
+  output, audit records, and backups, with configurable warning thresholds.
+- `qubicl installation export|inspect|import` moves a stopped installation in a
+  mandatory passphrase-encrypted bundle, assigns a new installation identity,
+  preserves computer identities and secrets, and starts nothing automatically.
+
 ## Security boundary
 
 Computers run without privileged mode, a Docker socket, host namespaces,
 arbitrary mounts, or passwordless elevation. The gateway listens only on
 `127.0.0.1` by default; explicit remote mode adds a separate TLS-only listener
-without publishing computer ports. Qubicl is a Docker-based computer for trusted or
+for gateway traffic. Separately enabled SSH publishes only on host loopback.
+Qubicl is a Docker-based computer for trusted or
 operator-supervised workloads, not a VM boundary against hostile code.
 
 Read the complete [security model](https://github.com/EldanRing/qubicl/blob/main/docs/security-model.md)
 before relying on the boundary.
 
-Qubicl `0.5.x` is a public pre-1.0 series. Interfaces and state formats may
+The [0.6 design](https://github.com/EldanRing/qubicl/blob/main/docs/decisions/0002-v0.6-capabilities-and-constraints.md)
+is implemented in this source tree. A public 0.6 release still requires a frozen
+reviewed commit and its separately approved candidate, security, client,
+platform, accessibility, mobile, and publication evidence.
+
+Qubicl `0.6.x` is a pre-1.0 series. Interfaces and state formats may
 still evolve before 1.0. The matrix's directly tested Linux x64, Apple Silicon
 macOS, and Windows/WSL rows describe historical v0.1.0 baselines, not general
-testing of every current candidate. The v0.5 initial release uses Linux x64 for general
+testing of every current candidate. The 0.6 initial release uses Linux x64 for general
 platform acceptance and separately requires dashboard-specific native Linux
 x64, Apple Silicon macOS, and physical iPhone Safari evidence. Linux ARM64,
 Intel macOS, Windows on ARM, and other WSL 2 distributions remain best-effort.
@@ -200,6 +232,11 @@ containers on every host. Read the
 and [WSL guide](https://github.com/EldanRing/qubicl/blob/main/docs/wsl.md) for
 the exact boundaries. Back up important computer homes before upgrades.
 
-Explore the [source and full documentation](https://github.com/EldanRing/qubicl).
+Follow the [daily workflows](https://github.com/EldanRing/qubicl/blob/main/docs/daily-driver.md)
+for browser/document handoff, app previews, SSH, and manual backups. Use the
+[dashboard guide](https://github.com/EldanRing/qubicl/blob/main/docs/dashboard.md)
+for management and the [blocker reference](https://github.com/EldanRing/qubicl/blob/main/docs/troubleshooting.md#find-what-is-blocking-the-action)
+to understand an unavailable action. Explore the
+[source and full documentation](https://github.com/EldanRing/qubicl).
 Source code and documentation are Apache-2.0. Designated Qubicl brand artwork
 is CC BY 4.0.

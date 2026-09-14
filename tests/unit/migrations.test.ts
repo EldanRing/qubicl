@@ -46,9 +46,9 @@ test('version-1 state migrates durably after every interruption boundary', async
 
       await ensureCurrentState(paths);
       const state = await loadState(paths);
-      assert.equal(state.config.version, 4);
+      assert.equal(state.config.version, 5);
       assert.match(state.config.installationId, /^[0-9a-f-]{36}$/);
-      assert.equal(state.secrets.version, 4);
+      assert.equal(state.secrets.version, 5);
       assert.equal((await inspectStateFormat(paths)).status, 'current');
       await assert.rejects(stat(paths.migration), { code: 'ENOENT' });
       assert.equal((await stat(paths.runtimeNamespacePending)).mode & 0o777, 0o600);
@@ -72,7 +72,7 @@ test('version-1 state migrates durably after every interruption boundary', async
           const manifest = YAML.parse(await readFile(join(directory, 'manifest.yaml'), 'utf8'));
           assert.equal(manifest.reason, 'state-format');
           assert.equal(manifest.sourceVersion, 1);
-          assert.equal(manifest.targetVersion, 4);
+          assert.equal(manifest.targetVersion, 5);
           assert.deepEqual(manifest.files['config.yaml'], fileDigest(configRaw));
           assert.deepEqual(manifest.files['secrets.yaml'], fileDigest(secretsRaw));
           exactBackupFound = true;
@@ -91,7 +91,7 @@ test('version-3 state migrates durably without changing its installation identit
       const { configRaw, secretsRaw, installationId } = await writeVersion3State(root);
       assert.deepEqual(await inspectStateFormat(paths), {
         status: 'legacy',
-        detail: 'state format 3 requires explicit setup migration to 4',
+        detail: 'state format 3 requires explicit setup migration to 5',
       });
 
       let interrupted = false;
@@ -106,9 +106,9 @@ test('version-3 state migrates durably without changing its installation identit
 
       await ensureCurrentState(paths);
       const state = await loadState(paths);
-      assert.equal(state.config.version, 4);
+      assert.equal(state.config.version, 5);
       assert.equal(state.config.installationId, installationId);
-      assert.equal(state.secrets.version, 4);
+      assert.equal(state.secrets.version, 5);
       assert.equal((await inspectStateFormat(paths)).status, 'current');
       await assert.rejects(stat(paths.migration), { code: 'ENOENT' });
 
@@ -120,7 +120,7 @@ test('version-3 state migrates durably without changing its installation identit
         if (await readFile(join(directory, 'secrets.yaml'), 'utf8') !== secretsRaw) continue;
         const manifest = YAML.parse(await readFile(join(directory, 'manifest.yaml'), 'utf8'));
         assert.equal(manifest.sourceVersion, 3);
-        assert.equal(manifest.targetVersion, 4);
+        assert.equal(manifest.targetVersion, 5);
         assert.equal(manifest.installationId, installationId);
         assert.deepEqual(manifest.files['config.yaml'], fileDigest(configRaw));
         assert.deepEqual(manifest.files['secrets.yaml'], fileDigest(secretsRaw));
@@ -166,7 +166,7 @@ test('pending version-3 state migration resumes with its journal and backup iden
 
   assert.deepEqual(await inspectStateFormat(paths), {
     status: 'migration-pending',
-    detail: `state migration ${migrationId} from format 2 to 4 awaits recovery`,
+    detail: `state migration ${migrationId} from format 2 to 5 awaits recovery`,
   });
   let recoveredIdentity: { id: string; backupName: string; sourceVersion: number; targetVersion: number } | undefined;
   await ensureCurrentState(paths, {
@@ -182,13 +182,13 @@ test('pending version-3 state migration resumes with its journal and backup iden
     },
   });
 
-  assert.deepEqual(recoveredIdentity, { id: migrationId, backupName, sourceVersion: 2, targetVersion: 4 });
+  assert.deepEqual(recoveredIdentity, { id: migrationId, backupName, sourceVersion: 2, targetVersion: 5 });
   assert.equal((await loadState(paths)).config.installationId, installationId);
   assert.equal(await readFile(join(paths.backups, backupName, 'marker'), 'utf8'), 'preserve me\n');
   await assert.rejects(stat(paths.migration), { code: 'ENOENT' });
 });
 
-test('pending version-3 lifecycle journal is backed up before normalization to version 4', async () => {
+test('pending version-3 lifecycle journal is backed up before normalization to version 5', async () => {
   const root = await mkdtemp(join(tmpdir(), 'qubicl-pending-v3-lifecycle-'));
   const paths = statePaths(root);
   await mkdir(root, { recursive: true });
@@ -204,10 +204,10 @@ test('pending version-3 lifecycle journal is backed up before normalization to v
   await writeFile(paths.journal, original, { mode: 0o600 });
 
   const normalized = await readPendingTransaction(paths);
-  assert.equal(normalized?.version, 4);
-  assert.equal(normalized?.config.version, 4);
-  assert.equal(normalized?.secrets.version, 4);
-  assert.equal(YAML.parse(await readFile(paths.journal, 'utf8')).version, 4);
+  assert.equal(normalized?.version, 5);
+  assert.equal(normalized?.config.version, 5);
+  assert.equal(normalized?.secrets.version, 5);
+  assert.equal(YAML.parse(await readFile(paths.journal, 'utf8')).version, 5);
 
   const backups = await readdir(paths.backups);
   assert.equal(backups.length, 1);
@@ -216,7 +216,7 @@ test('pending version-3 lifecycle journal is backed up before normalization to v
   const manifest = YAML.parse(await readFile(join(backup, 'manifest.yaml'), 'utf8'));
   assert.equal(manifest.reason, 'lifecycle-journal');
   assert.equal(manifest.sourceVersion, 3);
-  assert.equal(manifest.targetVersion, 4);
+  assert.equal(manifest.targetVersion, 5);
   assert.deepEqual(manifest.files['transaction.yaml'], fileDigest(original));
 });
 
@@ -287,7 +287,7 @@ test('version-2 state preserves identities and maps legacy full/custom images co
 
   await ensureCurrentState(paths);
   const migrated = await loadState(paths);
-  assert.equal(migrated.config.version, 4);
+  assert.equal(migrated.config.version, 5);
   assert.equal(migrated.config.installationId, config.installationId);
   assert.equal(migrated.config.gateway.port, 4321);
   assert.equal(migrated.config.computers[0]?.preset, 'workstation');

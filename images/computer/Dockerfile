@@ -65,6 +65,7 @@ RUN groupmod --new-name qubicl node \
 
 COPY --chown=qubicl:qubicl control.mjs /opt/qubicl/control.mjs
 COPY --chown=qubicl:qubicl web-provider.py /opt/qubicl/web-provider.py
+COPY --chown=root:root pty-helper.py /opt/qubicl/pty-helper.py
 COPY web-requirements.txt /opt/qubicl/web-requirements.txt
 COPY --chown=qubicl:qubicl skills /opt/qubicl/skills
 COPY LICENSE THIRD_PARTY_NOTICES.txt WEB_THIRD_PARTY_NOTICES.txt /usr/share/doc/qubicl/
@@ -75,7 +76,7 @@ RUN python3 -m venv /opt/qubicl/web-venv \
  && find /opt/qubicl/web-venv/lib -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \) \
       -exec cp --parents '{}' /usr/share/doc/qubicl/web-python-licenses/ \; \
  && find /opt/qubicl/web-venv -type d -name __pycache__ -prune -exec rm -rf '{}' + \
- && chmod 0755 /usr/local/bin/qubicl-entrypoint /opt/qubicl/web-provider.py \
+ && chmod 0755 /usr/local/bin/qubicl-entrypoint /opt/qubicl/web-provider.py /opt/qubicl/pty-helper.py \
  && chown -R qubicl:qubicl /opt/qubicl/web-venv
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/qubicl-entrypoint"]
@@ -95,6 +96,8 @@ RUN apt-get update \
       chromium \
       dbus-x11 \
       fonts-dejavu-core \
+      gnome-keyring \
+      libsecret-tools \
       scrot \
       socat \
       websockify \

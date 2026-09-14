@@ -12,15 +12,16 @@ import { deriveInternalServiceKey } from '@qubicl/core';
 const port = Number.parseInt(process.env.QUBICL_GATEWAY_PORT ?? '3211', 10);
 const routesPath = process.env.QUBICL_ROUTES_PATH ?? '/runtime/routes.json';
 const routeStore = new RouteStore(routesPath);
-const gateway = new Gateway(routeStore, 1_000, 10_000, await gatewayOptionsFromEnvironment());
+const reconnectGraceMs = boundedReconnectGrace(process.env.QUBICL_VIEWER_RECONNECT_GRACE_MS);
+const gateway = new Gateway(routeStore, 1_000, reconnectGraceMs, await gatewayOptionsFromEnvironment());
 const egress = createEgressServer({
   configurations: () => routeStore.list().map((route) => ({
     id: route.id,
-    policy: route.networkPolicy ?? { profile: 'developer', allowDomains: [], denyDomains: [], temporaryApprovals: [] },
+    policy: route.networkPolicy ?? { profile: 'developer', allowDomains: [], denyDomains: [], allowCidrs: [], allowTcpPorts: [], temporaryApprovals: [] },
     proxyKey: deriveInternalServiceKey(route.internalKey, 'egress-proxy'),
     brokerKey: deriveInternalServiceKey(route.internalKey, 'egress-broker'),
     brokerPath: `/runtime/brokers/${route.id}.json`,
-    auditPath: `/audit/${route.id}.jsonl`,
+    auditPath: `/audit/${route.id}.network.jsonl`,
   })),
 });
 
@@ -43,6 +44,12 @@ const shutdown = (): void => {
 };
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
+
+function boundedReconnectGrace(value: string | undefined): number {
+  const parsed = Number(value ?? '10000');
+  if (!Number.isInteger(parsed) || parsed < 5_000 || parsed > 300_000) throw new Error('QUBICL_VIEWER_RECONNECT_GRACE_MS must be 5000-300000.');
+  return parsed;
+}
 
 async function gatewayOptionsFromEnvironment(): Promise<GatewayOptions> {
   const runtimeDocumentPath = process.env.QUBICL_GATEWAY_EXPOSURE_CONFIG_PATH;

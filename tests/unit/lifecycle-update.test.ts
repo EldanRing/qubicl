@@ -211,7 +211,7 @@ test('status exact targets use the inspected Docker daemon platform instead of t
     const state = {
       paths: statePaths(root),
       config: fixture.config,
-      secrets: { version: 4, computers: {} },
+      secrets: { version: 5, computers: {} },
     } as LoadedState;
 
     const status = await lifecycleUpdateStatus(state, 'linux/arm64', fixture.catalog);
@@ -694,7 +694,7 @@ function upgradeFixture(unknownBrowser = true): {
     memory: '6g',
   });
   const config = ConfigSchema.parse({
-    version: 4,
+    version: 5,
     installationId: '00000000-0000-4000-8000-000000000000',
     gateway: { port: 3211, image: oldImage(targetGateway(catalog), 'gateway') },
     defaults: { ...defaultTarget, image: oldImage(defaultTarget.image, 'default'), cpus: 4, memory: '7g' },

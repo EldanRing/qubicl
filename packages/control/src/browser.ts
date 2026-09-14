@@ -1,11 +1,13 @@
-import { mkdir, rm } from 'node:fs/promises';
+import { lstat, mkdir, realpath, rm } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
-import { resolve } from 'node:path';
+import { basename, extname, join, relative, resolve, sep } from 'node:path';
 import { lookup } from 'node:dns/promises';
 import type {
   Browser,
   BrowserContext,
   BrowserType,
+  Dialog,
+  Download,
   ElementHandle,
   Page,
 } from 'playwright-core';
@@ -18,9 +20,11 @@ const DEFAULT_HOME = '/home/qubicl';
 const DEFAULT_ENDPOINT = 'http://127.0.0.1:9222';
 const VIEWPORT_WIDTH = 1440;
 const VIEWPORT_HEIGHT = 900;
-const MAX_TABS = 5;
+const DEFAULT_MAX_AGENT_TABS = 24;
 const MAX_INTERACTIVE_ELEMENTS = 200;
+const MAX_SCANNED_INTERACTIVE_ELEMENTS = 2_000;
 const MAX_COMPUTER_ACTIONS = 20;
+const MAX_COMPUTER_BATCH_MS = 30_000;
 const MAX_DRAG_POINTS = 100;
 const MAX_TEXT_LENGTH = 50_000;
 const MAX_RENDERED_HTML_BYTES = 1_500_000;
@@ -29,8 +33,32 @@ const RENDER_NETWORK_IDLE_TIMEOUT_MS = 3_000;
 const RENDER_SETTLE_MINIMUM_MS = 1_500;
 const RENDER_SETTLE_STABLE_MS = 750;
 const RENDER_SETTLE_MAXIMUM_MS = 5_000;
-const TAB_IDLE_MS = 24 * 60 * 60 * 1000;
-const TAB_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+const MAX_SCREENSHOT_PIXELS = 32_000_000;
+const MAX_BROWSER_QUEUE_DEPTH = 32;
+const MAX_BROWSER_DIAGNOSTICS = 200;
+const MAX_UPLOAD_FILES = 16;
+const MAX_UPLOAD_FILE_BYTES = 1024 * 1024 * 1024;
+
+export const INTERACTIVE_BROWSER_IGNORED_DEFAULT_ARGS = [
+  '--disable-background-timer-throttling',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-back-forward-cache',
+  '--disable-client-side-phishing-detection',
+  '--disable-component-extensions-with-background-pages',
+  '--disable-component-update',
+  '--disable-extensions',
+  '--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,BlockOriginHeaderModificationOnRedirect,Translate,AutoDeElevate,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion',
+  '--disable-hang-monitor',
+  '--disable-ipc-flooding-protection',
+  '--disable-popup-blocking',
+  '--disable-prompt-on-repost',
+  '--disable-renderer-backgrounding',
+  '--disable-sync',
+  '--enable-unsafe-swiftshader',
+  '--password-store=basic',
+  '--unsafely-disable-devtools-self-xss-warnings',
+  '--use-mock-keychain',
+] as const;
 
 export type BrowserMouseButton = 'left' | 'right' | 'middle';
 export type BrowserComputerAction =
@@ -47,10 +75,35 @@ interface PageState {
   title: string;
 }
 
+interface TabState extends PageState {
+  tabId: string;
+  index: number;
+  active: boolean;
+}
+
 interface BrowserImage extends PageState {
   data: string;
   mimeType: 'image/png';
   viewport: { width: number; height: number; deviceScaleFactor: 1 };
+  geometryGeneration: number;
+}
+
+interface BrowserDownloadRecord {
+  id: string;
+  status: 'in-progress' | 'completed' | 'failed' | 'cancelled';
+  suggestedFilename: string;
+  path?: string;
+  startedAt: string;
+  completedAt?: string;
+  error?: string;
+}
+
+interface BrowserDialogRecord {
+  id: string;
+  type: string;
+  message: string;
+  defaultValue: string;
+  openedAt: string;
 }
 
 export interface RenderedBrowserPage {
@@ -76,6 +129,19 @@ export interface BrowserWindowMetrics {
   devicePixelRatio: number;
 }
 
+export interface BrowserHealth {
+  state: 'not_started' | 'attached' | 'managed';
+  sandbox: 'required';
+  profile: 'persistent';
+  extensions: 'enabled';
+  passwordStore: 'secret_service';
+  publicExtraction: 'isolated_context';
+  tabPolicy: { agentOpenLimit: number; automaticEviction: false };
+  engineVersion?: string;
+  recentDiagnosticCount: number;
+  lastDiagnostic?: { at: string; type: 'console' | 'request-failed'; detail: string };
+}
+
 export interface BrowserManagerOptions {
   home?: string;
   endpoint?: string;
@@ -83,6 +149,7 @@ export interface BrowserManagerOptions {
   environment?: NodeJS.ProcessEnv;
   browserType?: BrowserType;
   headless?: boolean;
+  maxTabs?: number;
   now?: () => number;
   resolver?: WebResolver;
   publishViewerPointer?: (update: ViewerPointerUpdate) => Promise<void>;
@@ -97,12 +164,13 @@ export class BrowserManager {
   private readonly environment: NodeJS.ProcessEnv;
   private browserTypePromise: Promise<BrowserType> | undefined;
   private readonly headless: boolean;
+  private readonly maxTabs: number;
   private readonly now: () => number;
   private readonly resolver: WebResolver;
   private readonly publishViewerPointer: ((update: ViewerPointerUpdate) => Promise<void>) | undefined;
   private readonly pageLastActive = new Map<Page, number>();
+  private readonly tabIds = new Map<Page, string>();
   private readonly trackedPages = new WeakSet<Page>();
-  private readonly cleanupTimer: NodeJS.Timeout | undefined;
   private contextPromise: Promise<BrowserContext> | undefined;
   private connectedBrowser: Browser | undefined;
   private activePage: Page | undefined;
@@ -110,6 +178,14 @@ export class BrowserManager {
   private referenceGeneration = 0;
   private referenceEpoch = 0;
   private operationQueue = Promise.resolve<unknown>(undefined);
+  private queuedOperations = 0;
+  private launchState: BrowserHealth['state'] = 'not_started';
+  private geometryGeneration = 1;
+  private geometrySignature = '';
+  private readonly downloads = new Map<string, BrowserDownloadRecord>();
+  private readonly activeDownloads = new Map<string, Download>();
+  private readonly dialogs = new Map<string, { record: BrowserDialogRecord; dialog: Dialog; page: Page }>();
+  private readonly diagnostics: Array<{ at: string; type: 'console' | 'request-failed'; detail: string }> = [];
 
   constructor(private readonly enabled: boolean, options: BrowserManagerOptions = {}) {
     this.home = resolve(options.home ?? DEFAULT_HOME);
@@ -120,22 +196,116 @@ export class BrowserManager {
     this.environment = options.environment ?? process.env;
     if (options.browserType) this.browserTypePromise = Promise.resolve(options.browserType);
     this.headless = options.headless ?? false;
+    this.maxTabs = options.maxTabs ?? DEFAULT_MAX_AGENT_TABS;
+    if (!Number.isInteger(this.maxTabs) || this.maxTabs < 1 || this.maxTabs > 128) {
+      throw new Error('maxTabs must be an integer from 1 to 128.');
+    }
     this.now = options.now ?? Date.now;
     this.resolver = options.resolver ?? lookup as WebResolver;
     this.publishViewerPointer = options.publishViewerPointer;
-    if (enabled) {
-      this.cleanupTimer = setInterval(() => {
-        if (!this.contextPromise) return;
-        void this.enqueue(async () => this.closeIdleTabs(await this.getContext())).catch((error) => {
-          console.error(`Qubicl browser tab cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
-        });
-      }, TAB_CLEANUP_INTERVAL_MS);
-      this.cleanupTimer.unref();
-    }
   }
 
   count(): number {
     return this.contextPromise ? 1 : 0;
+  }
+
+  async health(): Promise<BrowserHealth> {
+    const context = await this.contextPromise?.catch(() => undefined);
+    const lastDiagnostic = this.diagnostics.at(-1);
+    const engineVersion = context?.browser()?.version?.();
+    return {
+      state: this.launchState,
+      sandbox: 'required',
+      profile: 'persistent',
+      extensions: 'enabled',
+      passwordStore: 'secret_service',
+      publicExtraction: 'isolated_context',
+      tabPolicy: { agentOpenLimit: this.maxTabs, automaticEviction: false },
+      ...(engineVersion ? { engineVersion } : {}),
+      recentDiagnosticCount: this.diagnostics.length,
+      ...(lastDiagnostic ? { lastDiagnostic: { ...lastDiagnostic } } : {}),
+    };
+  }
+
+  listDownloads(): Promise<{ downloads: BrowserDownloadRecord[]; directory: string }> {
+    return this.enqueue(async () => ({ downloads: [...this.downloads.values()].toReversed(), directory: this.downloadDirectory }));
+  }
+
+  cancelDownload(id: string): Promise<{ id: string; status: BrowserDownloadRecord['status'] }> {
+    return this.enqueue(async () => {
+      const record = this.downloads.get(id);
+      if (!record) throw new QubiclError('browser_download_not_found', `Browser download ${id} was not found.`, 404);
+      const download = this.activeDownloads.get(id);
+      if (download) await download.cancel().catch(() => undefined);
+      if (record.status === 'in-progress') {
+        record.status = 'cancelled';
+        record.completedAt = new Date().toISOString();
+      }
+      return { id, status: record.status };
+    });
+  }
+
+  upload(ref: string, paths: string[]): Promise<PageState & { uploaded: string[] }> {
+    return this.enqueue(async () => {
+      if (paths.length < 1 || paths.length > MAX_UPLOAD_FILES) throw new QubiclError('browser_upload_invalid', `Choose 1 through ${MAX_UPLOAD_FILES} files.`, 400);
+      const selected: string[] = [];
+      for (const value of paths) {
+        const named = resolve(this.home, value);
+        const canonical = await realpath(named).catch(() => undefined);
+        if (!canonical || !withinHome(this.home, canonical)) throw new QubiclError('browser_upload_outside_home', 'Browser uploads must be regular files inside the durable computer home.', 403);
+        const info = await lstat(canonical);
+        if (!info.isFile() || info.size > MAX_UPLOAD_FILE_BYTES) throw new QubiclError('browser_upload_invalid', `Upload files must be regular files no larger than ${MAX_UPLOAD_FILE_BYTES} bytes.`, 400);
+        selected.push(canonical);
+      }
+      const page = await this.getPage();
+      const locator = await this.referencedElement(ref);
+      await locator.setInputFiles(selected);
+      return { ...await pageState(page), uploaded: selected.map((path) => relative(this.home, path)) };
+    });
+  }
+
+  listDialogs(): Promise<{ dialogs: BrowserDialogRecord[] }> {
+    return this.enqueue(async () => ({ dialogs: [...this.dialogs.values()].map(({ record }) => ({ ...record })) }));
+  }
+
+  respondDialog(id: string, action: 'accept' | 'dismiss', promptText?: string): Promise<{ id: string; action: 'accepted' | 'dismissed' }> {
+    return this.enqueue(async () => {
+      const pending = this.dialogs.get(id);
+      if (!pending) throw new QubiclError('browser_dialog_not_found', `Browser dialog ${id} is no longer pending.`, 404);
+      this.dialogs.delete(id);
+      if (action === 'accept') await pending.dialog.accept(promptText);
+      else await pending.dialog.dismiss();
+      return { id, action: action === 'accept' ? 'accepted' : 'dismissed' };
+    });
+  }
+
+  permissions(origin: string, permissions: string[], clear: boolean): Promise<{ origin: string; permissions: string[]; cleared: boolean }> {
+    return this.enqueue(async () => {
+      const url = new URL(origin);
+      if (!['http:', 'https:'].includes(url.protocol) || url.origin !== origin || url.username || url.password) {
+        throw new QubiclError('browser_permission_invalid', 'Browser permission changes require an exact HTTP or HTTPS origin.', 400);
+      }
+      const allowed = new Set(['geolocation', 'notifications', 'clipboard-read', 'clipboard-write', 'camera', 'microphone']);
+      if (permissions.some((permission) => !allowed.has(permission))) throw new QubiclError('browser_permission_invalid', 'Select a supported browser permission.', 400);
+      const context = await this.getContext();
+      if (clear) await context.clearPermissions();
+      if (permissions.length) await context.grantPermissions(permissions, { origin });
+      return { origin, permissions, cleared: clear };
+    });
+  }
+
+  browserDiagnostics(): Promise<{ events: Array<{ at: string; type: 'console' | 'request-failed'; detail: string }> }> {
+    return this.enqueue(async () => ({ events: this.diagnostics.slice(-MAX_BROWSER_DIAGNOSTICS) }));
+  }
+
+  setViewport(width: number, height: number): Promise<PageState & { viewport: { width: number; height: number; deviceScaleFactor: 1 }; geometryGeneration: number }> {
+    return this.enqueue(async () => {
+      const page = await this.getPage();
+      await page.setViewportSize({ width, height });
+      this.geometrySignature = '';
+      const geometryGeneration = await this.updateGeometry(page);
+      return { ...await pageState(page), viewport: { width, height, deviceScaleFactor: 1 }, geometryGeneration };
+    });
   }
 
   navigate(url: string): Promise<PageState> {
@@ -151,9 +321,16 @@ export class BrowserManager {
     return this.enqueue(async () => {
       if (!this.enabled) throw new QubiclError('capability_unsupported', 'Browser-rendered extraction requires a browser-capable computer preset.', 400);
       const initialUrl = await validatePublicWebUrl(url, this.resolver);
-      const context = await this.getContext();
+      const interactiveContext = await this.getContext();
+      const browser = interactiveContext.browser();
+      if (!browser) throw new QubiclError('browser_operation_failed', 'The browser cannot create an isolated extraction session.', 502);
+      const context = await browser.newContext({
+        viewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
+        deviceScaleFactor: 1,
+        acceptDownloads: false,
+        locale: 'en-US',
+      });
       const page = await context.newPage();
-      await this.preparePage(context, page);
       try {
         await page.route('**/*', async (route) => {
           const request = route.request();
@@ -189,14 +366,17 @@ export class BrowserManager {
           sourceTruncated: rendered.sourceTruncated || bounded.truncated,
         };
       } finally {
-        await page.close().catch(() => undefined);
+        await context.close().catch(() => undefined);
       }
     });
   }
 
-  snapshot(): Promise<Record<string, unknown>> {
+  snapshot(cursor = 0, limit = MAX_INTERACTIVE_ELEMENTS, frameIndex = 0): Promise<Record<string, unknown>> {
     return this.enqueue(async () => {
       const page = await this.getPage();
+      const frames = browserFrames(page);
+      const frame = frames[frameIndex];
+      if (!frame) throw new QubiclError('browser_frame_not_found', `Browser frame index ${frameIndex} was not found. Refresh browser_snapshot and retry.`, 404);
       const selector = [
         'a[href]',
         'button',
@@ -214,8 +394,9 @@ export class BrowserManager {
       ].join(',');
       this.clearReferences();
       const epoch = this.referenceEpoch;
-      const candidates = page.locator(selector);
-      const count = Math.min(await candidates.count(), MAX_INTERACTIVE_ELEMENTS);
+      const candidates = frame.locator(selector);
+      const totalCandidates = await candidates.count();
+      const count = Math.min(Math.max(0, totalCandidates - cursor), MAX_SCANNED_INTERACTIVE_ELEMENTS);
       const generation = ++this.referenceGeneration;
       const handles = new Set<ElementHandle<SVGElement | HTMLElement>>();
       try {
@@ -223,26 +404,38 @@ export class BrowserManager {
         // Bound concurrent protocol requests while preserving DOM candidate order.
         for (let start = 0; start < count; start += 16) {
           const batch = await Promise.all(Array.from({ length: Math.min(16, count - start) }, async (_, offset) => {
-            const index = start + offset;
+            const index = cursor + start + offset;
             // A model ref names this exact node, not a selector that can resolve to
             // a different node after the page changes. Query without waiting for a
             // vanished positional candidate to reappear.
-            const locator = await page.$(`${selector} >> nth=${index}`).catch(() => null);
+            const locator = await frame.$(`${selector} >> nth=${index}`).catch(() => null);
             if (!locator) return undefined;
             handles.add(locator);
             if (!await locator.isVisible().catch(() => false)) return undefined;
             const details = await locator.evaluate((element) => {
-              const text = (element.textContent ?? '').trim().replace(/\s+/g, ' ');
+              const clean = (value: string | null | undefined): string => (value ?? '').trim().replace(/\s+/g, ' ');
+              const text = clean(element.textContent);
               const input = element as HTMLInputElement;
+              const labelledBy = clean(element.getAttribute('aria-labelledby'))
+                .split(' ')
+                .filter(Boolean)
+                .map((id) => clean(element.ownerDocument?.getElementById(id)?.textContent))
+                .filter(Boolean)
+                .join(' ');
+              const labels = [...(input.labels ?? [])].map((label) => clean(label.textContent)).filter(Boolean).join(' ');
+              const name = [
+                clean(element.getAttribute('aria-label')),
+                labelledBy,
+                labels,
+                clean(element.getAttribute('title')),
+                clean(element.getAttribute('placeholder')),
+                text,
+                clean(input.value),
+              ].find(Boolean) ?? '';
               return {
                 tag: element.tagName.toLowerCase(),
                 role: element.getAttribute('role') ?? '',
-                name: element.getAttribute('aria-label')
-                  ?? element.getAttribute('title')
-                  ?? element.getAttribute('placeholder')
-                  ?? text
-                  ?? input.value
-                  ?? '',
+                name,
                 type: element.getAttribute('type') ?? '',
                 disabled: Boolean(input.disabled) || element.getAttribute('aria-disabled') === 'true',
               };
@@ -251,22 +444,34 @@ export class BrowserManager {
           }));
           for (const candidate of batch) if (candidate) candidatesWithDetails.push(candidate);
         }
-        const aria = await page.locator('body').ariaSnapshot({ timeout: 5000 }).catch(() => '');
+        const aria = await frame.locator('body').ariaSnapshot({ timeout: 5000 }).catch(() => '');
         const scroll = await page.evaluate(() => ({ x: Math.round(window.scrollX), y: Math.round(window.scrollY) }))
           .catch(() => ({ x: 0, y: 0 }));
         const state = await pageState(page);
+        const viewportSize = browserViewportSize(page);
         const boundedSnapshot = truncateUtf8Text(aria, Math.floor(MODEL_TEXT_BUDGET_BYTES / 2));
         const base = {
           url: truncateUtf8Text(state.url, 2048).text,
           title: truncateUtf8Text(state.title, 512).text,
-          viewport: viewport(),
+          viewport: { ...viewportSize, deviceScaleFactor: 1 },
+          geometryGeneration: await this.updateGeometry(page),
           scroll,
           generation,
+          frame: { index: frameIndex, url: truncateUtf8Text(frame.url(), 2048).text },
+          frames: frames.slice(0, 64).map((item, index) => ({ index, url: truncateUtf8Text(item.url(), 2048).text, main: item === page.mainFrame() })),
           snapshot: boundedSnapshot.text,
+          scan: {
+            totalCandidates,
+            cursor,
+            scannedCandidates: count,
+            resultLimit: limit,
+            scanLimitReached: totalCandidates > cursor + count,
+            nextCursor: totalCandidates > cursor + count ? cursor + count : null,
+          },
         };
         const references = new Map<string, ElementHandle<SVGElement | HTMLElement>>();
         const refs: Record<string, unknown>[] = [];
-        for (const candidate of candidatesWithDetails) {
+        for (const candidate of candidatesWithDetails.slice(0, limit)) {
           const ref = `g${generation}e${refs.length + 1}`;
           const record = {
             ref,
@@ -294,7 +499,7 @@ export class BrowserManager {
           refs,
           truncated: {
             snapshot: boundedSnapshot.truncated,
-            refs: refs.length < candidatesWithDetails.length,
+            refs: refs.length < candidatesWithDetails.length || totalCandidates > cursor + count,
           },
         };
       } finally {
@@ -306,8 +511,9 @@ export class BrowserManager {
   screenshot(fullPage: boolean): Promise<BrowserImage & { fullPage: boolean }> {
     return this.enqueue(async () => {
       const page = await this.getPage();
+      await assertScreenshotBudget(page, fullPage);
       const image = await page.screenshot({ type: 'png', fullPage, animations: 'disabled', timeout: 30_000 });
-      return { ...await pageState(page), ...imageResult(image), fullPage };
+      return { ...await pageState(page), ...await this.imageResult(page, image), fullPage };
     });
   }
 
@@ -347,11 +553,17 @@ export class BrowserManager {
   type(ref: string, text: string, submit: boolean, clear: boolean): Promise<PageState> {
     return this.act(async (page) => {
       const locator = await this.referencedElement(ref);
-      if (clear) await locator.fill('').catch(() => undefined);
-      await locator.fill(text).catch(async () => {
+      if (clear) {
+        await locator.fill(text).catch(async () => {
+          await locator.click();
+          await page.keyboard.press('ControlOrMeta+A');
+          await page.keyboard.type(text);
+        });
+      } else {
         await locator.click();
+        await locator.press('End').catch(() => undefined);
         await page.keyboard.type(text);
-      });
+      }
       if (submit) await locator.press('Enter');
       return page;
     });
@@ -382,9 +594,18 @@ export class BrowserManager {
 
   history(action: 'back' | 'forward' | 'reload'): Promise<PageState> {
     return this.act(async (page) => {
-      if (action === 'back') await page.goBack({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null);
-      if (action === 'forward') await page.goForward({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null);
-      if (action === 'reload') await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
+      if (action === 'back') {
+        const response = await page.goBack({ waitUntil: 'domcontentloaded', timeout: 30_000 });
+        if (!response) throw new QubiclError('browser_no_history', 'This tab has no earlier history entry.', 409);
+      }
+      if (action === 'forward') {
+        const response = await page.goForward({ waitUntil: 'domcontentloaded', timeout: 30_000 });
+        if (!response) throw new QubiclError('browser_no_history', 'This tab has no later history entry.', 409);
+      }
+      if (action === 'reload') {
+        const response = await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
+        if (!response) throw new QubiclError('browser_navigation_failed', 'The reload completed without a main-document response.', 502);
+      }
       this.clearReferences();
       return page;
     });
@@ -397,14 +618,17 @@ export class BrowserManager {
     }, 0);
   }
 
-  tabs(): Promise<{ tabs: Array<PageState & { index: number; active: boolean }> }> {
-    return this.enqueue(async () => ({ tabs: await this.listTabs() }));
+  tabs(): Promise<{ tabs: TabState[]; limit: number; overLimit: boolean }> {
+    return this.enqueue(async () => {
+      const tabs = await this.listTabs();
+      return { tabs, limit: this.maxTabs, overLimit: tabs.length > this.maxTabs };
+    });
   }
 
-  useTab(index: number): Promise<PageState> {
+  useTab(target: number | string): Promise<PageState> {
     return this.enqueue(async () => {
       const pages = (await this.getContext()).pages();
-      const page = requirePageIndex(pages, index);
+      const page = this.requireTab(pages, target);
       await page.bringToFront();
       this.setActivePage(page);
       return pageState(page);
@@ -414,6 +638,9 @@ export class BrowserManager {
   newTab(url?: string): Promise<PageState> {
     return this.enqueue(async () => {
       const context = await this.getContext();
+      if (context.pages().length >= this.maxTabs) {
+        throw new QubiclError('browser_tab_limit', `The browser already has ${context.pages().length} tabs, which reaches this computer's configured limit of ${this.maxTabs}. Close a tab or raise browser.maxTabs before an agent opens another.`, 429);
+      }
       const page = await context.newPage();
       await this.preparePage(context, page);
       this.setActivePage(page);
@@ -423,12 +650,12 @@ export class BrowserManager {
     });
   }
 
-  closeTab(index: number): Promise<{ tabs: Array<PageState & { index: number; active: boolean }> }> {
+  closeTab(target: number | string): Promise<{ tabs: TabState[] }> {
     return this.enqueue(async () => {
       const context = await this.getContext();
       const pages = context.pages();
-      const resolvedIndex = index === -1 ? Math.max(0, pages.indexOf(this.activePage ?? pages.at(-1)!)) : index;
-      const page = requirePageIndex(pages, resolvedIndex);
+      const resolvedTarget = target === -1 ? Math.max(0, pages.indexOf(this.activePage ?? pages.at(-1)!)) : target;
+      const page = this.requireTab(pages, resolvedTarget);
       const wasActive = page === this.activePage;
       await page.close();
       this.pageLastActive.delete(page);
@@ -453,12 +680,12 @@ export class BrowserManager {
     });
   }
 
-  clickAt(x: number, y: number, button: BrowserMouseButton, clickCount = 1): Promise<BrowserImage & { actionCount: 1 }> {
-    return this.computer([{ type: clickCount === 2 ? 'double_click' : 'click', x, y, button }]) as Promise<BrowserImage & { actionCount: 1 }>;
+  clickAt(x: number, y: number, button: BrowserMouseButton, clickCount = 1, geometryGeneration?: number): Promise<BrowserImage & { actionCount: 1 }> {
+    return this.computerWithViewerPointers([{ type: clickCount === 2 ? 'double_click' : 'click', x, y, button }], undefined, geometryGeneration).then(({ result }) => result as BrowserImage & { actionCount: 1 });
   }
 
-  hoverAt(x: number, y: number): Promise<BrowserImage & { actionCount: 1 }> {
-    return this.computer([{ type: 'move', x, y }]) as Promise<BrowserImage & { actionCount: 1 }>;
+  hoverAt(x: number, y: number, geometryGeneration?: number): Promise<BrowserImage & { actionCount: 1 }> {
+    return this.computerWithViewerPointers([{ type: 'move', x, y }], undefined, geometryGeneration).then(({ result }) => result as BrowserImage & { actionCount: 1 });
   }
 
   drag(startX: number, startY: number, endX: number, endY: number): Promise<BrowserImage & { actionCount: 1 }> {
@@ -473,9 +700,10 @@ export class BrowserManager {
     return this.computer([{ type: 'type', text }]) as Promise<BrowserImage & { actionCount: 1 }>;
   }
 
-  inspectAt(x: number, y: number): Promise<Record<string, unknown>> {
+  inspectAt(x: number, y: number, geometryGeneration?: number): Promise<Record<string, unknown>> {
     return this.enqueue(async () => {
       const page = await this.getPage();
+      await this.assertGeometry(page, geometryGeneration);
       const elements = await page.evaluate(({ pointX, pointY }) => document.elementsFromPoint(pointX, pointY).slice(0, 12).map((element) => {
         const rect = element.getBoundingClientRect();
         const style = window.getComputedStyle(element);
@@ -490,7 +718,8 @@ export class BrowserManager {
           box: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
         };
       }), { pointX: x, pointY: y });
-      return { ...await pageState(page), viewport: viewport(), point: { x, y }, elements };
+      const size = browserViewportSize(page);
+      return { ...await pageState(page), viewport: { ...size, deviceScaleFactor: 1 }, geometryGeneration: await this.updateGeometry(page), point: { x, y }, elements };
     });
   }
 
@@ -498,12 +727,18 @@ export class BrowserManager {
     return (await this.computerWithViewerPointers(actions)).result;
   }
 
-  computerWithViewerPointers(actions: BrowserComputerAction[], generation?: number): Promise<BrowserViewerResult<BrowserImage & { actionCount: number }>> {
+  computerWithViewerPointers(actions: BrowserComputerAction[], generation?: number, geometryGeneration?: number): Promise<BrowserViewerResult<BrowserImage & { actionCount: number }>> {
     return this.enqueue(async () => {
       if (actions.length < 1 || actions.length > MAX_COMPUTER_ACTIONS) {
         throw new QubiclError('browser_actions_invalid', `Browser computer actions must contain 1 through ${MAX_COMPUTER_ACTIONS} entries.`, 400);
       }
+      const requestedWaitMs = actions.reduce((total, action) => total + (action.type === 'wait' ? action.milliseconds ?? 2_000 : 0), 0);
+      const estimatedDurationMs = requestedWaitMs + actions.length * 400;
+      if (estimatedDurationMs > MAX_COMPUTER_BATCH_MS) {
+        throw new QubiclError('browser_batch_too_long', `Browser action batches are limited to ${MAX_COMPUTER_BATCH_MS} milliseconds. Split this batch into smaller calls.`, 400);
+      }
       let page = await this.getPage();
+      await this.assertGeometry(page, geometryGeneration);
       const pointerActions: ViewerPointerAction[] = [];
       for (const action of actions) {
         const pointer = await browserViewerPointerForAction(page, action);
@@ -524,19 +759,19 @@ export class BrowserManager {
       page = await this.getPage();
       const image = await page.screenshot({ type: 'png', fullPage: false, animations: 'disabled', timeout: 30_000 });
       return {
-        result: { ...await pageState(page), ...imageResult(image), actionCount: actions.length },
+        result: { ...await pageState(page), ...await this.imageResult(page, image), actionCount: actions.length },
         pointerActions,
       };
     });
   }
 
   async shutdown(): Promise<void> {
-    if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     const context = this.contextPromise ? await this.contextPromise.catch(() => undefined) : undefined;
     this.contextPromise = undefined;
     this.clearReferences();
     this.activePage = undefined;
     this.pageLastActive.clear();
+    this.tabIds.clear();
     if (context) await context.close().catch(() => undefined);
     if (this.connectedBrowser) await this.connectedBrowser.close().catch(() => undefined);
     this.connectedBrowser = undefined;
@@ -588,6 +823,10 @@ export class BrowserManager {
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.queuedOperations >= MAX_BROWSER_QUEUE_DEPTH) {
+      return Promise.reject(new QubiclError('browser_queue_full', `The browser already has ${MAX_BROWSER_QUEUE_DEPTH} queued operations. Wait for current work or take control to cancel it.`, 429));
+    }
+    this.queuedOperations += 1;
     const execute = async (): Promise<T> => {
       if (!this.enabled) throw new QubiclError('browser_unsupported', 'This computer does not provide the browser capability.', 404);
       try {
@@ -597,9 +836,36 @@ export class BrowserManager {
         throw new QubiclError('browser_operation_failed', error instanceof Error ? error.message : String(error), 502);
       }
     };
-    const next = this.operationQueue.then(execute, execute);
+    const next = this.operationQueue.then(execute, execute).finally(() => { this.queuedOperations -= 1; });
     this.operationQueue = next.catch(() => undefined);
     return next;
+  }
+
+  private async updateGeometry(page: Page): Promise<number> {
+    const size = browserViewportSize(page);
+    const ratio = await page.evaluate(() => window.devicePixelRatio).catch(() => 1);
+    const signature = `${size.width}x${size.height}@${ratio}`;
+    if (this.geometrySignature && this.geometrySignature !== signature) this.geometryGeneration += 1;
+    this.geometrySignature = signature;
+    return this.geometryGeneration;
+  }
+
+  private async assertGeometry(page: Page, expected: number | undefined): Promise<void> {
+    const current = await this.updateGeometry(page);
+    if (expected !== undefined && expected !== current) {
+      throw new QubiclError('stale_browser_geometry', `Browser geometry generation ${expected} is stale; capture a new browser screenshot (current generation ${current}).`, 409);
+    }
+  }
+
+  private async imageResult(page: Page, image: Buffer): Promise<Pick<BrowserImage, 'data' | 'mimeType' | 'viewport' | 'geometryGeneration'>> {
+    if (image.length > 20_000_000) throw new QubiclError('browser_image_too_large', 'Browser screenshot exceeds the 20 MB result limit.', 413);
+    const size = browserViewportSize(page);
+    return {
+      data: image.toString('base64'),
+      mimeType: 'image/png',
+      viewport: { ...size, deviceScaleFactor: 1 },
+      geometryGeneration: await this.updateGeometry(page),
+    };
   }
 
   private async getContext(): Promise<BrowserContext> {
@@ -633,7 +899,7 @@ export class BrowserManager {
         acceptDownloads: true,
         downloadsPath: this.downloadDirectory,
         chromiumSandbox: true,
-        ignoreDefaultArgs: ['--disable-dev-shm-usage'],
+        ignoreDefaultArgs: [...INTERACTIVE_BROWSER_IGNORED_DEFAULT_ARGS, '--disable-dev-shm-usage'],
         locale: 'en-US',
         env: desktopEnvironment(this.home, this.environment),
         ...(browserProxy(this.environment.QUBICL_PROXY_URL) ? { proxy: browserProxy(this.environment.QUBICL_PROXY_URL)! } : {}),
@@ -642,8 +908,10 @@ export class BrowserManager {
           '--no-default-browser-check',
           '--window-position=0,0',
           `--window-size=${VIEWPORT_WIDTH},${VIEWPORT_HEIGHT}`,
+          '--password-store=gnome-libsecret',
         ],
       });
+      this.launchState = 'managed';
     }
     context.setDefaultTimeout(15_000);
     context.on('close', () => this.clearContext(context));
@@ -674,6 +942,7 @@ export class BrowserManager {
       return undefined;
     }
     this.connectedBrowser = browser;
+    this.launchState = 'attached';
     browser.on('disconnected', () => {
       if (this.connectedBrowser === browser) this.connectedBrowser = undefined;
     });
@@ -683,18 +952,78 @@ export class BrowserManager {
   private async preparePage(context: BrowserContext, page: Page): Promise<void> {
     if (this.trackedPages.has(page)) return;
     this.trackedPages.add(page);
+    this.tabId(page);
     this.touchPage(page);
     await page.setViewportSize({ width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT }).catch(() => undefined);
+    page.on('download', (download) => { void this.retainDownload(download); });
+    page.on('dialog', (dialog) => {
+      if (this.dialogs.size >= 32) {
+        void dialog.dismiss().catch(() => undefined);
+        return;
+      }
+      const id = randomBytes(12).toString('base64url');
+      this.dialogs.set(id, {
+        record: {
+          id,
+          type: dialog.type(),
+          message: dialog.message().slice(0, 2_000),
+          defaultValue: dialog.defaultValue().slice(0, 2_000),
+          openedAt: new Date().toISOString(),
+        },
+        dialog,
+        page,
+      });
+    });
+    page.on('console', (message) => this.addDiagnostic('console', `${message.type()}: ${message.text()}`));
+    page.on('requestfailed', (request) => this.addDiagnostic('request-failed', `${request.method()} ${diagnosticUrl(request.url())}: ${request.failure()?.errorText ?? 'failed'}`));
     page.on('framenavigated', (frame) => {
       if (frame === page.mainFrame() && page === this.activePage) this.clearReferences();
     });
     page.once('close', () => {
       this.pageLastActive.delete(page);
+      this.tabIds.delete(page);
+      for (const [id, pending] of this.dialogs) if (pending.page === page) this.dialogs.delete(id);
       if (this.activePage !== page) return;
       this.activePage = undefined;
       const replacement = context.pages().findLast((candidate) => !candidate.isClosed());
       if (replacement) this.setActivePage(replacement);
     });
+  }
+
+  private addDiagnostic(type: 'console' | 'request-failed', detail: string): void {
+    this.diagnostics.push({ at: new Date().toISOString(), type, detail: detail.replace(/[\r\n]+/gu, ' ').slice(0, 1_000) });
+    if (this.diagnostics.length > MAX_BROWSER_DIAGNOSTICS) this.diagnostics.splice(0, this.diagnostics.length - MAX_BROWSER_DIAGNOSTICS);
+  }
+
+  private async retainDownload(download: Download): Promise<void> {
+    const id = randomBytes(12).toString('base64url');
+    const suggestedFilename = safeDownloadFilename(download.suggestedFilename());
+    const record: BrowserDownloadRecord = { id, status: 'in-progress', suggestedFilename, startedAt: new Date().toISOString() };
+    this.downloads.set(id, record);
+    this.activeDownloads.set(id, download);
+    while (this.downloads.size > 200) this.downloads.delete(this.downloads.keys().next().value!);
+    try {
+      await mkdir(this.downloadDirectory, { recursive: true, mode: 0o700 });
+      const path = await availableDownloadPath(this.downloadDirectory, suggestedFilename);
+      await download.saveAs(path);
+      const failure = await download.failure();
+      if (record.status === 'cancelled') return;
+      if (failure) {
+        record.status = 'failed';
+        record.error = failure.slice(0, 500);
+      } else {
+        record.status = 'completed';
+        record.path = path;
+      }
+    } catch (error) {
+      if (record.status !== 'cancelled') {
+        record.status = 'failed';
+        record.error = (error instanceof Error ? error.message : String(error)).slice(0, 500);
+      }
+    } finally {
+      record.completedAt ??= new Date().toISOString();
+      this.activeDownloads.delete(id);
+    }
   }
 
   private async getPage(): Promise<Page> {
@@ -723,37 +1052,38 @@ export class BrowserManager {
   }
 
   private async enforceTabLimit(context: BrowserContext, preferredPage = this.activePage): Promise<void> {
-    let pages = context.pages().filter((page) => !page.isClosed());
-    while (pages.length > MAX_TABS) {
-      const candidates = pages
-        .filter((page) => page !== preferredPage && page !== this.activePage)
-        .sort((left, right) => (this.pageLastActive.get(left) ?? 0) - (this.pageLastActive.get(right) ?? 0));
-      const victim = candidates[0] ?? pages.find((page) => page !== preferredPage) ?? pages[0]!;
-      await victim.close().catch(() => undefined);
-      this.pageLastActive.delete(victim);
-      pages = context.pages().filter((page) => !page.isClosed());
-    }
+    const pages = context.pages().filter((page) => !page.isClosed());
     if (!this.activePage || this.activePage.isClosed()) {
       const replacement = preferredPage && !preferredPage.isClosed() ? preferredPage : pages.at(-1);
       if (replacement) this.setActivePage(replacement);
     }
   }
 
-  private async closeIdleTabs(context: BrowserContext): Promise<void> {
-    const now = this.now();
-    for (const page of context.pages()) {
-      if (page === this.activePage) continue;
-      if (now - (this.pageLastActive.get(page) ?? now) < TAB_IDLE_MS) continue;
-      await page.close().catch(() => undefined);
-      this.pageLastActive.delete(page);
-    }
-    await this.enforceTabLimit(context, this.activePage);
-  }
-
-  private async listTabs(): Promise<Array<PageState & { index: number; active: boolean }>> {
+  private async listTabs(): Promise<TabState[]> {
     const context = await this.getContext();
     await this.enforceTabLimit(context, this.activePage);
-    return Promise.all(context.pages().map(async (page, index) => ({ index, active: page === this.activePage, ...await pageState(page) })));
+    return Promise.all(context.pages().map(async (page, index) => ({
+      tabId: this.tabId(page),
+      index,
+      active: page === this.activePage,
+      ...await pageState(page),
+    })));
+  }
+
+  private tabId(page: Page): string {
+    let id = this.tabIds.get(page);
+    if (!id) {
+      id = randomBytes(12).toString('base64url');
+      this.tabIds.set(page, id);
+    }
+    return id;
+  }
+
+  private requireTab(pages: Page[], target: number | string): Page {
+    if (typeof target === 'number') return requirePageIndex(pages, target);
+    const page = pages.find((candidate) => this.tabId(candidate) === target);
+    if (!page) throw new QubiclError('browser_tab_not_found', `Browser tab ${target} was not found. Refresh browser_tabs and retry.`, 404);
+    return page;
   }
 
   private clearContext(context: BrowserContext): void {
@@ -763,7 +1093,36 @@ export class BrowserManager {
     this.clearReferences();
     this.activePage = undefined;
     this.pageLastActive.clear();
+    this.tabIds.clear();
   }
+}
+
+async function assertScreenshotBudget(page: Page, fullPage: boolean): Promise<void> {
+  if (!fullPage) return;
+  const dimensions = await page.evaluate((_marker) => ({
+    width: Math.max(document.documentElement?.scrollWidth ?? 0, document.body?.scrollWidth ?? 0, window.innerWidth),
+    height: Math.max(document.documentElement?.scrollHeight ?? 0, document.body?.scrollHeight ?? 0, window.innerHeight),
+  }), { qubiclScreenshotDimensions: true }).catch(() => ({ width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT }));
+  const width = Number(dimensions.width);
+  const height = Number(dimensions.height);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1 || width * height > MAX_SCREENSHOT_PIXELS) {
+    throw new QubiclError(
+      'browser_screenshot_too_large',
+      `Full-page capture is limited to ${MAX_SCREENSHOT_PIXELS} CSS pixels. Capture the visible viewport or scroll and capture sections instead.`,
+      413,
+    );
+  }
+}
+
+function browserFrames(page: Page): ReturnType<Page['frames']> {
+  const frames = (page as Page & { frames?: Page['frames'] }).frames;
+  return typeof frames === 'function' ? frames.call(page) : [page.mainFrame()];
+}
+
+function browserViewportSize(page: Page): { width: number; height: number } {
+  const viewportSize = (page as Page & { viewportSize?: Page['viewportSize'] }).viewportSize;
+  return (typeof viewportSize === 'function' ? viewportSize.call(page) : undefined)
+    ?? { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT };
 }
 
 async function waitForRenderedContent(page: Page): Promise<void> {
@@ -1061,21 +1420,44 @@ async function pageState(page: Page): Promise<PageState> {
   return { url: page.url().slice(0, 8192), title: (await page.title().catch(() => '')).slice(0, 512) };
 }
 
-function imageResult(image: Buffer): Pick<BrowserImage, 'data' | 'mimeType' | 'viewport'> {
-  if (image.length > 20_000_000) throw new QubiclError('browser_image_too_large', 'Browser screenshot exceeds the 20 MB result limit.', 413);
-  return { data: image.toString('base64'), mimeType: 'image/png', viewport: viewport() };
-}
-
-function viewport(): BrowserImage['viewport'] {
-  return { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT, deviceScaleFactor: 1 };
-}
-
 function truncateUtf8Text(value: string, maximumBytes: number): { text: string; truncated: boolean } {
   const data = Buffer.from(value, 'utf8');
   if (data.length <= maximumBytes) return { text: value, truncated: false };
   let end = maximumBytes;
   while (end > 0 && (data[end]! & 0xc0) === 0x80) end -= 1;
   return { text: data.subarray(0, end).toString('utf8'), truncated: true };
+}
+
+function withinHome(home: string, path: string): boolean {
+  const value = relative(home, path);
+  return value === '' || (value !== '..' && !value.startsWith(`..${sep}`));
+}
+
+function safeDownloadFilename(value: string): string {
+  const name = [...basename(value)].map((character) => {
+    const codePoint = character.codePointAt(0)!;
+    return codePoint < 32 || codePoint === 127 || character === '/' || character === '\\' ? '_' : character;
+  }).join('').trim().slice(0, 180);
+  return name && name !== '.' && name !== '..' ? name : 'download';
+}
+
+async function availableDownloadPath(directory: string, filename: string): Promise<string> {
+  const extension = extname(filename);
+  const stem = filename.slice(0, filename.length - extension.length) || 'download';
+  for (let index = 0; index < 10_000; index += 1) {
+    const candidate = join(directory, index === 0 ? filename : `${stem} (${index})${extension}`);
+    try { await lstat(candidate); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return candidate;
+      throw error;
+    }
+  }
+  throw new QubiclError('browser_download_collision', 'Could not choose an unused durable download filename.', 409);
+}
+
+function diagnosticUrl(value: string): string {
+  try { const url = new URL(value); return `${url.origin}${url.pathname}`.slice(0, 1_000); }
+  catch { return 'invalid-url'; }
 }
 
 async function removeProfileLocks(profileDirectory: string): Promise<void> {

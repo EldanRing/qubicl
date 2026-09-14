@@ -16,7 +16,7 @@ npm run performance -- --runtime --output "$HOME/qubicl-performance.json"
 
 Runtime mode starts the four exact local preset images with their recommended CPU/memory/PID/shared-memory limits and `--pull never`. It measures health startup, runs the representative shell/browser/desktop/development/office workload, waits one shared 60-second idle interval, samples CPU/memory/PIDs once, then removes its containers and temporary homes. It does not publish or contact a benchmark service.
 
-Current guardrails:
+Current guardrails, enforced by [the performance checker](../scripts/performance.mjs):
 
 The npm package deliberately includes the six verified Qubicl core-skill baselines,
 runtime build assets, and legal/SBOM material needed for source-local operation;
@@ -27,7 +27,7 @@ bundle. Container layers are measured separately below.
 | --- | ---: |
 | npm package | 7 MB packed |
 | CLI help p95 | 125 ms |
-| CLI help peak RSS | 96 MiB |
+| CLI help peak RSS | 104 MiB |
 | gateway image | 65 MB expanded platform content |
 | dashboard image | 65 MB expanded platform content |
 | file-system image | 205 MB |
@@ -41,7 +41,7 @@ Use `--binary PATH` to sample an already-built native candidate and `--json` for
 
 Multi-computer scaling and cold/warm hardware comparisons remain separate local acceptance records because they require an isolated host and controlled cache state.
 
-Complete v0.2 image candidates also carry `oci-efficiency.json`. Unlike the
+Complete image candidates from v0.2 onward also carry `oci-efficiency.json`. Unlike the
 local expanded-size guardrails above, that immutable report compares both
 architectures across all six exact OCI archives. It records compressed and
 expanded layer sharing and a bounded normalized package inventory derived from
@@ -49,7 +49,7 @@ each platform's embedded SPDX attestation. Candidate verification regenerates th
 report, so package/layer optimization decisions can be reviewed against the
 same bytes that would be published.
 
-## v0.2 image audit
+## Historical v0.2 image audit
 
 The 2026-08-27 local audit built all five OCI archives for `linux/amd64` and
 `linux/arm64`, then changed only the workstation's LibreOffice package

@@ -10,7 +10,7 @@ import {
   toolsForCapabilities,
 } from '@qubicl/core';
 import { newSecret, type LoadedState } from './state.js';
-import { isPrimaryRuntimeRoot, readableContainerName } from './runtime.js';
+import { readableContainerName } from './runtime.js';
 
 export function addConfiguredComputer(
   state: LoadedState,
@@ -19,7 +19,6 @@ export function addConfiguredComputer(
   policy: Partial<Pick<ComputerConfig, 'toolPolicy' | 'skillPolicy'>> = {},
 ): ComputerConfig {
   const name = requestedName ? assertValidName(requestedName) : allocateName(state.config);
-  if (isPrimaryRuntimeRoot(state.paths.root) && name === 'gateway') throw new Error('Computer name gateway is reserved by the primary Qubicl runtime.');
   if (state.config.computers.some((computer) => computer.name === name)) throw new Error(`Computer name ${name} is already in use.`);
   const id = randomUUID();
   const computer = ComputerConfigSchema.parse({
@@ -28,6 +27,7 @@ export function addConfiguredComputer(
     runtimeName: readableContainerName(state.config.installationId, id, name, state.paths.root),
     createdAt: new Date().toISOString(),
     controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
+    browser: { maxTabs: 24 },
     ...structuredClone(defaults),
     toolPolicy: toolsForCapabilities(defaults.capabilities),
     skillPolicy: { enabledCatalogSkills: defaultCatalogSkillsForCompatibility(defaults.compatibility) },

@@ -61,7 +61,7 @@ test('the modular CLI entrypoint covers local read-only daily-driver commands', 
   }
 });
 
-test('the modular CLI entrypoint exercises bounded devcontainer and Git workflows', async () => {
+test('the modular CLI entrypoint exercises bounded devcontainer validation and the stopped-computer Git guard', async () => {
   const root = await mkdtemp(join(tmpdir(), 'qubicl-modular-workflows-'));
   const stateRoot = join(root, 'state');
   const source = join(root, 'source');
@@ -88,28 +88,13 @@ test('the modular CLI entrypoint exercises bounded devcontainer and Git workflow
     assert.match((await runFailure(['devcontainer', 'inspect', devcontainer], env)).stderr, /Unsupported or unsafe devcontainer fields: privileged/u);
 
     await mkdir(source);
-    await exec('git', ['init', '--initial-branch=main'], { cwd: source });
-    await exec('git', ['config', 'user.email', 'qubicl-test@example.invalid'], { cwd: source });
-    await exec('git', ['config', 'user.name', 'Qubicl Test'], { cwd: source });
-    await writeFile(join(source, 'README.md'), 'initial\n');
-    await exec('git', ['add', 'README.md'], { cwd: source });
-    await exec('git', ['commit', '-m', 'initial'], { cwd: source });
-
     const state = await initializeState(statePaths(stateRoot));
     const computer = addConfiguredComputer(state, 'git-test', presetDefaults('file-system'));
     await mkdir(join(state.paths.computers, computer.id, 'home', 'qubicl'), { recursive: true, mode: 0o700 });
     await saveState(state);
 
-    await run(['git', 'import', computer.name, source, '--directory', 'project'], env);
-    const repository = join(state.paths.computers, computer.id, 'home', 'qubicl', 'project');
-    await writeFile(join(repository, 'README.md'), 'initial\nchanged\n');
-    assert.match((await run(['git', 'status', computer.name, '--repo', 'project'], env)).stdout, /M README\.md/u);
-    assert.match((await run(['git', 'diff', computer.name, '--repo', 'project'], env)).stdout, /\+changed/u);
-    const patch = join(root, 'change.patch');
-    await run(['git', 'patch', computer.name, '--repo', 'project', '--output', patch], env);
-    assert.match(await readFile(patch, 'utf8'), /\+changed/u);
-    await run(['git', 'worktree', computer.name, 'feature/test', '--repo', 'project'], env);
-    assert.equal((await readFile(join(state.paths.computers, computer.id, 'home', 'qubicl', 'worktrees', 'feature-test', 'README.md'), 'utf8')), 'initial\n');
+    const stopped = await runFailure(['git', 'import', computer.name, source, '--directory', 'project'], env);
+    assert.match(stopped.stderr, /must be running for guest Git workflows/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -1,9 +1,8 @@
 import { operationOutput } from './operation-context.js';
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scryptSync } from 'node:crypto';
-import { appendFile, chmod, lstat, mkdir, open, readFile, readdir, stat, writeFile } from 'node:fs/promises';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { chmod, lstat, mkdir, open, readFile, readdir, rm } from 'node:fs/promises';
+import { constants as fsConstants, createReadStream } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { pipeline } from 'node:stream/promises';
 import { spawn } from 'node:child_process';
 import { ComputerConfigSchema, RuntimeContainerBindingSchema, assertValidName, type ComputerConfig, type RuntimeContainerBinding } from '@qubicl/core';
 import type { ParsedArgs } from './args.js';
@@ -91,45 +90,108 @@ async function sha256(path: string): Promise<string> {
   return hash.digest('hex');
 }
 
-async function passphrase(args: ParsedArgs, requiredForEncrypted: boolean): Promise<string | undefined> {
+export async function backupPassphraseFromArgs(args: ParsedArgs, requiredForEncrypted: boolean): Promise<string | undefined> {
   const path = stringOption(args, 'passphrase-file');
   if (!path) {
     if (requiredForEncrypted) throw new Error('This encrypted backup requires --passphrase-file. Passphrases are never accepted on the command line.');
     return undefined;
   }
-  const value = (await readFile(path, 'utf8')).replace(/[\r\n]+$/u, '');
-  if (value.length < 12) throw new Error('Backup passphrase must be at least 12 characters.');
+  const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  let raw: string;
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > 64 * 1024 || (info.mode & 0o077) !== 0 || (process.getuid && info.uid !== process.getuid())) {
+      throw new Error('Backup passphrase file must be an owner-only regular file no larger than 64 KiB.');
+    }
+    raw = await handle.readFile('utf8');
+  } finally { await handle.close(); }
+  const value = raw.replace(/\r?\n$/u, '');
+  if (value.length < 12 || Buffer.byteLength(value) > 64 * 1024 || /[\r\n\0]/u.test(value)) throw new Error('Backup passphrase must be one 12-65536 byte line.');
   return value;
 }
 
 export async function encryptBackupFile(source: string, destination: string, password: string): Promise<void> {
   const salt = randomBytes(16); const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', scryptSync(password, salt, 32, { maxmem: 64 * 1024 * 1024 }), iv);
-  await writeFile(destination, Buffer.concat([MAGIC, salt, iv]), { mode: 0o600 });
-  await pipeline(createReadStream(source), cipher, createWriteStream(destination, { flags: 'a', mode: 0o600 }));
-  await appendFile(destination, cipher.getAuthTag());
-  await chmod(destination, 0o600);
-  await syncFile(destination);
+  const sourceHandle = await open(source, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  const destinationHandle = await open(destination, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+  try {
+    const sourceInfo = await sourceHandle.stat();
+    if (!sourceInfo.isFile()) throw new Error('Backup encryption source must be a regular file.');
+    const header = Buffer.concat([MAGIC, salt, iv]);
+    await writeAllHandle(destinationHandle, header, 0);
+    let readOffset = 0;
+    let writeOffset = HEADER_BYTES;
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    while (readOffset < sourceInfo.size) {
+      const { bytesRead } = await sourceHandle.read(buffer, 0, Math.min(buffer.length, sourceInfo.size - readOffset), readOffset);
+      if (!bytesRead) throw new Error('Backup encryption source changed while it was read.');
+      const encrypted = cipher.update(buffer.subarray(0, bytesRead));
+      await writeAllHandle(destinationHandle, encrypted, writeOffset);
+      readOffset += bytesRead;
+      writeOffset += encrypted.length;
+    }
+    const final = cipher.final();
+    await writeAllHandle(destinationHandle, final, writeOffset);
+    writeOffset += final.length;
+    const tag = cipher.getAuthTag();
+    await writeAllHandle(destinationHandle, tag, writeOffset);
+    await destinationHandle.chmod(0o600);
+    await destinationHandle.sync();
+  } finally { await Promise.allSettled([sourceHandle.close(), destinationHandle.close()]); }
 }
 
 export async function decryptBackupFile(source: string, destination: string, password: string): Promise<void> {
-  const info = await stat(source);
-  if (info.size < HEADER_BYTES + 16) throw new Error('Encrypted backup is truncated.');
-  const header = Buffer.alloc(HEADER_BYTES);
-  const handle = await import('node:fs/promises').then(({ open }) => open(source, 'r'));
-  try { await handle.read(header, 0, header.length, 0); } finally { await handle.close(); }
-  if (!header.subarray(0, MAGIC.length).equals(MAGIC)) throw new Error('Encrypted backup header is invalid.');
-  const salt = header.subarray(MAGIC.length, MAGIC.length + 16);
-  const iv = header.subarray(MAGIC.length + 16, HEADER_BYTES);
-  const tag = Buffer.alloc(16);
-  const tagHandle = await import('node:fs/promises').then(({ open }) => open(source, 'r'));
-  try { await tagHandle.read(tag, 0, 16, info.size - 16); } finally { await tagHandle.close(); }
-  const decipher = createDecipheriv('aes-256-gcm', scryptSync(password, salt, 32, { maxmem: 64 * 1024 * 1024 }), iv);
-  decipher.setAuthTag(tag);
+  const sourceHandle = await open(source, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  const destinationHandle = await open(destination, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
   try {
-    await pipeline(createReadStream(source, { start: HEADER_BYTES, end: info.size - 17 }), decipher, createWriteStream(destination, { mode: 0o600 }));
+    const info = await sourceHandle.stat();
+    if (!info.isFile() || info.size < HEADER_BYTES + 16) throw new Error('Encrypted backup is truncated.');
+    const header = Buffer.alloc(HEADER_BYTES);
+    await readAllHandle(sourceHandle, header, 0);
+    if (!header.subarray(0, MAGIC.length).equals(MAGIC)) throw new Error('Encrypted backup header is invalid.');
+    const salt = header.subarray(MAGIC.length, MAGIC.length + 16);
+    const iv = header.subarray(MAGIC.length + 16, HEADER_BYTES);
+    const tag = Buffer.alloc(16);
+    await readAllHandle(sourceHandle, tag, info.size - 16);
+    const decipher = createDecipheriv('aes-256-gcm', scryptSync(password, salt, 32, { maxmem: 64 * 1024 * 1024 }), iv);
+    decipher.setAuthTag(tag);
+    let readOffset = HEADER_BYTES;
+    let writeOffset = 0;
+    const end = info.size - 16;
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    while (readOffset < end) {
+      const { bytesRead } = await sourceHandle.read(buffer, 0, Math.min(buffer.length, end - readOffset), readOffset);
+      if (!bytesRead) throw new Error('Encrypted backup changed while it was read.');
+      const decrypted = decipher.update(buffer.subarray(0, bytesRead));
+      await writeAllHandle(destinationHandle, decrypted, writeOffset);
+      readOffset += bytesRead;
+      writeOffset += decrypted.length;
+    }
+    const final = decipher.final();
+    await writeAllHandle(destinationHandle, final, writeOffset);
+    await destinationHandle.chmod(0o600);
+    await destinationHandle.sync();
   } catch {
     throw new Error('Backup decryption failed; the passphrase is wrong or the archive was modified.');
+  } finally { await Promise.allSettled([sourceHandle.close(), destinationHandle.close()]); }
+}
+
+async function writeAllHandle(handle: import('node:fs/promises').FileHandle, data: Buffer, position: number): Promise<void> {
+  let offset = 0;
+  while (offset < data.length) {
+    const { bytesWritten } = await handle.write(data, offset, data.length - offset, position + offset);
+    if (!bytesWritten) throw new Error('Backup file write made no progress.');
+    offset += bytesWritten;
+  }
+}
+
+async function readAllHandle(handle: import('node:fs/promises').FileHandle, data: Buffer, position: number): Promise<void> {
+  let offset = 0;
+  while (offset < data.length) {
+    const { bytesRead } = await handle.read(data, offset, data.length - offset, position + offset);
+    if (!bytesRead) throw new Error('Backup file is truncated.');
+    offset += bytesRead;
   }
 }
 
@@ -172,7 +234,7 @@ async function verifyBackup(
     let archive = copied;
     if (located.manifest.encrypted) {
       archive = join(work, 'decrypted.tar.gz');
-      await decryptBackupFile(copied, archive, (await passphrase(args, true))!);
+      await decryptBackupFile(copied, archive, (await backupPassphraseFromArgs(args, true))!);
     }
     await inspectBackupArchive(archive);
     return located;
@@ -421,7 +483,7 @@ export async function createBackup(
     throw new Error(`Computer ${computer.name} runtime status ${observation.status} cannot be quiesced safely.`);
   }
   const encrypted = flag(args, 'encrypt');
-  const password = encrypted ? await passphrase(args, true) : undefined;
+  const password = encrypted ? await backupPassphraseFromArgs(args, true) : undefined;
   const operationId = randomUUID();
   const id = `${new Date().toISOString().replace(/[:.]/gu, '-')}-${computer.name}-${randomUUID().slice(0, 8)}`;
   const directory = backupDirectory(state, id);
@@ -443,10 +505,12 @@ export async function createBackup(
   try {
     await mkdir(staging, { recursive: false, mode: 0o700 });
     if (pauseTargets.length) {
+      operationOutput('log', `Pausing ${computer.name} only for the filesystem capture phase.`);
       await runtime.docker(['pause', ...pauseTargets.map(({ id: containerId }) => containerId)]);
       journal.phase = 'paused';
       await writeBackupCreationJournal(state, journal);
     }
+    operationOutput('log', `Capturing ${computer.name}'s durable home into private staging.`);
     await runtime.archive('tar', [
       '-czf',
       plain,
@@ -458,6 +522,14 @@ export async function createBackup(
     ]);
     await chmod(plain, 0o600);
     await syncFile(plain);
+    journal.phase = 'archive-ready';
+    await writeBackupCreationJournal(state, journal);
+    await resumeBackupPauseTargets(state, journal, runtime);
+    journal.phase = 'resumed';
+    await writeBackupCreationJournal(state, journal);
+    if (pauseTargets.length) operationOutput('log', `Resumed ${computer.name}; archive validation and encryption continue without pausing the runtime.`);
+    operationOutput('log', 'Validating the captured archive against the restore contract.');
+    await inspectBackupArchive(plain);
     let archive = plain;
     if (encrypted) {
       archive = `${plain}.enc`;
@@ -469,11 +541,6 @@ export async function createBackup(
       archive: basename(archive), sha256: await sha256(archive), encrypted, consistency,
     };
     await atomicWrite(join(staging, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 0o600);
-    journal.phase = 'archive-ready';
-    await writeBackupCreationJournal(state, journal);
-    await resumeBackupPauseTargets(state, journal, runtime);
-    journal.phase = 'resumed';
-    await writeBackupCreationJournal(state, journal);
     await durableRename(staging, directory);
     await durableRemove(backupCreationJournalPath(state));
     return manifest;
@@ -563,7 +630,9 @@ async function restoreBackup(state: LoadedState, id: string, name: string, args:
   else computer.controlProtocolVersion = verified.manifest.source.controlProtocolVersion;
   computer.network = structuredClone(verified.manifest.source.network);
   computer.environment = structuredClone(verified.manifest.source.environment);
-  computer.ssh = structuredClone(verified.manifest.source.ssh);
+  // Restores and clones receive a fresh server identity and independently
+  // allocated client endpoint when the operator next enables SSH.
+  delete computer.ssh;
   computer.toolPolicy = structuredClone(verified.manifest.source.toolPolicy);
   computer.skillPolicy = structuredClone(verified.manifest.source.skillPolicy);
   const staged = restoreStage(state.paths, computer.id);
@@ -593,11 +662,12 @@ async function restoreBackup(state: LoadedState, id: string, name: string, args:
     await copyVerifiedBackupArchive(verified.archive, copied, verified.manifest.sha256);
     let archive = copied;
     if (verified.manifest.encrypted) {
-      await decryptBackupFile(copied, decrypted, (await passphrase(args, true))!);
+      await decryptBackupFile(copied, decrypted, (await backupPassphraseFromArgs(args, true))!);
       archive = decrypted;
     }
     const plan = await inspectBackupArchive(archive);
     await extractInspectedBackupArchive(archive, extracted, plan);
+    await rm(join(extracted, 'qubicl', '.local', 'share', 'qubicl', 'ssh-host-keys'), { recursive: true, force: true });
     await durableRename(extracted, home);
     await durableRemoveDirectory(work);
     await atomicWrite(restoreReadyMarker(state.paths, computer.id), 'ready\n', 0o600);
@@ -655,7 +725,7 @@ export async function backupCommand(
       await validateDocker();
       printBrowserProfileDisclosure('backup-restore');
       const computer = await restoreBackup(state, backupId, restoredName, args);
-      operationOutput('log', `Restored ${computer.name} from verified backup ${args.positionals[1]}. It is stopped; run qubicl start ${computer.name}.`);
+      operationOutput('log', `Restored ${computer.name} from verified backup ${args.positionals[1]}. It is stopped and SSH access is disabled with a fresh server identity pending; run qubicl start ${computer.name}, then qubicl ssh enable ${computer.name} if needed.`);
       return;
     }
     if (action === 'prune') {
@@ -688,7 +758,7 @@ export async function cloneCommand(args: ParsedArgs): Promise<void> {
     const backup = await createBackup(state, source, { positionals: [], options: new Map([['quiesce', true]]) });
     const target = await restoreBackup(state, backup.id, required(args.positionals[1], 'new computer name'), args, !flag(args, 'no-start'));
     if (!flag(args, 'no-start')) await synchronizeStartedSkillPolicies(state, [target]);
-    operationOutput('log', `Cloned ${source.name} to ${target.name} through verified checkpoint ${backup.id}${flag(args, 'no-start') ? ' (stopped)' : ''}.`);
+    operationOutput('log', `Cloned ${source.name} to ${target.name} through verified checkpoint ${backup.id}${flag(args, 'no-start') ? ' (stopped)' : ''}; SSH access is disabled so the clone cannot reuse the source identity or port.`);
   });
 }
 

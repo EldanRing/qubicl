@@ -18,6 +18,20 @@ export async function secretCommand(args: ParsedArgs): Promise<void> {
       operationOutput('log', JSON.stringify(entries.map(({ provider, ...entry }) => ({ ...entry, provider: { type: provider.type, ...providerReference(provider) } })), null, 2));
       return;
     }
+    if (action === 'explain') {
+      const id = required(args.positionals[2], 'credential ID');
+      const entry = entries.find((candidate) => candidate.id === id);
+      if (!entry) throw new Error(`Credential ${id} was not found on ${computer.name}.`);
+      const expired = entry.expiresAt ? Date.parse(entry.expiresAt) <= Date.now() : false;
+      operationOutput('log', JSON.stringify({
+        computer: computer.name,
+        credential: { id: entry.id, destination: `${entry.baseUrl}${entry.pathPrefix}`, methods: entry.methods, header: entry.header, expiresAt: entry.expiresAt ?? null, status: expired ? 'expired' : 'available', provider: { type: entry.provider.type, ...providerReference(entry.provider) } },
+        secretValueReturned: false,
+        redirectPolicy: 'redirects are not followed by broker requests',
+        note: 'This validates stored scope and provider metadata without making a network request or reading the secret value.',
+      }, null, 2));
+      return;
+    }
     if (action === 'remove') {
       const id = required(args.positionals[2], 'credential ID');
       const index = entries.findIndex((entry) => entry.id === id);
@@ -30,10 +44,11 @@ export async function secretCommand(args: ParsedArgs): Promise<void> {
     if (action !== 'add') throw new Error(`Unknown secret action ${action}.`);
     const id = required(args.positionals[2], 'credential ID');
     if (entries.some((entry) => entry.id === id)) throw new Error(`Credential ${id} already exists on ${computer.name}. Remove it before replacing it.`);
-    const baseUrl = required(stringOption(args, 'base-url'), '--base-url');
-    const pathPrefix = stringOption(args, 'path-prefix') ?? '/';
-    const methods = (stringOption(args, 'methods') ?? 'GET').split(',').map((value) => value.trim().toUpperCase()).filter(Boolean);
-    const header = stringOption(args, 'header') ?? 'Authorization';
+    const template = credentialTemplate(stringOption(args, 'template'));
+    const baseUrl = stringOption(args, 'base-url') ?? template?.baseUrl ?? required(undefined, '--base-url or --template');
+    const pathPrefix = stringOption(args, 'path-prefix') ?? template?.pathPrefix ?? '/';
+    const methods = (stringOption(args, 'methods') ?? template?.methods.join(',') ?? 'GET').split(',').map((value) => value.trim().toUpperCase()).filter(Boolean);
+    const header = stringOption(args, 'header') ?? template?.header ?? 'Authorization';
     const provider = await parseProvider(stringOption(args, 'provider') ?? 'direct', stringOption(args, 'provider-ref'));
     const duration = stringOption(args, 'duration');
     const expiresAt = duration ? expiry(duration) : undefined;
@@ -42,6 +57,18 @@ export async function secretCommand(args: ParsedArgs): Promise<void> {
     await saveAndRefresh(state, computer);
     operationOutput('log', `Added scoped broker credential ${id} to ${computer.name}; the value is not mounted into its workload containers.`);
   });
+}
+
+function credentialTemplate(name: string | undefined): { baseUrl: string; pathPrefix: string; methods: string[]; header: string } | undefined {
+  if (!name) return undefined;
+  const templates: Record<string, { baseUrl: string; pathPrefix: string; methods: string[]; header: string }> = {
+    openai: { baseUrl: 'https://api.openai.com', pathPrefix: '/v1/', methods: ['GET', 'POST', 'DELETE'], header: 'Authorization' },
+    anthropic: { baseUrl: 'https://api.anthropic.com', pathPrefix: '/v1/', methods: ['POST'], header: 'x-api-key' },
+    github: { baseUrl: 'https://api.github.com', pathPrefix: '/', methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'], header: 'Authorization' },
+  };
+  const template = templates[name];
+  if (!template) throw new Error(`Unknown credential template ${name}; use openai, anthropic, or github.`);
+  return template;
 }
 
 async function saveAndRefresh(state: LoadedState, computer: ComputerConfig): Promise<void> {

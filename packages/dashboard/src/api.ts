@@ -1,5 +1,6 @@
 import type {
   BackupItem,
+  ClientCredentialItem,
   DashboardSessionItem,
   ListResponse,
   ManagementComputer,
@@ -17,7 +18,8 @@ import type {
 const API_ROOT = '/api/v1';
 const MAX_EVENT_BUFFER_BYTES = 1024 * 1024;
 let csrfToken = '';
-let authorizationToken = '';
+let authorizationToken = sessionStorage.getItem('qubicl-session-token') ?? '';
+let authenticationGeneration = 0;
 let authenticationLost: (() => void) | undefined;
 
 interface SessionEnvelope extends SessionState { authorizationToken?: unknown }
@@ -32,8 +34,9 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const generation = authenticationGeneration;
   const response = await apiFetch(path, init, 'application/json');
-  if (response.status === 401) forgetAuthentication();
+  if (response.status === 401 && generation === authenticationGeneration) forgetAuthentication();
   const value = await readJson(response);
   if (!response.ok) {
     const error = asRecord(asRecord(value).error);
@@ -73,7 +76,11 @@ function rememberSession(session: SessionEnvelope, requireFreshToken = false): S
         clearAuthentication();
         throw new ApiError('The server returned an invalid local session.', 502);
       }
-      if (typeof receivedToken === 'string') authorizationToken = receivedToken;
+      if (typeof receivedToken === 'string') {
+        authorizationToken = receivedToken;
+        sessionStorage.setItem('qubicl-session-token', receivedToken);
+        authenticationGeneration += 1;
+      }
       if (requireFreshToken && !receivedToken) {
         clearAuthentication();
         throw new ApiError('The server did not return a local session token.', 502);
@@ -107,6 +114,7 @@ export const api = {
   tools: (id: string) => request<ListResponse<ToolItem>>(`/computers/${encodeURIComponent(id)}/tools`),
   skills: (id: string) => request<ListResponse<SkillItem>>(`/computers/${encodeURIComponent(id)}/skills`),
   credentials: (id: string) => request<ListResponse<Record<string, unknown>>>(`/computers/${encodeURIComponent(id)}/credentials`),
+  clients: (id: string) => request<ListResponse<ClientCredentialItem>>(`/computers/${encodeURIComponent(id)}/clients`),
   backups: () => request<ListResponse<BackupItem>>('/backups'),
   updates: () => request<{
     rows: Array<Record<string, unknown>>;
@@ -125,6 +133,7 @@ export const api = {
   },
   plan: (body: ManagementRequest) => request<ManagementPlan>('/plans', { method: 'POST', body: JSON.stringify(body) }),
   execute: (id: string, body: { idempotencyKey: string; confirmInterruption?: boolean }) => request<{ operationId: string }>(`/plans/${encodeURIComponent(id)}/execute`, { method: 'POST', body: JSON.stringify(body) }),
+  cancelPlan: (id: string) => request<{ cancelled: true }>(`/plans/${encodeURIComponent(id)}`, { method: 'DELETE', body: '{}' }),
   operation: (id: string) => request<ManagementJob>(`/operations/${encodeURIComponent(id)}`),
   async viewer(id: string): Promise<string> {
     const access = location.protocol === 'https:' ? 'remote' : 'local';
@@ -195,7 +204,12 @@ function parseEvent(block: string): ManagementEvent | undefined {
 
 function usesMemoryToken(): boolean { return location.protocol === 'http:'; }
 function validAuthorizationToken(value: unknown): value is string { return typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/u.test(value); }
-function clearAuthentication(): void { csrfToken = ''; authorizationToken = ''; }
+function clearAuthentication(): void {
+  csrfToken = '';
+  authorizationToken = '';
+  sessionStorage.removeItem('qubicl-session-token');
+  authenticationGeneration += 1;
+}
 function forgetAuthentication(): void {
   const hadAuthentication = Boolean(csrfToken || authorizationToken);
   clearAuthentication();

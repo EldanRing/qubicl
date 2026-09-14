@@ -4,6 +4,12 @@ Qubicl releases retain checksums, a candidate manifest, SBOMs, vulnerability
 summary, an exact image catalog, and detached project signatures. The release
 notes identify the Ed25519 public-key fingerprint used for those signatures.
 
+These instructions describe the verifier and signed-evidence formats. For 0.6
+and later, the [release-impact design](docs/decisions/0002-v0.6-capabilities-and-constraints.md)
+is an enforced input: the candidate embeds its exact base/candidate revision
+range and fail-closed classification. A hash match identifies evidence bytes;
+applicability, freshness, and actual coverage must also be established.
+
 ## Local candidates
 
 `npm run candidate:release` writes the initial pre-1.0 candidate beneath:
@@ -23,6 +29,9 @@ node scripts/verify-candidate.mjs release/candidates/VERSION-REVISION/TARGET
 Do not rename, add, remove, regenerate, or extract files before verification. The verifier:
 
 - checks that `SHA256SUMS` and `candidate.json` cover the complete directory with no missing, extra, nested, or path-traversing entries;
+- for 0.6 and later, recomputes the exact Git name-only diff and release-impact
+  classification, then verifies the embedded document, candidate manifest, and
+  release set share one base revision, candidate revision, hash, and profile;
 - binds the image catalog's exact release version, full revision, normalized source URL, platform matrix, requested references, and immutable digests to the candidate;
 - installs and inspects the staged npm tarball and extracts the staged native archive without packing or rebuilding;
 - proves the build used a clean exported source tree and fresh `npm ci`, with
@@ -59,9 +68,11 @@ The complete matrix covers exact installed versions for Codex, Claude Code,
 OpenCode, OpenClaw, Hermes Agent, Open WebUI, Claude Desktop, Cursor, and VS
 Code, plus independent MCP stdio, MCP HTTP, OpenAPI, and Open Terminal rows.
 The v0.2-v0.4 initial tier uses the Codex/Open WebUI subset and all four protocol
-rows; v0.5 requires the complete matrix for both tiers. Every required row is
-exercised on the `workstation` preset and has its own tester, post-freeze UTC
-timestamp, and hashed evidence reference.
+rows; v0.5 requires the complete matrix for both tiers. For v0.6 and later, the
+exact release-impact document selects affected protocols and adapter changes;
+all affected real-client rows remain mandatory. Every required row is exercised
+on the `workstation` preset and has its own tester, post-freeze UTC timestamp,
+and hashed evidence reference.
 
 Each applicable discovery, transport, result-mode, screenshot, file, browser,
 and human-takeover surface also has a passing post-freeze result and hashed

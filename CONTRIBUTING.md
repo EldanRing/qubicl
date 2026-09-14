@@ -22,16 +22,17 @@ Use a supported Node.js version, Docker Engine or Docker Desktop, and Docker Com
 
 ```sh
 npm ci
-npm run check
+npm run build:types
+# Select the compiled tests relevant to the change, for example:
+node --test dist-tests/unit/contracts.test.js
 ```
 
-For Docker-facing behavior, also run the relevant local acceptance mode:
-
-```sh
-npm run test:e2e:source
-```
-
-The full suite and native/package modes are documented in [Development and local testing](docs/development.md). Docker acceptance builds large images and changes local Docker state temporarily, so let one run finish before starting another.
+For documentation-only changes, inspect the diff and check links and claims;
+no dependency installation or runtime build is needed. For code, choose checks
+from the [change-to-check guide](docs/development.md#choose-checks-for-the-change).
+`npm run check` is the full source gate, and Docker acceptance is a separate
+gate for affected runtime workflows. Docker runs build large images and change
+local Docker state temporarily, so let one run finish before starting another.
 
 ## Local-only project automation
 
@@ -42,7 +43,7 @@ Do not add a workflow file as part of a contribution.
 ## Pull-request checklist
 
 - Add or update tests for behavior changes.
-- Run `npm run check` and report the result.
+- Report the focused checks you ran and any relevant checks still outstanding.
 - Run relevant Docker acceptance, or explain why it does not apply.
 - Update documentation and `CHANGELOG.md` for user-visible changes.
 - Keep generated output and local candidates out of commits.

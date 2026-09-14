@@ -1,31 +1,36 @@
 import type { DesktopApplicationName } from '@qubicl/core';
-import type { DesktopApplicationRecord } from './desktop-applications.js';
+import type { AvailableDesktopApplication, DesktopApplicationRecord } from './desktop-applications.js';
 import { QubiclError } from './errors.js';
 import type { LeaseProof } from './lease.js';
 import type {
+  AgentProcessSummary,
   CompatibilityProcessOutput,
   CompatibilityProcessSummary,
   CompatibilityStatusOptions,
   ManagementProcessSummary,
   ProcessOutputMode,
+  ProcessLifecycle,
   ProcessResult,
+  ProcessOutputPage,
   StopSignal,
 } from './processes.js';
 import { BrowserManager, type BrowserComputerAction, type BrowserMouseButton } from './browser.js';
 import type { WebExtractRenderedInput } from './web.js';
 import type { ListeningPort } from './ports.js';
 import type { EffectiveResourceLimits } from './resource-limits.js';
+import type { PtyPage, PtySummary } from './pty.js';
 
 export interface RemoteProcessStatus {
   managedProcesses: number;
   effectiveResourceLimits: EffectiveResourceLimits;
+  taskLimits?: { maxConcurrent: number; maxLifetimeSeconds: number; maxOutputBytes: number; completedRetentionSeconds: number };
 }
 
 export class RemoteProcessManager {
   constructor(private readonly baseUrl: string, private readonly key: string) {}
 
-  exec(command: string, cwd: string, yieldTimeMs: number, maxOutputBytes: number, owner: LeaseProof, timeoutMs?: number, outputMode: ProcessOutputMode = 'combined'): Promise<ProcessResult> {
-    return this.request('/v1/process/exec', { command, cwd, yieldTimeMs, maxOutputBytes, owner, timeoutMs, outputMode });
+  exec(command: string, cwd: string, yieldTimeMs: number, maxOutputBytes: number, owner: LeaseProof, timeoutMs?: number, outputMode: ProcessOutputMode = 'combined', lifecycle: ProcessLifecycle = 'session', label = 'Task'): Promise<ProcessResult> {
+    return this.request('/v1/process/exec', { command, cwd, yieldTimeMs, maxOutputBytes, owner, timeoutMs, outputMode, lifecycle, label });
   }
   write(id: string, input: string, close: boolean, yieldTimeMs: number, owner: LeaseProof): Promise<ProcessResult> {
     return this.request('/v1/process/write', { id, input, close, yieldTimeMs, owner });
@@ -33,6 +38,23 @@ export class RemoteProcessManager {
   stop(id: string, owner: LeaseProof, signal: StopSignal = 'SIGTERM'): Promise<ProcessResult> {
     return this.request('/v1/process/stop', { id, owner, signal });
   }
+  readOutput(id: string, offset: number, maxBytes: number, tailBytes: number | undefined, encoding: 'utf8' | 'base64'): Promise<ProcessOutputPage> {
+    return this.request('/v1/process/output', { id, offset, maxBytes, tailBytes, encoding });
+  }
+  saveOutput(id: string, path: string, maxBytes: number): Promise<{ processId: string; path: string; bytes: number; complete: boolean; sourceTruncated: boolean }> {
+    return this.request('/v1/process/output-save', { id, path, maxBytes }, 'POST', true);
+  }
+  terminalOpen(command: string, cwd: string, rows: number, columns: number, owner: LeaseProof, lifecycle: 'session' | 'task', label: string): Promise<PtySummary> {
+    return this.request('/v1/terminal/open', { command, cwd, rows, columns, owner, lifecycle, label }, 'POST', true);
+  }
+  terminalList(): Promise<PtySummary[]> { return this.request('/v1/terminal/list', undefined, 'GET'); }
+  terminalRead(id: string, owner: LeaseProof, offset: number, maxBytes: number, waitMs: number, encoding: 'utf8' | 'base64'): Promise<PtyPage> {
+    return this.request('/v1/terminal/read', { id, owner, offset, maxBytes, waitMs, encoding });
+  }
+  terminalWrite(id: string, owner: LeaseProof, input: string): Promise<{ terminalId: string; acceptedBytes: number }> { return this.request('/v1/terminal/write', { id, owner, input }, 'POST', true); }
+  terminalResize(id: string, owner: LeaseProof, rows: number, columns: number): Promise<{ terminalId: string; rows: number; columns: number }> { return this.request('/v1/terminal/resize', { id, owner, rows, columns }); }
+  terminalSignal(id: string, owner: LeaseProof, signal: StopSignal): Promise<{ terminalId: string; signal: StopSignal }> { return this.request('/v1/terminal/signal', { id, owner, signal }); }
+  terminalClose(id: string, owner: LeaseProof, force: boolean): Promise<PtySummary> { return this.request('/v1/terminal/close', { id, owner, force }); }
   async executeCompatibility(command: string, cwd: string, owner: LeaseProof, options: CompatibilityStatusOptions = {}, sessionId: string | null = null): Promise<CompatibilityProcessOutput> {
     return compatibilityOutput(
       await this.request<unknown>('/v1/process/compatibility-execute', { command, cwd, owner, options, sessionId }, 'POST', true),
@@ -71,6 +93,11 @@ export class RemoteProcessManager {
   }
   async listForManagement(): Promise<ManagementProcessSummary[]> {
     const value = await this.request<unknown>('/v1/process/management-list', undefined, 'GET');
+    if (!Array.isArray(value)) throw invalidRunnerResult(false);
+    return value.map((entry) => managementProcessSummary(entry));
+  }
+  async listForAgent(): Promise<AgentProcessSummary[]> {
+    const value = await this.request<unknown>('/v1/process/agent-list', undefined, 'GET');
     if (!Array.isArray(value)) throw invalidRunnerResult(false);
     return value.map((entry) => managementProcessSummary(entry));
   }
@@ -120,8 +147,11 @@ export class RemoteDesktopApplicationManager {
   async list(): Promise<DesktopApplicationRecord[]> {
     return (await this.request<{ applications: DesktopApplicationRecord[] }>('/v1/applications', undefined, 'GET')).applications;
   }
-  close(applicationId: string): Promise<{ applicationId: string; application: DesktopApplicationName; state: 'closed'; lifecycle: 'desktop_session'; forcedKill: boolean }> {
-    return this.request('/v1/applications/close', { applicationId });
+  async available(): Promise<AvailableDesktopApplication[]> {
+    return (await this.request<{ availableApplications: AvailableDesktopApplication[] }>('/v1/applications', undefined, 'GET')).availableApplications;
+  }
+  close(applicationId: string, discardUnsavedChanges = false): Promise<{ applicationId: string; application: DesktopApplicationName; state: 'closed'; lifecycle: 'desktop_session'; forcedKill: boolean }> {
+    return this.request('/v1/applications/close', { applicationId, discardUnsavedChanges });
   }
   async count(): Promise<number> {
     return (await this.request<{ desktopApplications: number }>('/v1/status', undefined, 'GET')).desktopApplications;
@@ -154,8 +184,9 @@ export class RemoteBrowserManager extends BrowserManager {
     super(false);
   }
   override count(): number { return this.active ? 1 : 0; }
+  override health(): ReturnType<BrowserManager['health']> { return this.invoke('health', []); }
   override navigate(url: string): ReturnType<BrowserManager['navigate']> { return this.invoke('navigate', [url]); }
-  override snapshot(): ReturnType<BrowserManager['snapshot']> { return this.invoke('snapshot', []); }
+  override snapshot(cursor = 0, limit = 200, frameIndex = 0): ReturnType<BrowserManager['snapshot']> { return this.invoke('snapshot', [cursor, limit, frameIndex]); }
   override screenshot(fullPage: boolean): ReturnType<BrowserManager['screenshot']> { return this.invoke('screenshot', [fullPage]); }
   override click(ref: string, button: 'left' | 'right'): ReturnType<BrowserManager['click']> { return this.invoke('click', [ref, button]); }
   override clickWithViewerPointer(ref: string, button: 'left' | 'right', generation?: number): ReturnType<BrowserManager['clickWithViewerPointer']> { return this.invoke('clickWithViewerPointer', [ref, button, generation]); }
@@ -166,18 +197,26 @@ export class RemoteBrowserManager extends BrowserManager {
   override history(action: 'back' | 'forward' | 'reload'): ReturnType<BrowserManager['history']> { return this.invoke('history', [action]); }
   override wait(milliseconds: number): ReturnType<BrowserManager['wait']> { return this.invoke('wait', [milliseconds]); }
   override tabs(): ReturnType<BrowserManager['tabs']> { return this.invoke('tabs', []); }
-  override useTab(index: number): ReturnType<BrowserManager['useTab']> { return this.invoke('useTab', [index]); }
+  override useTab(target: number | string): ReturnType<BrowserManager['useTab']> { return this.invoke('useTab', [target]); }
   override newTab(url?: string): ReturnType<BrowserManager['newTab']> { return this.invoke('newTab', [url]); }
-  override closeTab(index: number): ReturnType<BrowserManager['closeTab']> { return this.invoke('closeTab', [index]); }
+  override closeTab(target: number | string): ReturnType<BrowserManager['closeTab']> { return this.invoke('closeTab', [target]); }
   override reset(): ReturnType<BrowserManager['reset']> { return this.invoke('reset', []); }
-  override clickAt(x: number, y: number, button: BrowserMouseButton, clickCount = 1): ReturnType<BrowserManager['clickAt']> { return this.invoke('clickAt', [x, y, button, clickCount]); }
-  override hoverAt(x: number, y: number): ReturnType<BrowserManager['hoverAt']> { return this.invoke('hoverAt', [x, y]); }
+  override upload(ref: string, paths: string[]): ReturnType<BrowserManager['upload']> { return this.invoke('upload', [ref, paths]); }
+  override listDownloads(): ReturnType<BrowserManager['listDownloads']> { return this.invoke('listDownloads', []); }
+  override cancelDownload(id: string): ReturnType<BrowserManager['cancelDownload']> { return this.invoke('cancelDownload', [id]); }
+  override listDialogs(): ReturnType<BrowserManager['listDialogs']> { return this.invoke('listDialogs', []); }
+  override respondDialog(id: string, action: 'accept' | 'dismiss', promptText?: string): ReturnType<BrowserManager['respondDialog']> { return this.invoke('respondDialog', [id, action, promptText]); }
+  override permissions(origin: string, permissions: string[], clear: boolean): ReturnType<BrowserManager['permissions']> { return this.invoke('permissions', [origin, permissions, clear]); }
+  override browserDiagnostics(): ReturnType<BrowserManager['browserDiagnostics']> { return this.invoke('browserDiagnostics', []); }
+  override setViewport(width: number, height: number): ReturnType<BrowserManager['setViewport']> { return this.invoke('setViewport', [width, height]); }
+  override clickAt(x: number, y: number, button: BrowserMouseButton, clickCount = 1, geometryGeneration?: number): ReturnType<BrowserManager['clickAt']> { return this.invoke('clickAt', [x, y, button, clickCount, geometryGeneration]); }
+  override hoverAt(x: number, y: number, geometryGeneration?: number): ReturnType<BrowserManager['hoverAt']> { return this.invoke('hoverAt', [x, y, geometryGeneration]); }
   override drag(startX: number, startY: number, endX: number, endY: number): ReturnType<BrowserManager['drag']> { return this.invoke('drag', [startX, startY, endX, endY]); }
   override scrollAt(x: number, y: number, scrollX: number, scrollY: number): ReturnType<BrowserManager['scrollAt']> { return this.invoke('scrollAt', [x, y, scrollX, scrollY]); }
   override typeFocused(text: string): ReturnType<BrowserManager['typeFocused']> { return this.invoke('typeFocused', [text]); }
-  override inspectAt(x: number, y: number): ReturnType<BrowserManager['inspectAt']> { return this.invoke('inspectAt', [x, y]); }
+  override inspectAt(x: number, y: number, geometryGeneration?: number): ReturnType<BrowserManager['inspectAt']> { return this.invoke('inspectAt', [x, y, geometryGeneration]); }
   override computer(actions: BrowserComputerAction[]): ReturnType<BrowserManager['computer']> { return this.invoke('computer', [actions]); }
-  override computerWithViewerPointers(actions: BrowserComputerAction[], generation?: number): ReturnType<BrowserManager['computerWithViewerPointers']> { return this.invoke('computerWithViewerPointers', [actions, generation]); }
+  override computerWithViewerPointers(actions: BrowserComputerAction[], generation?: number, geometryGeneration?: number): ReturnType<BrowserManager['computerWithViewerPointers']> { return this.invoke('computerWithViewerPointers', [actions, generation, geometryGeneration]); }
   override renderForExtraction(url: string): ReturnType<BrowserManager['renderForExtraction']> { return this.invoke('renderForExtraction', [url]); }
   override async shutdown(): Promise<void> {
     if (!this.active) return;
@@ -276,13 +315,15 @@ function compatibilitySummary(value: unknown, ambiguous = false): CompatibilityP
 function managementProcessSummary(value: unknown): ManagementProcessSummary {
   if (!isRecord(value)
     || typeof value.id !== 'string'
-    || !['running', 'exited', 'signaled', 'timed-out', 'stopped'].includes(String(value.status))
+    || typeof value.label !== 'string'
+    || !['session', 'task', 'service'].includes(String(value.lifecycle))
+    || !['running', 'exited', 'signaled', 'timed-out', 'stopped', 'interrupted'].includes(String(value.status))
     || typeof value.startedAt !== 'string'
     || !(value.finishedAt === undefined || typeof value.finishedAt === 'string')
-    || value.owner !== 'agent'
+    || !['agent', 'computer'].includes(String(value.owner))
     || !Number.isSafeInteger(value.ownerGeneration)
     || (value.ownerGeneration as number) < 1
-    || Object.keys(value).some((key) => !['id', 'status', 'startedAt', 'finishedAt', 'owner', 'ownerGeneration'].includes(key))) {
+    || Object.keys(value).some((key) => !['id', 'label', 'lifecycle', 'status', 'startedAt', 'finishedAt', 'owner', 'ownerGeneration'].includes(key))) {
     throw invalidRunnerResult(false);
   }
   return value as unknown as ManagementProcessSummary;

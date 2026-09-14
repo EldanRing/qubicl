@@ -29,6 +29,7 @@ import {
 import { LOCAL_CANDIDATE_CONCURRENCY, runWithConcurrency } from './candidate-concurrency.mjs';
 import { inspectOciArchive } from './oci-evidence.mjs';
 import { createOciPlatformView } from './oci-platform-view.mjs';
+import { requiresReleaseImpact, verifyReleaseImpactDocument } from './release-impact.mjs';
 
 const exec = promisify(execFile);
 const root = resolve(fileURLToPath(new URL('../', import.meta.url)));
@@ -48,6 +49,7 @@ Build unpublished release candidates entirely on the current host.
   --skip-images       Skip multi-architecture OCI image archives
   --skip-scan         Skip local Trivy reports and policy enforcement
   --catalog PATH      Embed an already-generated exact release catalog
+  --impact PATH       Bind the exact base-to-candidate change-impact document
   --help              Show this help
 
 A complete Linux x64 build creates six multi-architecture OCI archives first,
@@ -78,6 +80,11 @@ const version = workspace.version;
 assert(releaseTier !== 'preview' || version.includes('-'), '--preview requires a prerelease package version.');
 assert(releaseTier !== 'initial' || /^0\.[0-9]+\.[0-9]+$/.test(version), '--initial requires a stable pre-1.0 package version.');
 const revision = process.env.QUBICL_CANDIDATE_REVISION ?? await capture('git', ['rev-parse', 'HEAD']);
+if (requiresReleaseImpact(version)) assert(options.impact, 'Qubicl 0.6 and later candidates require --impact PATH generated from the exact prior release revision.');
+const releaseImpact = options.impact ? await verifyReleaseImpactDocument(options.impact, { revision, repositoryRoot: root }) : undefined;
+if (releaseImpact?.affectedArtifacts.some((artifact) => artifact.endsWith('-image'))) assert(buildImages, 'The release impact requires image candidates; --skip-images and --binary-only are not valid.');
+if (releaseImpact?.requiredChecks.includes('image-scans')) assert(scanImages, 'The release impact requires image scans; --skip-scan is not valid.');
+if (releaseImpact?.affectedArtifacts.includes('npm')) assert(!binaryOnly, 'The release impact requires the npm artifact; --binary-only is not valid.');
 const snapshotRevision = await capture('git', ['rev-parse', 'HEAD']);
 assert(/^[a-f0-9]{40}$/u.test(revision) && revision === snapshotRevision,
   `Candidate revision must be the exact reviewed Git HEAD; expected ${snapshotRevision}, found ${revision}.`);
@@ -130,6 +137,8 @@ try {
   assert(dependencyEvidencePath, 'Isolated candidate construction requires dependency evidence.');
   const dependencyEvidenceName = 'dependency-evidence.json';
   await copyFile(dependencyEvidencePath, join(staging, dependencyEvidenceName));
+  const releaseImpactName = 'release-impact.json';
+  if (releaseImpact) await copyFile(options.impact, join(staging, releaseImpactName));
   let catalogPath;
   let imageEfficiency;
 
@@ -286,7 +295,7 @@ try {
   await assertSourceSnapshot('candidate manifest generation');
   const artifacts = await describeFiles(staging);
   const manifest = {
-    schemaVersion: 5,
+    schemaVersion: releaseImpact ? 6 : 5,
     version,
     revision,
     created,
@@ -295,6 +304,7 @@ try {
     host: { platform: process.platform, architecture: process.arch, target },
     tools: toolVersions,
     dependencies: { name: dependencyEvidenceName, sha256: await sha256(join(staging, dependencyEvidenceName)) },
+    ...(releaseImpact ? { releaseImpact: { name: releaseImpactName, sha256: await sha256(join(staging, releaseImpactName)), profile: releaseImpact.profile, baseRevision: releaseImpact.baseRevision } } : {}),
     modes: { binaryOnly, images: buildImages, scans: scanImages, exactArtifactAcceptance: buildImages },
     imageCatalog: { name: 'image-catalog.json', sha256: await sha256(catalogPath) },
     ...(imageEfficiency ? { imageEfficiency } : {}),
@@ -517,6 +527,8 @@ async function buildInIsolatedSource(args) {
   const childArgs = [...args];
   const catalogIndex = childArgs.indexOf('--catalog');
   if (catalogIndex >= 0) childArgs[catalogIndex + 1] = options.catalog;
+  const impactIndex = childArgs.indexOf('--impact');
+  if (impactIndex >= 0) childArgs[impactIndex + 1] = options.impact;
   const status = await capture('git', ['status', '--porcelain']);
   assert(status === '', 'Local candidate assembly requires a clean Git worktree.');
   await run(process.execPath, ['scripts/public-source.mjs', 'check']);
@@ -579,7 +591,7 @@ async function buildInIsolatedSource(args) {
 }
 
 function parseOptions(args) {
-  const parsed = { binaryOnly: false, preview: false, initial: false, skipImages: false, skipScan: false, help: false, catalog: undefined };
+  const parsed = { binaryOnly: false, preview: false, initial: false, skipImages: false, skipScan: false, help: false, catalog: undefined, impact: undefined };
   for (let index = 0; index < args.length; index += 1) {
     const option = args[index];
     if (option === '--binary-only') parsed.binaryOnly = true;
@@ -592,6 +604,11 @@ function parseOptions(args) {
       const value = args[index + 1];
       assert(value, '--catalog requires a path.');
       parsed.catalog = resolve(value);
+      index += 1;
+    } else if (option === '--impact') {
+      const value = args[index + 1];
+      assert(value, '--impact requires a path.');
+      parsed.impact = resolve(value);
       index += 1;
     } else throw new Error(`Unknown option ${option}.`);
   }

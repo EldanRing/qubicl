@@ -1,6 +1,6 @@
 {
   "name": "qubicl-workspace",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Local, observable computers for any compatible AI agent",
   "homepage": "https://github.com/EldanRing/qubicl#readme",
   "bugs": {
@@ -26,9 +26,10 @@
     "lint": "npm run lint:types && npm run lint:source",
     "lint:types": "tsc -b --pretty false",
     "lint:source": "oxlint --deny-warnings packages scripts tests",
-    "check": "npm run lint && npm test && npm audit --audit-level=high",
-    "test": "npm run build && node --experimental-test-coverage --test --test-coverage-include='packages/**/dist/**/*.js' --test-coverage-include='packages/cli/dist/qubicl.mjs' --test-coverage-lines=75 --test-coverage-branches=70 --test-coverage-functions=30 dist-tests/**/*.test.js",
+    "check": "npm run lint && npm test && npm run test:contracts && npm audit --audit-level=high",
+    "test": "npm run build && node --experimental-test-coverage --test --test-concurrency=1 --test-coverage-include='packages/**/dist/**/*.js' --test-coverage-include='packages/cli/dist/qubicl.mjs' --test-coverage-lines=75 --test-coverage-branches=70 --test-coverage-functions=30 dist-tests/**/*.test.js",
     "test:unit": "npm run build:types && node --test dist-tests/unit/*.test.js",
+    "test:contracts": "node --test tests/unit/release-impact.test.mjs && node scripts/docs-contracts.mjs",
     "test:e2e": "npm run test:e2e:source",
     "test:e2e:source": "node scripts/test-artifact-e2e.mjs source",
     "test:e2e:npm": "node scripts/test-artifact-e2e.mjs npm",
@@ -45,6 +46,7 @@
     "skills:catalog:update": "npm run build:types && node scripts/update-core-skill-catalog.mjs --write",
     "check:release": "npm run check && npm audit signatures && npm run scan:secrets && npm run test:e2e:all && node scripts/release-preflight.mjs --require-binary",
     "release:check": "npm run public:check && npm run check:release && npm run tokens:audit && npm run performance",
+    "release:impact": "node scripts/release-impact.mjs",
     "candidate:local": "node scripts/build-local-candidates.mjs",
     "candidate:release": "node scripts/build-local-candidates.mjs --initial",
     "candidate:preview": "node scripts/build-local-candidates.mjs --preview",

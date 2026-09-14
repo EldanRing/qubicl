@@ -12,24 +12,27 @@ export interface PortSource { listPorts(): Promise<ListeningPort[]> }
 
 interface PublicationBase {
   id: string;
-  tokenHash: string;
   createdAt: string;
-  expiresAt: string;
 }
 
 interface PortPublication extends PublicationBase {
   kind: 'port';
   port: number;
+  ownerTokenHash: string;
+  share?: { tokenHash: string; expiresAt: string };
 }
 
 interface FilePublication extends PublicationBase {
   kind: 'file';
+  tokenHash: string;
+  expiresAt: string;
   root: string;
   entryPath: string;
   source: FilePreviewSource;
 }
 
 type Publication = PortPublication | FilePublication;
+type PreviewConnectionScope = 'owner' | 'share' | 'management';
 
 export interface FilePreviewSource {
   canonicalPath(path: string, followFinal?: boolean): Promise<string>;
@@ -58,7 +61,9 @@ export interface ManagementPreviewSummary {
   kind: 'port' | 'file';
   status: 'published';
   createdAt: string;
-  expiresAt: string;
+  lifetime: 'while-listening' | 'expiring';
+  expiresAt?: string;
+  shareExpiresAt?: string;
   port?: number;
 }
 
@@ -95,7 +100,11 @@ const FILE_PREVIEW_CSP = [
 export class PreviewManager {
   private readonly publications = new Map<string, Publication>();
   private readonly managementTickets = new Map<string, { publicationId: string; access: 'local' | 'remote'; expiresAt: number }>();
-  private readonly managementSessions = new Map<string, { publicationId: string; expiresAt: number }>();
+  private readonly managementSessions = new Map<string, { publicationId: string; access: 'local' | 'remote'; expiresAt: number }>();
+  private readonly activeConnections = new Map<string, Set<{ destroy(error?: Error): void }>>();
+  private readonly expiryTimers = new Map<string, NodeJS.Timeout>();
+  private readonly shareExpiryTimers = new Map<string, NodeJS.Timeout>();
+  private readonly portMonitor: NodeJS.Timeout;
 
   constructor(
     private readonly ports: PortSource,
@@ -104,7 +113,10 @@ export class PreviewManager {
     private readonly internalBaseUrl: string,
     private readonly remoteBaseUrl?: string,
     private readonly accessSource?: PreviewAccessSource,
-  ) {}
+  ) {
+    this.portMonitor = setInterval(() => { void this.removeStoppedPortPublications(); }, 2_000);
+    this.portMonitor.unref();
+  }
 
   listPorts(): Promise<ListeningPort[]> { return this.ports.listPorts(); }
 
@@ -116,7 +128,7 @@ export class PreviewManager {
     return (await this.ports.listPorts()).filter(({ port }) => published.has(port));
   }
 
-  list(): Array<Omit<PortPublication, 'kind' | 'tokenHash'> & { url: string; remoteUrl?: string }> {
+  list(): Array<{ id: string; port: number; createdAt: string; lifetime: 'while-listening'; shareExpiresAt?: string; url: string; remoteUrl?: string }> {
     this.prune();
     const access = this.previewAccess();
     return [...this.publications.values()]
@@ -125,9 +137,10 @@ export class PreviewManager {
         id: publication.id,
         port: publication.port,
         createdAt: publication.createdAt,
-        expiresAt: publication.expiresAt,
+        lifetime: 'while-listening',
+        ...(publication.share ? { shareExpiresAt: publication.share.expiresAt } : {}),
         url: this.externalPath(publication.id, access.publicBaseUrl),
-        ...(access.remoteBaseUrl ? { remoteUrl: this.remotePath(publication.id, access.remoteBaseUrl) } : {}),
+        ...(access.remoteBaseUrl ? { remoteUrl: this.externalPath(publication.id, access.remoteBaseUrl) } : {}),
       }));
   }
 
@@ -140,7 +153,9 @@ export class PreviewManager {
         kind: publication.kind,
         status: 'published',
         createdAt: publication.createdAt,
-        expiresAt: publication.expiresAt,
+        lifetime: publication.kind === 'port' ? 'while-listening' : 'expiring',
+        ...(publication.kind === 'file' ? { expiresAt: publication.expiresAt } : {}),
+        ...(publication.kind === 'port' && publication.share ? { shareExpiresAt: publication.share.expiresAt } : {}),
         ...(publication.kind === 'port' ? { port: publication.port } : {}),
       }));
   }
@@ -153,11 +168,11 @@ export class PreviewManager {
     const base = access === 'local' ? previewAccess.publicBaseUrl : previewAccess.remoteBaseUrl;
     if (!base) throw new QubiclError('preview_not_exposed', 'Remote preview access is not configured.', 409);
     const token = randomBytes(32).toString('base64url');
-    const expiresAt = Math.min(Date.parse(publication.expiresAt), Date.now() + MANAGEMENT_TICKET_TTL_MS);
+    const expiresAt = Math.min(publicationDeadline(publication), Date.now() + MANAGEMENT_TICKET_TTL_MS);
     if (this.managementTickets.size >= MAX_MANAGEMENT_TICKETS) this.managementTickets.delete(this.managementTickets.keys().next().value!);
     this.managementTickets.set(digest(token), { publicationId: id, access, expiresAt });
     const suffix = publication.kind === 'file' ? publication.entryPath : '';
-    const target = new URL(`${base.replace(/\/$/u, '')}/${id}/${suffix}`);
+    const target = new URL(`${this.externalPath(id, base)}${suffix}`);
     target.searchParams.set('ticket', token);
     return { path: `${target.pathname}${target.search}`, expiresAt: new Date(expiresAt).toISOString() };
   }
@@ -168,33 +183,66 @@ export class PreviewManager {
     return { id, status: 'revoked' };
   }
 
-  async publish(port: number, expiresInSeconds: number): Promise<Record<string, unknown>> {
+  async publish(port: number, legacyShareExpiresInSeconds?: number): Promise<Record<string, unknown>> {
     const listener = (await this.ports.listPorts()).find((candidate) => candidate.port === port);
     if (!listener) throw new QubiclError('port_not_listening', `TCP port ${port} is not currently listening as the computer user.`, 409);
-    const id = randomBytes(12).toString('base64url');
-    const token = randomBytes(32).toString('base64url');
+    const id = randomBytes(8).toString('hex');
+    const ownerToken = randomBytes(32).toString('base64url');
     const now = new Date();
     const publication: PortPublication = {
       kind: 'port',
       id,
       port,
-      tokenHash: digest(token),
+      ownerTokenHash: digest(ownerToken),
       createdAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + expiresInSeconds * 1000).toISOString(),
     };
     this.publications.set(id, publication);
     const access = this.previewAccess();
+    const legacyShare = legacyShareExpiresInSeconds !== undefined && access.remoteBaseUrl
+      ? this.share(id, legacyShareExpiresInSeconds)
+      : undefined;
     return {
       id,
       port,
       scope: 'host-loopback',
       authentication: 'unguessable-cookie',
       createdAt: publication.createdAt,
-      expiresAt: publication.expiresAt,
-      url: `${this.externalPath(id, access.publicBaseUrl)}?token=${encodeURIComponent(token)}`,
-      ...(access.remoteBaseUrl ? { remoteUrl: `${this.remotePath(id, access.remoteBaseUrl)}?token=${encodeURIComponent(token)}` } : {}),
-      browserUrl: `${this.internalPath(id)}?token=${encodeURIComponent(token)}`,
+      lifetime: 'while-listening',
+      url: `${this.externalPath(id, access.publicBaseUrl)}?token=${encodeURIComponent(ownerToken)}`,
+      remoteSharingAvailable: Boolean(access.remoteBaseUrl),
+      ...(legacyShare ? { remoteUrl: legacyShare.remoteUrl, shareExpiresAt: legacyShare.expiresAt } : {}),
+      browserUrl: `${this.internalPath(id)}?token=${encodeURIComponent(ownerToken)}`,
     };
+  }
+
+  share(id: string, expiresInSeconds: number): { id: string; remoteUrl: string; createdAt: string; expiresAt: string } {
+    this.prune();
+    const publication = this.publications.get(id);
+    if (!publication || publication.kind !== 'port') throw new QubiclError('preview_not_found', `Published port preview ${id} was not found.`, 404);
+    if (!Number.isSafeInteger(expiresInSeconds) || expiresInSeconds < 60 || expiresInSeconds > 86_400) {
+      throw new QubiclError('invalid_arguments', 'Preview share lifetime must be between 60 and 86400 seconds.', 400);
+    }
+    const access = this.previewAccess();
+    if (!access.remoteBaseUrl) throw new QubiclError('preview_not_exposed', 'Remote preview access is not configured.', 409);
+    const token = randomBytes(32).toString('base64url');
+    const now = new Date();
+    publication.share = { tokenHash: digest(token), expiresAt: new Date(now.getTime() + expiresInSeconds * 1000).toISOString() };
+    this.scheduleShareExpiry(publication);
+    return {
+      id,
+      createdAt: now.toISOString(),
+      expiresAt: publication.share.expiresAt,
+      remoteUrl: `${this.externalPath(id, access.remoteBaseUrl)}?token=${encodeURIComponent(token)}`,
+    };
+  }
+
+  revokeShare(id: string): boolean {
+    const publication = this.publications.get(id);
+    if (!publication || publication.kind !== 'port' || !publication.share) return false;
+    delete publication.share;
+    this.clearShareExpiry(id);
+    this.closeConnections(id, 'share');
+    return true;
   }
 
   async publishFile(
@@ -217,7 +265,7 @@ export class PreviewManager {
     }
     this.prune();
     this.pruneFilePublications();
-    const id = randomBytes(12).toString('base64url');
+    const id = randomBytes(8).toString('hex');
     const token = randomBytes(32).toString('base64url');
     const now = new Date();
     const publication: FilePublication = {
@@ -231,6 +279,7 @@ export class PreviewManager {
       expiresAt: new Date(now.getTime() + expiresInSeconds * 1000).toISOString(),
     };
     this.publications.set(id, publication);
+    this.scheduleExpiry(publication);
     const access = this.previewAccess();
     const suffix = publication.entryPath;
     return {
@@ -239,18 +288,23 @@ export class PreviewManager {
       expiresAt: publication.expiresAt,
       url: `${this.externalPath(id, access.publicBaseUrl)}${suffix}?token=${encodeURIComponent(token)}`,
       ...(access.remoteBaseUrl
-        ? { remoteUrl: `${this.remotePath(id, access.remoteBaseUrl)}${suffix}?token=${encodeURIComponent(token)}` }
+        ? { remoteUrl: `${this.externalPath(id, access.remoteBaseUrl)}${suffix}?token=${encodeURIComponent(token)}` }
         : {}),
     };
   }
 
   unpublish(id: string): boolean {
     const removed = this.publications.delete(id);
-    if (removed) this.clearManagementAccess(id);
+    if (removed) {
+      this.clearManagementAccess(id);
+      this.closeConnections(id);
+      this.clearExpiry(id);
+      this.clearShareExpiry(id);
+    }
     return removed;
   }
   clear(): void {
-    this.publications.clear();
+    for (const id of [...this.publications.keys()]) this.unpublish(id);
     this.managementTickets.clear();
     this.managementSessions.clear();
   }
@@ -262,7 +316,10 @@ export class PreviewManager {
     const publication = this.publications.get(match[1]!);
     const token = url.searchParams.get('token') ?? previewCookie(request, match[1]!);
     const managementToken = publication ? this.redeemManagementTicket(request, url, publication) : undefined;
-    if (!publication || (!managementToken && (!token || !this.validPreviewToken(publication, token)))) {
+    const connectionScope = publication && (managementToken
+      ? 'management'
+      : token ? this.validPreviewToken(request, publication, token) : undefined);
+    if (!publication || !connectionScope) {
       json(response, 401, { error: { code: 'invalid_preview', message: 'This preview link is invalid, unpublished, or expired.' } });
       return true;
     }
@@ -280,7 +337,7 @@ export class PreviewManager {
         error: { code: 'file_preview_unavailable', message: 'The isolated file preview is unavailable.' },
       }));
     } else {
-      this.proxy(request, response, publication, `${match[2] ?? '/'}${url.search}`, settingCookie);
+      this.proxy(request, response, publication, `${match[2] ?? '/'}${url.search}`, connectionScope, settingCookie);
     }
     return true;
   }
@@ -290,7 +347,7 @@ export class PreviewManager {
     const publication = [...this.publications.values()]
       .find((candidate): candidate is PortPublication => candidate.kind === 'port' && candidate.port === port);
     if (!publication) return false;
-    this.proxy(request, response, publication, targetPath);
+    this.proxy(request, response, publication, targetPath, 'owner');
     return true;
   }
 
@@ -300,7 +357,8 @@ export class PreviewManager {
     this.prune();
     const publication = this.publications.get(match[1]!);
     const token = url.searchParams.get('token') ?? previewCookie(request, match[1]!);
-    if (!publication || !token || !this.validPreviewToken(publication, token)) {
+    const connectionScope = publication && token ? this.validPreviewToken(request, publication, token) : undefined;
+    if (!publication || !token || !connectionScope) {
       socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       return true;
     }
@@ -310,40 +368,73 @@ export class PreviewManager {
     }
     url.searchParams.delete('token');
     const backend = connect(publication.port, this.targetHost);
+    const release = this.trackConnections(publication.id, connectionScope, socket, backend);
     backend.once('connect', () => {
       const target = `${match[2] ?? '/'}${url.search}`;
       const lines = [`${request.method ?? 'GET'} ${target} HTTP/${request.httpVersion}`];
       for (let index = 0; index < request.rawHeaders.length; index += 2) {
         const name = request.rawHeaders[index]!;
-        if (['host', 'cookie', 'authorization', 'x-qubicl-internal-key', 'x-qubicl-gateway-epoch'].includes(name.toLowerCase())) continue;
+        if (['host', 'cookie', 'authorization', 'x-qubicl-internal-key', 'x-qubicl-gateway-epoch', 'x-qubicl-access-surface', 'x-qubicl-preview-authorization', 'x-qubicl-preview-host', 'x-qubicl-preview-proto'].includes(name.toLowerCase())) continue;
         lines.push(`${name}: ${request.rawHeaders[index + 1] ?? ''}`);
       }
-      lines.push(`Host: ${this.targetHost}:${publication.port}`, '', '');
+      const cookies = applicationCookieHeader(request, publication.id);
+      if (cookies) lines.push(`Cookie: ${cookies}`);
+      const applicationAuthorization = request.headers['x-qubicl-preview-authorization'];
+      if (typeof applicationAuthorization === 'string') lines.push(`Authorization: ${applicationAuthorization}`);
+      const applicationHost = request.headers['x-qubicl-preview-host'];
+      const applicationProto = request.headers['x-qubicl-preview-proto'];
+      lines.push(`Host: ${typeof applicationHost === 'string' ? applicationHost : `${this.targetHost}:${publication.port}`}`);
+      if (typeof applicationHost === 'string') lines.push(`X-Forwarded-Host: ${applicationHost}`);
+      if (applicationProto === 'http' || applicationProto === 'https') lines.push(`X-Forwarded-Proto: ${applicationProto}`);
+      lines.push('', '');
       backend.write(lines.join('\r\n'));
       if (head.length) backend.write(head);
       socket.pipe(backend).pipe(socket);
     });
     backend.on('error', () => socket.destroy());
     socket.on('error', () => backend.destroy());
-    socket.on('close', () => backend.destroy());
+    socket.on('close', () => { backend.destroy(); release(); });
+    backend.on('close', release);
     return true;
   }
 
-  private proxy(request: IncomingMessage, response: ServerResponse, publication: PortPublication, targetPath: string, cookieToken?: string): void {
+  private proxy(request: IncomingMessage, response: ServerResponse, publication: PortPublication, targetPath: string, scope: PreviewConnectionScope, cookieToken?: string): void {
     const headers = { ...request.headers };
-    delete headers.authorization;
-    delete headers.cookie;
-    delete headers.host;
+    const applicationAuthorization = headers['x-qubicl-preview-authorization'];
+    if (typeof applicationAuthorization === 'string') headers.authorization = applicationAuthorization;
+    else delete headers.authorization;
+    const applicationCookies = applicationCookieHeader(request, publication.id);
+    if (applicationCookies) headers.cookie = applicationCookies;
+    else delete headers.cookie;
+    const applicationHost = headers['x-qubicl-preview-host'];
+    const applicationProto = headers['x-qubicl-preview-proto'];
+    if (typeof applicationHost === 'string') {
+      headers.host = applicationHost;
+      headers['x-forwarded-host'] = applicationHost;
+    } else delete headers.host;
+    if (applicationProto === 'http' || applicationProto === 'https') headers['x-forwarded-proto'] = applicationProto;
     delete headers['x-qubicl-internal-key'];
     delete headers['x-qubicl-gateway-epoch'];
+    delete headers['x-qubicl-access-surface'];
+    delete headers['x-qubicl-preview-authorization'];
+    delete headers['x-qubicl-preview-host'];
+    delete headers['x-qubicl-preview-proto'];
     const upstream = httpRequest({ hostname: this.targetHost, port: publication.port, method: request.method, path: targetPath, headers }, (incoming) => {
+      const releaseResponse = this.trackConnections(publication.id, scope, incoming, response);
       const outgoingHeaders = { ...incoming.headers };
+      const appCookies = safeApplicationCookies(incoming.headers['set-cookie'], publication.id);
       delete outgoingHeaders['set-cookie'];
       outgoingHeaders['cache-control'] ??= 'no-store';
-      if (cookieToken) outgoingHeaders['set-cookie'] = [`qubicl_preview_${publication.id}=${cookieToken}; HttpOnly; SameSite=Strict; Path=${this.cookiePath(publication.id)}`];
+      const previewCookie = cookieToken ? `qubicl_preview_${publication.id}=${cookieToken}; HttpOnly; SameSite=Strict; Path=${this.cookiePath(publication.id)}` : undefined;
+      if (appCookies.length || previewCookie) outgoingHeaders['set-cookie'] = [...appCookies, ...(previewCookie ? [previewCookie] : [])];
       response.writeHead(incoming.statusCode ?? 502, outgoingHeaders);
       incoming.pipe(response);
+      incoming.once('close', releaseResponse);
+      response.once('close', releaseResponse);
+      response.once('finish', releaseResponse);
     });
+    const releaseRequest = this.trackConnections(publication.id, scope, upstream);
+    upstream.once('close', releaseRequest);
     upstream.on('error', (error) => json(response, 502, { error: { code: 'preview_unavailable', message: `Published port ${publication.port} is unavailable: ${error.message}` } }));
     request.pipe(upstream);
   }
@@ -418,9 +509,15 @@ export class PreviewManager {
       ...(this.remoteBaseUrl ? { remoteBaseUrl: this.remoteBaseUrl } : {}),
     };
   }
-  private externalPath(id: string, baseUrl = this.previewAccess().publicBaseUrl): string { return `${baseUrl.replace(/\/$/u, '')}/${id}/`; }
+  private externalPath(id: string, baseUrl = this.previewAccess().publicBaseUrl): string {
+    const target = new URL(baseUrl);
+    target.hostname = `${id}--${target.hostname}`;
+    target.pathname = '/';
+    target.search = '';
+    target.hash = '';
+    return target.href;
+  }
   private internalPath(id: string): string { return `${this.internalBaseUrl.replace(/\/$/u, '')}/${id}/`; }
-  private remotePath(id: string, baseUrl: string): string { return `${baseUrl.replace(/\/$/u, '')}/${id}/`; }
   private cookiePath(id: string): string {
     const value = this.externalPath(id);
     try { return new URL(value).pathname; } catch { return value.startsWith('/') ? value : '/'; }
@@ -428,10 +525,8 @@ export class PreviewManager {
   private prune(): void {
     const now = Date.now();
     for (const [id, publication] of this.publications) {
-      if (Date.parse(publication.expiresAt) <= now) {
-        this.publications.delete(id);
-        this.clearManagementAccess(id);
-      }
+      if (publication.kind === 'file' && Date.parse(publication.expiresAt) <= now) this.unpublish(id);
+      else if (publication.kind === 'port' && publication.share && Date.parse(publication.share.expiresAt) <= now) this.revokeShare(id);
     }
     for (const [hash, ticket] of this.managementTickets) {
       if (ticket.expiresAt <= now || !this.publications.has(ticket.publicationId)) this.managementTickets.delete(hash);
@@ -441,10 +536,16 @@ export class PreviewManager {
     }
   }
 
-  private validPreviewToken(publication: Publication, token: string): boolean {
-    if (constantDigestMatch(token, publication.tokenHash)) return true;
+  private validPreviewToken(request: IncomingMessage, publication: Publication, token: string): PreviewConnectionScope | undefined {
+    const access = request.headers['x-qubicl-access-surface'] === 'external' ? 'remote' : 'local';
+    if (publication.kind === 'file' && constantDigestMatch(token, publication.tokenHash)) return access === 'remote' ? 'share' : 'owner';
+    if (publication.kind === 'port') {
+      if (access === 'local' && constantDigestMatch(token, publication.ownerTokenHash)) return 'owner';
+      if (access === 'remote' && publication.share && Date.parse(publication.share.expiresAt) > Date.now()
+        && constantDigestMatch(token, publication.share.tokenHash)) return 'share';
+    }
     const session = this.managementSessions.get(digest(token));
-    return session?.publicationId === publication.id && session.expiresAt > Date.now();
+    return session?.publicationId === publication.id && session.access === access && session.expiresAt > Date.now() ? 'management' : undefined;
   }
 
   private redeemManagementTicket(request: IncomingMessage, url: URL, publication: Publication): string | undefined {
@@ -459,7 +560,8 @@ export class PreviewManager {
     if (this.managementSessions.size >= MAX_MANAGEMENT_SESSIONS) this.managementSessions.delete(this.managementSessions.keys().next().value!);
     this.managementSessions.set(digest(cookieToken), {
       publicationId: publication.id,
-      expiresAt: Date.parse(publication.expiresAt),
+      access: ticket.access,
+      expiresAt: publicationDeadline(publication),
     });
     return cookieToken;
   }
@@ -475,9 +577,71 @@ export class PreviewManager {
       .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
     while (files.length >= MAX_FILE_PUBLICATIONS) {
       const oldest = files.shift();
-      if (oldest) this.publications.delete(oldest.id);
+      if (oldest) this.unpublish(oldest.id);
     }
   }
+
+  private scheduleExpiry(publication: FilePublication): void {
+    this.clearExpiry(publication.id);
+    const timer = setTimeout(() => this.unpublish(publication.id), Math.max(1, Date.parse(publication.expiresAt) - Date.now() + 1));
+    timer.unref();
+    this.expiryTimers.set(publication.id, timer);
+  }
+
+  private clearExpiry(id: string): void {
+    const timer = this.expiryTimers.get(id);
+    if (timer) clearTimeout(timer);
+    this.expiryTimers.delete(id);
+  }
+
+  private scheduleShareExpiry(publication: PortPublication): void {
+    this.clearShareExpiry(publication.id);
+    if (!publication.share) return;
+    const timer = setTimeout(() => this.revokeShare(publication.id), Math.max(1, Date.parse(publication.share.expiresAt) - Date.now() + 1));
+    timer.unref();
+    this.shareExpiryTimers.set(publication.id, timer);
+  }
+
+  private clearShareExpiry(id: string): void {
+    const timer = this.shareExpiryTimers.get(id);
+    if (timer) clearTimeout(timer);
+    this.shareExpiryTimers.delete(id);
+  }
+
+  private async removeStoppedPortPublications(): Promise<void> {
+    const activePorts = new Set((await this.ports.listPorts().catch(() => [])).map(({ port }) => port));
+    for (const publication of this.publications.values()) {
+      if (publication.kind === 'port' && !activePorts.has(publication.port)) this.unpublish(publication.id);
+    }
+  }
+
+  private trackConnections(id: string, scope: PreviewConnectionScope, ...connections: Array<{ destroy(error?: Error): void }>): () => void {
+    const key = `${id}:${scope}`;
+    const active = this.activeConnections.get(key) ?? new Set<{ destroy(error?: Error): void }>();
+    for (const connection of connections) active.add(connection);
+    this.activeConnections.set(key, active);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      for (const connection of connections) active.delete(connection);
+      if (!active.size) this.activeConnections.delete(key);
+    };
+  }
+
+  private closeConnections(id: string, scope?: PreviewConnectionScope): void {
+    const keys = scope ? [`${id}:${scope}`] : [...this.activeConnections.keys()].filter((key) => key.startsWith(`${id}:`));
+    for (const key of keys) {
+      const active = this.activeConnections.get(key);
+      this.activeConnections.delete(key);
+      if (!active) continue;
+      for (const connection of active) connection.destroy(new Error(scope === 'share' ? 'Preview share revoked.' : 'Preview publication revoked.'));
+    }
+  }
+}
+
+function publicationDeadline(publication: Publication): number {
+  return publication.kind === 'file' ? Date.parse(publication.expiresAt) : Number.MAX_SAFE_INTEGER;
 }
 
 export function previewAccessFileSource(path: string): PreviewAccessSource {
@@ -537,6 +701,28 @@ function constantDigestMatch(value: string, expected: string): boolean {
 function previewCookie(request: IncomingMessage, id: string): string | undefined {
   const prefix = `qubicl_preview_${id}=`;
   return request.headers.cookie?.split(';').map((value) => value.trim()).find((value) => value.startsWith(prefix))?.slice(prefix.length);
+}
+
+function applicationCookieHeader(request: IncomingMessage, id: string): string | undefined {
+  const reserved = `qubicl_preview_${id}=`;
+  const cookies = request.headers.cookie?.split(';').map((value) => value.trim())
+    .filter((value) => value && !value.startsWith(reserved) && !value.startsWith('__Host-qubicl_') && !/^qubicl_view(?:_|=)/u.test(value));
+  return cookies?.length ? cookies.join('; ') : undefined;
+}
+
+function safeApplicationCookies(values: string[] | undefined, publicationId: string): string[] {
+  if (!values) return [];
+  return values.flatMap((value) => {
+    const [pair, ...attributes] = value.split(';');
+    const separator = pair?.indexOf('=') ?? -1;
+    const name = separator > 0 ? pair!.slice(0, separator).trim() : undefined;
+    if (!name || name.toLowerCase() === `qubicl_preview_${publicationId}`.toLowerCase()
+      || /^__host-qubicl_/iu.test(name) || /^qubicl_view(?:_|$)/iu.test(name)) return [];
+    return [[
+      pair!.trim(),
+      ...attributes.map((attribute) => attribute.trim()).filter((attribute) => attribute && !/^domain=/iu.test(attribute)),
+    ].join('; ')];
+  });
 }
 
 function encodePreviewPath(path: string): string {

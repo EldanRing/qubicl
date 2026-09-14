@@ -186,6 +186,7 @@ export async function setupCommand(args: ParsedArgs, injectedPrompt?: SetupPromp
       state.config.gateway = {
         port: plan.gateway.port,
         image: gatewayIdentity,
+        viewerReconnectGraceSeconds: state.config.gateway.viewerReconnectGraceSeconds,
         ...(state.config.gateway.exposure ? { exposure: structuredClone(state.config.gateway.exposure) } : {}),
       };
       state.config.defaults = defaultContract;

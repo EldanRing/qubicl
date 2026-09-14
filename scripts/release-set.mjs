@@ -4,6 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { verifyCandidateDirectory } from './candidate-evidence.mjs';
+import { requiresReleaseImpact } from './release-impact.mjs';
 import { signEvidence, verifyEvidenceSignature } from './evidence-signature.mjs';
 
 const repositoryRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
@@ -29,6 +30,7 @@ export async function createReleaseSet(directory, { root = repositoryRoot } = {}
       source: candidate.source,
       imageCatalogSha256: candidate.imageCatalog.sha256,
       releaseTier: candidate.releaseTier,
+      ...(candidate.releaseImpact ? { releaseImpactSha256: candidate.releaseImpact.sha256, releaseImpactProfile: candidate.releaseImpact.profile } : {}),
     };
     common ??= identity;
     assert(JSON.stringify(identity) === JSON.stringify(common), `${target} candidate does not share the release identity and catalog.`);
@@ -70,6 +72,7 @@ export async function verifyReleaseSet(path, { root = repositoryRoot } = {}) {
     assert(candidate.version === document.version && candidate.revision === document.revision
       && candidate.source === document.source && candidate.imageCatalog.sha256 === document.imageCatalogSha256,
     `${member.target} candidate does not match the release-set identity.`);
+    if (requiresReleaseImpact(candidate.version)) assert(candidate.releaseImpact?.sha256 === document.releaseImpactSha256 && candidate.releaseImpact?.profile === document.releaseImpactProfile, `${member.target} candidate does not match the release impact identity.`);
     if (document.schemaVersion === 2) {
       assert(candidate.releaseTier === document.releaseTier,
         `${member.target} candidate does not match the release-set tier.`);
@@ -96,6 +99,7 @@ export function assertReleaseSetShape(document) {
     assert(['initial', 'supported'].includes(document.releaseTier),
       'release-set.json schemaVersion 2 requires an initial or supported release tier.');
   }
+  if (requiresReleaseImpact(document.version)) assert(hash(document.releaseImpactSha256) && ['documentation', 'npm-presentation', 'cli', 'runtime-component', 'full'].includes(document.releaseImpactProfile), 'Qubicl 0.6 and later release sets require one exact release-impact identity.');
   const targets = document.schemaVersion === 2 && document.releaseTier === 'initial'
     ? ['linux-x64']
     : RELEASE_TARGETS;

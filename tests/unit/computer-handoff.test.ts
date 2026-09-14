@@ -23,11 +23,13 @@ test('new computers persist a readable collision-safe Docker runtime name', () =
   assert.match(created.runtimeName ?? '', /^qubicl-research-[a-f0-9]{8}-[a-f0-9]{8}$/);
 });
 
-test('the primary installation persists the literal computer name as its runtime name', () => {
+test('the primary installation uses collision-safe runtime names and accepts formerly reserved names', () => {
   const state = { paths: statePaths(join(homedir(), '.qubicl')), config: defaultConfig(), secrets: defaultSecrets() };
   const created = addConfiguredComputer(state, 'openwebui-qubicl', presetDefaults('workstation'));
-  assert.equal(created.runtimeName, 'openwebui-qubicl');
-  assert.throws(() => addConfiguredComputer(state, 'gateway', presetDefaults('workstation')), /reserved by the primary Qubicl runtime/);
+  const gateway = addConfiguredComputer(state, 'gateway', presetDefaults('workstation'));
+  assert.match(created.runtimeName ?? '', /^qubicl-openwebui-qubicl-[a-f0-9]{8}-[a-f0-9]{8}$/);
+  assert.match(gateway.runtimeName ?? '', /^qubicl-gateway-[a-f0-9]{8}-[a-f0-9]{8}$/);
+  assert.notEqual(created.runtimeName, gateway.runtimeName);
 });
 
 test('computer create handoff is concise, human-oriented, and uses plain URLs', () => {

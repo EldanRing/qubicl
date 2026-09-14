@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
 import { z } from 'zod';
 import {
   CAPABILITY_CONTRACT_VERSION,
+  CONTROL_PROTOCOL_VERSION,
   CapabilityListSchema,
   ConfigPresetSchema,
   DockerPlatformSchema,
@@ -27,6 +29,7 @@ import {
   type GatewayExposureTlsSecret,
 } from './gateway-access.js';
 import { QUBICL_BUILD } from './version.js';
+import { ClientCredentialSchema } from './client-credentials.js';
 
 declare const __QUBICL_BUILD_DEFAULT_COMPUTER_IMAGE__: string | undefined;
 declare const __QUBICL_BUILD_DEFAULT_GATEWAY_IMAGE__: string | undefined;
@@ -48,8 +51,8 @@ export const NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 export const DEFAULT_GATEWAY_PORT = 3211;
 export const DEFAULT_CPUS = 2;
 export const DEFAULT_MEMORY = '4g';
-export const STATE_FORMAT_VERSION = 4;
-export const TRANSACTION_FORMAT_VERSION = 4;
+export const STATE_FORMAT_VERSION = 5;
+export const TRANSACTION_FORMAT_VERSION = 5;
 export const DEFAULT_GATEWAY_IMAGE = process.env.QUBICL_DEFAULT_GATEWAY_IMAGE ?? PACKAGED_DEFAULT_GATEWAY_IMAGE;
 /** Kept for source compatibility; new code should use the workstation catalog entry. */
 export const DEFAULT_COMPUTER_IMAGE = process.env.QUBICL_DEFAULT_COMPUTER_IMAGE ?? PACKAGED_DEFAULT_COMPUTER_IMAGE;
@@ -57,6 +60,15 @@ export const DEFAULT_COMPUTER_IMAGE = process.env.QUBICL_DEFAULT_COMPUTER_IMAGE 
 const sha256 = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const manifestSha = z.string().regex(/^[a-f0-9]{64}$/);
 const domainPattern = z.string().min(1).max(253).regex(/^(?:\*\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i, 'must be a DNS name or *.domain wildcard');
+const cidrPattern = z.string().min(3).max(64).superRefine((value, context) => {
+  const separator = value.lastIndexOf('/');
+  const address = separator > 0 ? value.slice(0, separator) : '';
+  const prefix = Number(value.slice(separator + 1));
+  const family = isIP(address);
+  if (!family || !Number.isInteger(prefix) || prefix < 0 || prefix > (family === 4 ? 32 : 128)) {
+    context.addIssue({ code: 'custom', message: 'must be an IPv4 or IPv6 CIDR' });
+  }
+});
 
 export const ImageIdentitySchema = z.strictObject({
   requested: z.string().min(1),
@@ -113,6 +125,10 @@ export const NetworkPolicySchema = z.strictObject({
   profile: NetworkProfileSchema,
   allowDomains: z.array(domainPattern).max(256).default([]),
   denyDomains: z.array(domainPattern).max(256).default([]),
+  allowCidrs: z.array(cidrPattern).max(64).default([]),
+  allowTcpPorts: z.array(z.number().int().min(1).max(65_535)).max(128).superRefine((ports, context) => {
+    if (new Set(ports).size !== ports.length) context.addIssue({ code: 'custom', message: 'TCP ports must be unique' });
+  }).default([]),
   temporaryApprovals: z.array(z.strictObject({ domain: domainPattern, expiresAt: z.iso.datetime() })).max(64).default([]),
 });
 export type NetworkPolicy = z.infer<typeof NetworkPolicySchema>;
@@ -141,12 +157,48 @@ export const SkillPolicySchema = z.strictObject({
 });
 export type SkillPolicy = z.infer<typeof SkillPolicySchema>;
 
+export const DEFAULT_TASK_POLICY = Object.freeze({
+  maxConcurrent: 32,
+  maxLifetimeSeconds: 7 * 24 * 60 * 60,
+  maxOutputBytes: 100_000_000,
+  completedRetentionSeconds: 7 * 24 * 60 * 60,
+});
+export const TaskPolicySchema = z.strictObject({
+  maxConcurrent: z.number().int().min(1).max(128),
+  maxLifetimeSeconds: z.number().int().min(60).max(30 * 24 * 60 * 60),
+  maxOutputBytes: z.number().int().min(1_000_000).max(500_000_000),
+  completedRetentionSeconds: z.number().int().min(60).max(30 * 24 * 60 * 60),
+});
+export type TaskPolicy = z.infer<typeof TaskPolicySchema>;
+
+export const DEFAULT_STORAGE_POLICY = Object.freeze({
+  homeWarningBytes: 20_000_000_000,
+  backupWarningBytes: 50_000_000_000,
+});
+export const StoragePolicySchema = z.strictObject({
+  homeWarningBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  backupWarningBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+});
+export type StoragePolicy = z.infer<typeof StoragePolicySchema>;
+
 export const ComputerConfigSchema = z.strictObject({
   id: z.uuid(),
   name: z.string().regex(NAME_PATTERN, 'must be a lowercase Docker-safe name'),
   runtimeName: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$/, 'must be a Docker-safe runtime name no longer than 63 characters').optional(),
   createdAt: z.iso.datetime(),
   controlProtocolVersion: z.number().int().positive().optional(),
+  browser: z.strictObject({
+    maxTabs: z.number().int().min(1).max(128),
+  }).optional(),
+  devcontainer: z.strictObject({
+    workspaceFolder: z.string().regex(/^\/home\/qubicl(?:\/.*)?$/u).max(4096).optional(),
+    hooks: z.strictObject({
+      onCreateCommand: z.string().min(1).max(32_768).optional(),
+      updateContentCommand: z.string().min(1).max(32_768).optional(),
+      postCreateCommand: z.string().min(1).max(32_768).optional(),
+      postStartCommand: z.string().min(1).max(32_768).optional(),
+    }).optional(),
+  }).optional(),
   network: NetworkPolicySchema.optional(),
   ssh: SshAccessSchema.optional(),
   environment: z.record(
@@ -155,6 +207,8 @@ export const ComputerConfigSchema = z.strictObject({
   ).refine((value) => Object.keys(value).length <= 128, 'at most 128 environment entries are allowed').optional(),
   toolPolicy: ToolPolicySchema.optional(),
   skillPolicy: SkillPolicySchema.optional(),
+  tasks: TaskPolicySchema.optional(),
+  storage: StoragePolicySchema.optional(),
   ...contractFields,
 }).superRefine((value, context) => {
   validateContract(value, context);
@@ -176,6 +230,7 @@ export const ManifestGatewayConfigSchema = z.strictObject(manifestGatewayFields)
 
 export const GatewayConfigSchema = z.strictObject({
   ...manifestGatewayFields,
+  viewerReconnectGraceSeconds: z.number().int().min(5).max(300).default(10),
   exposure: GatewayExposureConfigSchema.optional(),
 }).superRefine((value, context) => {
   if (value.exposure?.port === value.port) {
@@ -276,6 +331,12 @@ export const LegacyConfigV3Schema = z.strictObject({
 }).superRefine(validateConfigComputers);
 export type LegacyQubiclConfigV3 = z.infer<typeof LegacyConfigV3Schema>;
 
+export const LegacyConfigV4Schema = z.strictObject({
+  version: z.literal(4),
+  ...currentConfigFields,
+}).superRefine(validateConfigComputers);
+export type LegacyQubiclConfigV4 = z.infer<typeof LegacyConfigV4Schema>;
+
 export const ConfigSchema = z.strictObject({
   version: z.literal(STATE_FORMAT_VERSION),
   ...currentConfigFields,
@@ -287,6 +348,10 @@ const computerSecretFields = {
   computers: z.record(z.uuid(), z.object({
     token: z.string().min(32),
     internalKey: z.string().min(32),
+    clients: z.array(ClientCredentialSchema).max(64).superRefine((clients, context) => {
+      if (new Set(clients.map(({ id }) => id)).size !== clients.length) context.addIssue({ code: 'custom', message: 'client credential IDs must be unique' });
+      if (clients.some(({ id }) => id === 'default')) context.addIssue({ code: 'custom', message: 'default is reserved for the compatibility credential' });
+    }).optional(),
     brokerCredentials: z.array(z.strictObject({
       id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/),
       baseUrl: z.url({ protocol: /^https$/ }).max(2048),
@@ -316,14 +381,16 @@ export const LegacySecretsV2Schema = z.object({ version: z.literal(2), ...comput
 export type LegacyQubiclSecretsV2 = z.infer<typeof LegacySecretsV2Schema>;
 export const LegacySecretsV3Schema = z.strictObject({ version: z.literal(3), ...secretFields });
 export type LegacyQubiclSecretsV3 = z.infer<typeof LegacySecretsV3Schema>;
+export const LegacySecretsV4Schema = z.strictObject({ version: z.literal(4), ...secretFields });
+export type LegacyQubiclSecretsV4 = z.infer<typeof LegacySecretsV4Schema>;
 export const SecretsSchema = z.strictObject({ version: z.literal(STATE_FORMAT_VERSION), ...secretFields });
 export type QubiclSecrets = z.infer<typeof SecretsSchema>;
 
 export const StateMigrationSchema = z.strictObject({
-  version: z.literal(3),
+  version: z.literal(4),
   id: z.uuid(),
   createdAt: z.iso.datetime(),
-  sourceVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+  sourceVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
   targetVersion: z.literal(STATE_FORMAT_VERSION),
   backupName: z.string().regex(/^[a-zA-Z0-9._-]+$/),
   config: ConfigSchema,
@@ -340,6 +407,27 @@ export const StateMigrationSchema = z.strictObject({
   validateGatewayExposureSecret(migration.config.gateway.exposure, migration.secrets.gateway?.tls, ['secrets', 'gateway', 'tls'], context);
 });
 export type StateMigration = z.infer<typeof StateMigrationSchema>;
+
+export const LegacyStateMigrationV4Schema = z.strictObject({
+  version: z.literal(3),
+  id: z.uuid(),
+  createdAt: z.iso.datetime(),
+  sourceVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+  targetVersion: z.literal(4),
+  backupName: z.string().regex(/^[a-zA-Z0-9._-]+$/),
+  config: LegacyConfigV4Schema,
+  secrets: LegacySecretsV4Schema,
+}).superRefine((migration, context) => {
+  const { missingSecrets, orphanSecrets } = stateComputerIdMismatch(migration.config, migration.secrets);
+  if (missingSecrets.length || orphanSecrets.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['secrets', 'computers'],
+      message: `must exactly match config computer IDs; missing: ${missingSecrets.join(', ') || 'none'}; orphan: ${orphanSecrets.join(', ') || 'none'}`,
+    });
+  }
+  validateGatewayExposureSecret(migration.config.gateway.exposure, migration.secrets.gateway?.tls, ['secrets', 'gateway', 'tls'], context);
+});
 
 export const LegacyStateMigrationV3Schema = z.strictObject({
   version: z.literal(2),
@@ -387,6 +475,7 @@ export const TransactionOperationSchema = z.enum([
   'restore',
   'backup-restore',
   'token-rotate',
+  'client-credential',
   'apply',
 ]);
 
@@ -585,6 +674,16 @@ export const LegacyStateTransactionV3Schema = z.strictObject({
   trash: z.array(TrashTransactionEntrySchema),
 }).superRefine(validateStateTransaction);
 
+export const LegacyStateTransactionV4Schema = z.strictObject({
+  version: z.literal(4),
+  operation: TransactionOperationSchema,
+  ...transactionBase,
+  config: LegacyConfigV4Schema,
+  secrets: LegacySecretsV4Schema,
+  active: z.array(ActiveTransactionEntrySchema),
+  trash: z.array(TrashTransactionEntrySchema),
+}).superRefine(validateStateTransaction);
+
 export const StateTransactionSchema = z.strictObject({
   version: z.literal(TRANSACTION_FORMAT_VERSION),
   operation: TransactionOperationSchema,
@@ -699,7 +798,11 @@ export function migrateSecretsV1(secrets: LegacyQubiclSecretsV1): QubiclSecrets 
 
 export function migrateConfigV3(config: LegacyQubiclConfigV3): QubiclConfig {
   const { version: _version, ...fields } = LegacyConfigV3Schema.parse(config);
-  return ConfigSchema.parse({ version: STATE_FORMAT_VERSION, ...fields });
+  return ConfigSchema.parse({
+    version: STATE_FORMAT_VERSION,
+    ...fields,
+    computers: fields.computers.map(({ runtimeName: _runtimeName, ...computer }) => computer),
+  });
 }
 
 export function migrateSecretsV3(secrets: LegacyQubiclSecretsV3): QubiclSecrets {
@@ -707,9 +810,41 @@ export function migrateSecretsV3(secrets: LegacyQubiclSecretsV3): QubiclSecrets 
   return SecretsSchema.parse({ version: STATE_FORMAT_VERSION, ...fields });
 }
 
+export function migrateConfigV4(config: LegacyQubiclConfigV4): QubiclConfig {
+  const { version: _version, ...fields } = LegacyConfigV4Schema.parse(config);
+  return ConfigSchema.parse({
+    version: STATE_FORMAT_VERSION,
+    ...fields,
+    computers: fields.computers.map(({ runtimeName: _runtimeName, ...computer }) => ({
+      ...computer,
+      controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
+      network: computer.network ?? { profile: 'developer', allowDomains: [], denyDomains: [], allowCidrs: [], allowTcpPorts: [], temporaryApprovals: [] },
+      browser: computer.browser ?? { maxTabs: 24 },
+    })),
+  });
+}
+
+export function migrateSecretsV4(secrets: LegacyQubiclSecretsV4): QubiclSecrets {
+  const { version: _version, ...fields } = LegacySecretsV4Schema.parse(secrets);
+  return SecretsSchema.parse({ version: STATE_FORMAT_VERSION, ...fields });
+}
+
 export function parseStateTransactionDocument(value: unknown): { transaction: StateTransaction; migrated: boolean; sourceVersion?: number } {
   const current = StateTransactionSchema.safeParse(value);
   if (current.success) return { transaction: current.data, migrated: false };
+  const v4 = LegacyStateTransactionV4Schema.safeParse(value);
+  if (v4.success) {
+    return {
+      transaction: StateTransactionSchema.parse({
+        ...v4.data,
+        version: TRANSACTION_FORMAT_VERSION,
+        config: migrateConfigV4(v4.data.config),
+        secrets: migrateSecretsV4(v4.data.secrets),
+      }),
+      migrated: true,
+      sourceVersion: 4,
+    };
+  }
   const v3 = LegacyStateTransactionV3Schema.safeParse(value);
   if (v3.success) {
     return {

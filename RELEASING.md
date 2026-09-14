@@ -4,6 +4,20 @@ Qubicl releases are built and published from maintainer-controlled local
 hardware. Nothing uses GitHub Actions, and publication never rebuilds a tested
 artifact.
 
+The instructions below describe the currently enforced candidate and publisher
+contract. The [0.6 design](docs/decisions/0002-v0.6-capabilities-and-constraints.md)
+adds exact change-impact analysis, representative affected clients, and
+identity/freshness-bound evidence reuse. Candidate, release-set, verifier, and
+publisher metadata enforce that impact identity. The publisher still requires
+the complete immutable signed candidate; there is no npm-only or unchanged-image
+publication mode.
+
+Before selecting gates, identify changed source/dependencies, resulting
+artifacts, affected state/protocol/platform behavior, and reusable evidence with
+its exact input identities and freshness. Development-only documentation checks
+do not require a release candidate. Publication still needs the reviewed,
+implemented validator/publisher path and explicit approval for the version.
+
 ## The practical pre-1.0 policy
 
 Qubicl remains a pre-1.0 series. The supported-host policy covers Linux x64,
@@ -20,10 +34,12 @@ schema-4 release-set acceptance bundle. The signed tier selects the acceptance
 profile: `initial` records the exact Linux x64 general platform, lifecycle, and
 native remote-access evidence required for an honest pre-1.0 release, while
 `supported` retains the complete cross-platform and independent-review matrix.
-Beginning with v0.5, both tiers also require the complete real-client/protocol
-matrix plus dashboard-specific native Linux x64, Apple Silicon macOS, and
-physical-iPhone Safari evidence. The narrower dashboard rows do not establish
-general current-candidate macOS or Windows testing.
+For v0.5, both tiers require the complete real-client/protocol matrix plus
+dashboard-specific native Linux x64, Apple Silicon macOS, and physical-iPhone
+Safari evidence. For v0.6 and later, the exact release-impact document selects
+affected protocols and platforms; every selected row needs applicable signed
+evidence, and missing coverage cannot pass. The narrower dashboard rows do not
+establish general current-candidate macOS or Windows testing.
 The versioned [platform support matrix](conformance/platform-support-v1.json)
 is the source of truth for these support and evidence classifications.
 
@@ -34,7 +50,10 @@ An initial candidate must still:
 - contain exact amd64/arm64 OCI archives, catalogs, SBOMs, provenance, checksums,
   and twelve retained Trivy reports;
 - bind post-freeze client, protocol, Linux x64 lifecycle, native-Linux
-  remote-access, and v0.5 dashboard evidence in schema 4;
+  remote-access, and applicable dashboard evidence in schema 4;
+- bind an exact `release-impact.json` for v0.6 and later, including the prior
+  release commit, candidate commit, changed paths, artifacts, checks, protocols,
+  platforms, and evidence-reuse rule;
 - contain no scanner-detected secrets; and
 - reject every HIGH/CRITICAL finding for which the scanner reports an available
   fix unless an exact current review record covers it.
@@ -78,7 +97,7 @@ public address and verify it with `npm profile get`. See npm's
 [profile guidance](https://docs.npmjs.com/managing-your-profile-settings/) and
 [threat model](https://docs.npmjs.com/threats-and-mitigations/).
 
-Inspect `npm dist-tag ls qubicl-cli` before announcing the public repository.
+Inspect `npm dist-tag ls qubicl-cli` before announcing a release.
 Prereleases belong on `dev` or `next`; `latest` must identify the stable
 release. The guarded publisher verifies the candidate under `next` and moves
 `latest` only after the npm, GHCR, Git tag, and GitHub Release checks succeed.
@@ -90,7 +109,7 @@ Prerequisites on the Linux x64 release host:
 - the Node/npm versions pinned by this repository;
 - Docker Engine/Desktop, Compose, and a multi-platform Buildx builder;
 - checksum-verified Gitleaks 8.30.1, or a separately reviewed compatible build;
-- Trivy 0.74.0, which the v0.5 candidate tooling enforces; and
+- Trivy 0.74.0, which the candidate tooling enforces; and
 - a clean checkout of the new public repository at the release revision.
 
 Run:
@@ -103,8 +122,15 @@ npm run public:check
 npm run check:release
 npm run tokens:audit
 npm run performance -- --no-build
-npm run candidate:release
+npm run release:impact -- --base v0.5.1 --output /secure/release-impact-v0.6.0.json
+npm run candidate:release -- --impact /secure/release-impact-v0.6.0.json
 ```
+
+Generate the impact document only after the release commit is frozen. The
+command resolves both revisions and refuses to overwrite an existing output.
+The candidate verifier recomputes the Git name-only diff and classifier, then
+checks the embedded document's hash and exact base/candidate identity. This 0.6
+source range affects shared contracts and therefore classifies as `full`.
 
 If a late candidate check fails, Qubicl preserves the staging directory under
 `release/candidates/.failed-*` instead of deleting completed images, scans, and
@@ -137,7 +163,7 @@ report from the retained bytes, and publication includes it as release evidence.
 The builder writes an ignored candidate beneath:
 
 ```text
-release/candidates/0.5.1-<revision>/linux-x64/
+release/candidates/0.6.0-<revision>/linux-x64/
 ```
 
 From the same clean reviewed revision, verify it without rebuilding or rerunning
@@ -199,7 +225,7 @@ The dry run verifies the full candidate and the exact checkout but performs no
 remote mutation. After explicit approval:
 
 ```sh
-QUBICL_RELEASE_APPROVAL=0.5.1 npm run release:publish -- \
+QUBICL_RELEASE_APPROVAL=0.6.0 npm run release:publish -- \
   --candidate /path/to/candidate \
   --public-key /secure/offline/qubicl-release.public.pem \
   --signature /path/to/candidate.signature.json \
@@ -220,7 +246,8 @@ The guarded publisher:
 5. creates and pushes the annotated tag for the candidate version;
 6. creates the GitHub release with the native archive, checksums, catalog,
    candidate manifest, SBOMs, and vulnerability summary; and
-7. only after those checks pass, moves the GHCR and npm `latest` tags.
+7. includes the exact release-impact document in the GitHub release; and
+8. only after those checks pass, moves the GHCR and npm `latest` tags.
 
 GitHub creates container packages pushed from the command line as private and
 does not provide a supported package-visibility REST operation. On the first
@@ -240,7 +267,7 @@ never changes repository or package visibility.
 From a clean user environment:
 
 ```sh
-npm install -g qubicl-cli@0.5.1
+npm install -g qubicl-cli@0.6.0
 qubicl setup
 qubicl doctor
 ```
@@ -249,14 +276,16 @@ Create one computer, connect one real client, open the viewer, and verify an
 upgrade while preserving the computer's home. If that smoke fails, do not move
 or advertise additional mutable tags; document and fix the release.
 
-## Supported and 1.0 releases are deliberately stricter
+## Current supported-tier requirements
 
 The full cross-platform/reboot matrix, complete real-client evidence,
 independent security review, and individually reviewed remaining
-HIGH/CRITICAL findings are requirements for the `supported` tier and eventual
-1.0—not artificial blockers for publishing an honest pre-1.0 `initial` release.
+HIGH/CRITICAL findings are requirements of the current `supported` tier. The
+`initial` tier has its own enforced requirements described above. Future 1.0
+qualification must be reviewed against the implemented product and release
+policy rather than inferred from a historical candidate checklist.
 
-Every v0.2 release uses release-set schema 2. An `initial` set contains the one
+The current release-set format, introduced in v0.2, is schema 2. An `initial` set contains the one
 complete Linux x64 candidate. A `supported` set additionally aggregates the
 Linux ARM64 and both macOS native candidates. Create and sign either tier from
 its exact candidate directory:
@@ -285,11 +314,12 @@ evidence remains readable only for v0.1. Schema 4 hash-binds the reviewed
 plus post-freeze evidence for every applicable surface in each required row.
 For v0.2 through v0.4, the initial profile requires Codex, Open WebUI, MCP
 stdio, MCP HTTP, OpenAPI, and Open Terminal. The supported profile requires all
-nine named applications and all four protocol probes. Beginning with v0.5, the
-complete nine-application and four-protocol matrix is required by both tiers.
-Adding this gate does not produce the evidence:
-the required real-client runs must still be performed against the frozen
-candidate before acceptance is signed.
+nine named applications and all four protocol probes. v0.5 requires the complete
+nine-application and four-protocol matrix for both tiers. For v0.6 and later,
+the release-impact document selects the affected protocol surfaces; adapters
+whose inputs changed require their real client rows. Adding this gate does not
+produce evidence: required real-client runs must still be performed against the
+frozen candidate before acceptance is signed.
 
 Schema 4 also hash-binds `platform-support-v1.json`. The initial profile
 requires the exact Linux x64 host/runtime versions plus minimum-version and

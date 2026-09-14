@@ -59,7 +59,7 @@ test('gateway exposes no viewer surface for a non-viewer route', async (context)
   const routesPath = join(directory, 'routes.json');
   const id = '00000000-0000-4000-8000-000000000099';
   await writeFile(routesPath, JSON.stringify({
-    version: 2,
+    version: 3,
     generatedAt: new Date().toISOString(),
     routes: [{
       id,
@@ -100,7 +100,7 @@ test('gateway authenticates, proxies internal credentials, and hot-reloads token
   const id = '00000000-0000-4000-8000-000000000001';
   const writeRoutes = async (token: string): Promise<void> => {
     const temporary = `${routesPath}.tmp`;
-    await writeFile(temporary, JSON.stringify({ version: 2, generatedAt: new Date().toISOString(), routes: [route(id, 'qubicl-1', backendPort, token, 'internal-key-that-is-definitely-long-enough')] }));
+    await writeFile(temporary, JSON.stringify({ version: 3, generatedAt: new Date().toISOString(), routes: [route(id, 'qubicl-1', backendPort, token, 'internal-key-that-is-definitely-long-enough')] }));
     await rename(temporary, routesPath);
   };
   await writeRoutes('first');
@@ -123,10 +123,59 @@ test('gateway authenticates, proxies internal credentials, and hot-reloads token
   await writeFile(routesPath, '{');
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.equal((await fetch(url, { headers: { authorization: 'Bearer second' } })).status, 200);
-  await writeFile(routesPath, JSON.stringify({ version: 2, generatedAt: new Date().toISOString(), routes: [route(id, 'qubicl-1', backendPort, 'third', 'internal-key-that-is-definitely-long-enough')] }));
+  await writeFile(routesPath, JSON.stringify({ version: 3, generatedAt: new Date().toISOString(), routes: [route(id, 'qubicl-1', backendPort, 'third', 'internal-key-that-is-definitely-long-enough')] }));
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.equal((await fetch(url, { headers: { authorization: 'Bearer second' } })).status, 401);
   assert.equal((await fetch(url, { headers: { authorization: 'Bearer third' } })).status, 200);
+});
+
+test('named client credentials carry scoped identity and revoke independently', async (context) => {
+  const observed: Array<Record<string, string | string[] | undefined>> = [];
+  const backend = createServer((request, response) => {
+    if (request.url !== '/_qubicl/gateway-epoch') observed.push(request.headers);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end('{}');
+  });
+  await new Promise<void>((resolve) => backend.listen(0, '127.0.0.1', resolve));
+  context.after(() => backend.close());
+  const backendPort = (backend.address() as { port: number }).port;
+  const directory = await mkdtemp(join(tmpdir(), 'qubicl-client-credential-'));
+  const routesPath = join(directory, 'routes.json');
+  const id = '00000000-0000-4000-8000-000000000091';
+  const writeRoutes = async (includeObserver: boolean): Promise<void> => {
+    const base = route(id, 'scoped', backendPort, 'default-token', 'internal-key-that-is-definitely-long-enough');
+    await writeFile(routesPath, JSON.stringify({
+      version: 3,
+      generatedAt: new Date().toISOString(),
+      routes: [{
+        ...base,
+        clientCredentials: [
+          { id: 'default', label: 'Default client', tokenHash: hashToken('default-token'), scopes: ['observe', 'files', 'tasks', 'interactive', 'publish'], createdAt: new Date(0).toISOString() },
+          ...(includeObserver ? [{ id: 'monitor', label: 'Status monitor', tokenHash: hashToken('observer-token'), scopes: ['observe'], createdAt: new Date(0).toISOString() }] : []),
+        ],
+      }],
+    }));
+  };
+  await writeRoutes(true);
+  const gateway = new Gateway(new RouteStore(routesPath));
+  await gateway.start(0);
+  context.after(() => gateway.close());
+  const port = (gateway.server.address() as { port: number }).port;
+  const base = `http://127.0.0.1:${port}/computers/${id}`;
+
+  const allowed = await fetch(`${base}/openapi.json`, { headers: { authorization: 'Bearer observer-token' } });
+  assert.equal(allowed.status, 200);
+  assert.equal(observed.at(-1)?.['x-qubicl-client-id'], 'monitor');
+  assert.equal(observed.at(-1)?.['x-qubicl-client-label'], 'Status monitor');
+  assert.equal(observed.at(-1)?.['x-qubicl-client-scopes'], 'observe');
+  const denied = await fetch(`${base}/view-ticket`, { method: 'POST', headers: { authorization: 'Bearer observer-token' } });
+  assert.equal(denied.status, 403);
+  assert.match(JSON.stringify(await denied.json()), /client_scope_denied.*interactive/iu);
+
+  await writeRoutes(false);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal((await fetch(`${base}/openapi.json`, { headers: { authorization: 'Bearer observer-token' } })).status, 401);
+  assert.equal((await fetch(`${base}/openapi.json`, { headers: { authorization: 'Bearer default-token' } })).status, 200);
 });
 
 test('gateway permits authenticated browser OpenAPI calls only from loopback HTTP origins', async (context) => {
@@ -143,7 +192,7 @@ test('gateway permits authenticated browser OpenAPI calls only from loopback HTT
   const routesPath = join(directory, 'routes.json');
   const id = '00000000-0000-4000-8000-000000000003';
   await writeFile(routesPath, JSON.stringify({
-    version: 2,
+    version: 3,
     generatedAt: new Date().toISOString(),
     routes: [route(id, 'browser-openapi', backendPort, 'token', 'internal-key-that-is-definitely-long-enough')],
   }));
@@ -245,7 +294,7 @@ test('gateway exposes the isolated Open Terminal compatibility namespace with bo
   const routesPath = join(directory, 'routes.json');
   const id = '00000000-0000-4000-8000-000000000077';
   await writeFile(routesPath, JSON.stringify({
-    version: 2,
+    version: 3,
     generatedAt: new Date().toISOString(),
     routes: [route(id, 'open-terminal', backendPort, 'token', 'internal-key-that-is-definitely-long-enough')],
   }));
@@ -330,7 +379,7 @@ test('gateway isolates hostile previews from viewer and API authority by host', 
   const routesPath = join(directory, 'routes.json');
   const id = '00000000-0000-4000-8000-000000000078';
   await writeFile(routesPath, JSON.stringify({
-    version: 2,
+    version: 3,
     generatedAt: new Date().toISOString(),
     routes: [route(id, 'preview-origin', backendPort, 'token', 'internal-key-that-is-definitely-long-enough')],
   }));
@@ -353,7 +402,18 @@ test('gateway isolates hostile previews from viewer and API authority by host', 
   assert.equal((await requestWithHost(port, `/computers/${id}/openapi.json`, host, {
     headers: { authorization: 'Bearer token' },
   })).status, 403);
-  assert.deepEqual(backendPaths, ['/_qubicl/previews/publication/path']);
+  const publicationHost = `0123456789abcdef--${previewHostname(id)}:${port}`;
+  const rootAsset = await requestWithHost(port, '/assets/app.js?hot=1', publicationHost, {
+    headers: { origin: `http://${publicationHost}`, authorization: 'Bearer app-session' },
+  });
+  assert.equal(rootAsset.status, 200);
+  assert.equal((await requestWithHost(port, '/assets/app.js', publicationHost, {
+    headers: { origin: `http://${host}` },
+  })).status, 403);
+  assert.deepEqual(backendPaths, [
+    '/_qubicl/previews/publication/path',
+    '/_qubicl/previews/0123456789abcdef/assets/app.js?hot=1',
+  ]);
 });
 
 test('gateway epoch synchronization becomes idle after acknowledgement', async (context) => {
@@ -371,7 +431,7 @@ test('gateway epoch synchronization becomes idle after acknowledgement', async (
   const id = '00000000-0000-4000-8000-000000000010';
   const writeRoutes = async (internalKey: string): Promise<void> => {
     await writeFile(routesPath, JSON.stringify({
-      version: 2,
+      version: 3,
       generatedAt: new Date().toISOString(),
       routes: [route(id, 'epoch-test', backendPort, 'token', internalKey)],
     }));
@@ -490,7 +550,7 @@ test('viewer tickets are read-only and token-bound', async (context) => {
   const routesPath = join(directory, 'routes.json');
   const id = '00000000-0000-4000-8000-000000000002';
   const writeRoutes = async (token: string, authenticatedViewer = true, internalKey = firstInternalKey): Promise<void> => {
-    await writeFile(routesPath, JSON.stringify({ version: 2, generatedAt: new Date().toISOString(), routes: [route(id, 'viewer', backendPort, token, internalKey, backendPort, controllingPort, authenticatedViewer)] }));
+    await writeFile(routesPath, JSON.stringify({ version: 3, generatedAt: new Date().toISOString(), routes: [route(id, 'viewer', backendPort, token, internalKey, backendPort, controllingPort, authenticatedViewer)] }));
   };
   await writeRoutes('first');
   const gateway = new Gateway(new RouteStore(routesPath), 1_000, 25);
@@ -514,8 +574,8 @@ test('viewer tickets are read-only and token-bound', async (context) => {
   assert.equal(viewer.status, 200);
   const viewerHtml = await viewer.text();
   assert.match(viewerHtml, /view_only=true/);
-  assert.match(viewerHtml, /Take control stops agent commands\. Desktop-session applications and the managed browser stay open\./);
-  assert.match(viewerHtml, /Closing this viewer releases control after 10 seconds\./);
+  assert.match(viewerHtml, /Take control fences agent interactive input\. Background tasks, services, desktop applications, and the managed browser stay open\./);
+  assert.match(viewerHtml, /A disconnected controlling viewer has 0\.025 seconds to reconnect\./);
   assert.match(viewerHtml, /Chromium profile data is durable and survives restarts and upgrades\./);
   assert.match(viewerHtml, /preservedDesktopApplications/);
   assert.match(viewerHtml, /preservedBrowserSessions/);
@@ -618,6 +678,10 @@ test('viewer tickets are read-only and token-bound', async (context) => {
   assert.equal((await fetch(`${base}/operator/human-control/release`, {
     method: 'POST',
     headers: { authorization: 'Bearer second' },
+  })).status, 401);
+  assert.equal((await fetch(`${base}/operator/human-control/release`, {
+    method: 'POST',
+    headers: { 'x-qubicl-operator-key': firstInternalKey },
   })).status, 200);
   assert.equal((await fetch(`${base}/human-control/release`, { method: 'POST', headers: { cookie, origin } })).status, 409);
 
@@ -627,6 +691,14 @@ test('viewer tickets are read-only and token-bound', async (context) => {
     const response = await fetch(frameUrl, { headers: { cookie, 'x-qubicl-viewer-key': firstViewerKey } });
     return response.ok && staticViewerHeaders.at(-1) === rotatedViewerKey;
   });
+  assert.equal((await fetch(`${base}/operator/human-control/release`, {
+    method: 'POST',
+    headers: { 'x-qubicl-operator-key': firstInternalKey },
+  })).status, 401);
+  assert.equal((await fetch(`${base}/operator/human-control/release`, {
+    method: 'POST',
+    headers: { 'x-qubicl-operator-key': rotatedInternalKey },
+  })).status, 200);
   assert.equal((await fetch(`http://127.0.0.1:${backendPort}/vnc.html`, { headers: { 'x-qubicl-viewer-key': firstViewerKey } })).status, 403);
   const rotatedReconnect = await openWebSocket(port, id, cookie, { viewerKey: firstViewerKey });
   assert.equal(observerViewerHeaders.at(-1), rotatedViewerKey);

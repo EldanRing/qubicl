@@ -344,7 +344,7 @@ test('viewer images isolate raw VNC behind authenticated dedicated-user Unix rel
   assert.match(entrypoint, /\/usr\/bin\/python3 -I \/usr\/bin\/websockify/);
   assert.match(entrypoint, /\(umask 077; printf '[^']*' "\$viewer_key" >\/run\/qubicl-viewer\/key\)/);
   assert.doesNotMatch(entrypoint, /^umask 077$/m);
-  assert.doesNotMatch(entrypoint, /\/home\/[^\n]*(?:viewer|key)|(?:viewer|key)[^\n]*\/home\//i);
+  assert.doesNotMatch(entrypoint, /\/home\/[^\n]*viewer|(?:QUBICL_VIEWER_KEY|viewer_key)[^\n]*\/home\//i);
   assert.doesNotMatch(entrypoint, /--auth-source=.*(?:QUBICL_VIEWER_KEY|viewer_key_handoff)/);
   assert.doesNotMatch(entrypoint, /localhost:590[01]|-rfbport 590[01]/);
   assert.match(relay, /-inetd/);

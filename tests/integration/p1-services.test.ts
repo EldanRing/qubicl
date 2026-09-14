@@ -34,7 +34,7 @@ test('authenticated previews proxy HTTP, establish a private cookie, and revoke 
   const manager = new PreviewManager(
     { listPorts: async () => [{ port: targetPort, address: 'loopback', protocol: 'tcp' }] },
     '127.0.0.1',
-    'http://127.0.0.1:3211/computers/example/previews',
+    'http://preview-example.localhost:3211/computers/example/previews',
     'http://gateway:3211/computers/example/previews',
     'https://preview-example.remote.test/computers/example/previews',
   );
@@ -49,9 +49,10 @@ test('authenticated previews proxy HTTP, establish a private cookie, and revoke 
     const token = new URL(publication.url as string).searchParams.get('token');
     assert.ok(token);
     assert.equal(
-      publication.remoteUrl,
-      `https://preview-example.remote.test/computers/example/previews/${id}/?token=${encodeURIComponent(token)}`,
+      new URL(publication.remoteUrl as string).hostname,
+      `${id}--preview-example.remote.test`,
     );
+    assert.notEqual(new URL(publication.remoteUrl as string).searchParams.get('token'), token);
     assert.equal((await fetch(`http://127.0.0.1:${frontPort}/_qubicl/previews/${id}/hello`)).status, 401);
 
     const authenticated = await fetch(`http://127.0.0.1:${frontPort}/_qubicl/previews/${id}/hello?answer=42&token=${encodeURIComponent(token)}`, {
@@ -60,14 +61,14 @@ test('authenticated previews proxy HTTP, establish a private cookie, and revoke 
     assert.equal(authenticated.status, 200);
     const cookie = authenticated.headers.get('set-cookie');
     assert.match(cookie ?? '', new RegExp(`^qubicl_preview_${id}=`));
-    assert.match(cookie ?? '', new RegExp(`Path=/computers/example/previews/${id}/(?:;|$)`));
+    assert.match(cookie ?? '', /Path=\/(?:;|$)/u);
     assert.deepEqual(await authenticated.json(), { path: '/hello?answer=42', leakedAuthorization: null });
 
     const withCookie = await fetch(`http://127.0.0.1:${frontPort}/_qubicl/previews/${id}/again`, { headers: { cookie: cookie!.split(';')[0]! } });
     assert.equal(withCookie.status, 200);
     assert.equal(manager.list().length, 1);
-    assert.equal(manager.list()[0]?.url, `http://127.0.0.1:3211/computers/example/previews/${id}/`);
-    assert.equal(manager.list()[0]?.remoteUrl, `https://preview-example.remote.test/computers/example/previews/${id}/`);
+    assert.equal(manager.list()[0]?.url, `http://${id}--preview-example.localhost:3211/`);
+    assert.equal(manager.list()[0]?.remoteUrl, `https://${id}--preview-example.remote.test/`);
     manager.clear();
     assert.equal((await fetch(`http://127.0.0.1:${frontPort}/_qubicl/previews/${id}/again`, { headers: { cookie: cookie!.split(';')[0]! } })).status, 401);
   } finally {
@@ -75,10 +76,61 @@ test('authenticated previews proxy HTTP, establish a private cookie, and revoke 
   }
 });
 
+test('preview applications retain their own cookies and authorization without receiving Qubicl credentials', async () => {
+  const received: Array<{ cookie: string | null; authorization: string | null }> = [];
+  const target = createServer((request, response) => {
+    received.push({ cookie: request.headers.cookie ?? null, authorization: request.headers.authorization ?? null });
+    response.writeHead(200, {
+      'content-type': 'application/json',
+      'set-cookie': ['app_session=abc; HttpOnly; Path=/; Domain=untrusted.example'],
+    });
+    response.end('{}');
+  });
+  const targetPort = await listen(target);
+  const manager = new PreviewManager(
+    { listPorts: async () => [{ port: targetPort, address: 'loopback', protocol: 'tcp' }] },
+    '127.0.0.1',
+    'http://preview-example.localhost:3211/computers/example/previews',
+    'http://gateway:3211/computers/example/previews',
+  );
+  const front = createServer((request, response) => {
+    const url = new URL(request.url ?? '/', 'http://control.internal');
+    if (!manager.handle(request, response, url)) response.writeHead(404).end();
+  });
+  const frontPort = await listen(front);
+  try {
+    const publication = await manager.publish(targetPort) as { id: string; url: string };
+    const ownerToken = new URL(publication.url).searchParams.get('token')!;
+    const first = await fetch(`http://127.0.0.1:${frontPort}/_qubicl/previews/${publication.id}/login?token=${ownerToken}`, {
+      headers: { 'x-qubicl-preview-authorization': 'Bearer application-token' },
+    });
+    assert.equal(first.status, 200);
+    const cookies = first.headers.get('set-cookie') ?? '';
+    assert.match(cookies, /app_session=abc/u);
+    assert.equal(/Domain=/iu.test(cookies), false);
+    assert.match(cookies, new RegExp(`qubicl_preview_${publication.id}=`, 'u'));
+
+    const second = await fetch(`http://127.0.0.1:${frontPort}/_qubicl/previews/${publication.id}/account`, {
+      headers: {
+        cookie: `app_session=abc; qubicl_preview_${publication.id}=${ownerToken}`,
+        'x-qubicl-preview-authorization': 'Bearer application-token',
+      },
+    });
+    assert.equal(second.status, 200);
+    assert.deepEqual(received, [
+      { cookie: null, authorization: 'Bearer application-token' },
+      { cookie: 'app_session=abc', authorization: 'Bearer application-token' },
+    ]);
+  } finally {
+    manager.clear();
+    await Promise.all([close(front), close(target)]);
+  }
+});
+
 test('offline egress is healthy but rejects authenticated and unauthenticated proxy traffic', { concurrency: false }, async () => {
   const prior = { policy: process.env.QUBICL_NETWORK_POLICY, proxy: process.env.QUBICL_PROXY_KEY, broker: process.env.QUBICL_BROKER_KEY };
   const proxyKey = 'p'.repeat(43);
-  process.env.QUBICL_NETWORK_POLICY = JSON.stringify({ profile: 'offline', allowDomains: [], denyDomains: [], temporaryApprovals: [] });
+  process.env.QUBICL_NETWORK_POLICY = JSON.stringify({ profile: 'offline', allowDomains: [], denyDomains: [], allowCidrs: [], allowTcpPorts: [], temporaryApprovals: [] });
   process.env.QUBICL_PROXY_KEY = proxyKey;
   process.env.QUBICL_BROKER_KEY = 'b'.repeat(43);
   const server = createEgressServer();
@@ -103,13 +155,13 @@ test('shared gateway egress authenticates and applies the policy for the matchin
   const server = createEgressServer({ configurations: () => [
     {
       id: 'first',
-      policy: { profile: 'offline', allowDomains: [], denyDomains: [], temporaryApprovals: [] },
+      policy: { profile: 'offline', allowDomains: [], denyDomains: [], allowCidrs: [], allowTcpPorts: [], temporaryApprovals: [] },
       proxyKey: firstKey,
       brokerKey: '3'.repeat(43),
     },
     {
       id: 'second',
-      policy: { profile: 'custom', allowDomains: ['allowed.example'], denyDomains: [], temporaryApprovals: [] },
+      policy: { profile: 'custom', allowDomains: ['allowed.example'], denyDomains: [], allowCidrs: [], allowTcpPorts: [], temporaryApprovals: [] },
       proxyKey: secondKey,
       brokerKey: '4'.repeat(43),
     },
@@ -129,13 +181,41 @@ test('shared gateway egress authenticates and applies the policy for the matchin
   }
 });
 
+test('custom egress grants one private CIDR and TCP port without opening neighboring addresses', async () => {
+  const proxyKey = 'c'.repeat(43);
+  const target = createServer((_request, response) => {
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ reached: true }));
+  });
+  const targetPort = await listen(target);
+  const proxy = createEgressServer({ configurations: () => [{
+    id: 'scoped-private-service',
+    policy: { profile: 'custom', allowDomains: [], denyDomains: [], allowCidrs: ['127.0.0.1/32'], allowTcpPorts: [targetPort], temporaryApprovals: [] },
+    proxyKey,
+    brokerKey: 'd'.repeat(43),
+  }] });
+  const proxyPort = await listen(proxy);
+  try {
+    const allowed = await jsonRequest(proxyPort, `http://127.0.0.1:${targetPort}/`, { 'proxy-authorization': basicProxy(proxyKey) });
+    assert.deepEqual(allowed, { status: 200, body: { reached: true } });
+    const neighbor = await jsonRequest(proxyPort, `http://127.0.0.2:${targetPort}/`, { 'proxy-authorization': basicProxy(proxyKey) });
+    assert.equal(neighbor.status, 403);
+    assert.match((neighbor.body as { error: { message: string } }).error.message, /CIDR allowlists/u);
+    const wrongPort = await jsonRequest(proxyPort, 'http://127.0.0.1:1/', { 'proxy-authorization': basicProxy(proxyKey) });
+    assert.equal(wrongPort.status, 403);
+    assert.match((wrongPort.body as { error: { message: string } }).error.message, /TCP-port allowlist/u);
+  } finally {
+    await Promise.all([close(proxy), close(target)]);
+  }
+});
+
 test('an abruptly reset CONNECT tunnel does not crash the shared egress server', async () => {
   const proxyKey = 'r'.repeat(43);
   const target = createServer((_request, response) => response.end('ok'));
   const targetPort = await listen(target);
   const proxy = createEgressServer({ configurations: () => [{
     id: 'reset-test',
-    policy: { profile: 'developer', allowDomains: [], denyDomains: [], temporaryApprovals: [] },
+    policy: { profile: 'developer', allowDomains: [], denyDomains: [], allowCidrs: [], allowTcpPorts: [], temporaryApprovals: [] },
     proxyKey,
     brokerKey: 's'.repeat(43),
   }] });

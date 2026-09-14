@@ -339,7 +339,7 @@ function fixture(): { state: LoadedState; computer: ComputerConfig } {
   const state = {
     paths,
     config: {
-      version: 4,
+      version: 5,
       installationId: '00000000-0000-4000-8000-000000000000',
       gateway: { port: 3211, image: { requested: 'gateway', resolved: 'gateway' } },
       defaults: presetDefaults('file-system'),
@@ -347,7 +347,7 @@ function fixture(): { state: LoadedState; computer: ComputerConfig } {
       computers: [computer],
     },
     secrets: {
-      version: 4,
+      version: 5,
       computers: {
         [computer.id]: { token: 't'.repeat(32), internalKey: 'i'.repeat(32) },
       },

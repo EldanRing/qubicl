@@ -32,8 +32,9 @@ export interface DashboardApplicationEvent {
 
 export interface DashboardApplicationAdapter {
   query(resource: string, params: URLSearchParams): Promise<unknown>;
-  plan(body: ManagementRequest, sessionId: string): Promise<unknown>;
+  plan(body: ManagementRequest, sessionId: string, reauthenticated?: boolean): Promise<unknown>;
   execute(planId: string, body: unknown, sessionId: string, reauthenticated: boolean): Promise<unknown>;
+  cancel?(planId: string, sessionId: string): { cancelled: true };
   operation(id: string): Promise<unknown>;
   action?(resource: string, body: unknown, sessionId: string): Promise<unknown>;
   events?(signal: AbortSignal, lastEventId?: string): AsyncIterable<DashboardApplicationEvent>;
@@ -270,7 +271,7 @@ export class DashboardServer {
       }
       const current = this.options.auth.recordActivity(token);
       if (!current) throw new DashboardHttpError('authentication_required', 'Dashboard authentication is required.', 401);
-      const result = await this.options.application.plan(body, current.actorId);
+      const result = await this.options.application.plan(body, current.actorId, current.reauthenticated);
       if (recoveryMode) {
         if (!isPlainObject(result) || typeof result.id !== 'string' || !IDENTIFIER.test(result.id)) {
           throw new Error('Dashboard application returned an invalid recovery plan.');
@@ -294,6 +295,18 @@ export class DashboardServer {
       const result = await this.options.application.execute(executeMatch[1]!, body, current.actorId, current.reauthenticated);
       this.recoveryPlans.delete(executeMatch[1]!);
       if (!response.destroyed) sendApplicationJson(response, 202, result);
+      return;
+    }
+    const cancelPlanMatch = /^\/api\/v1\/plans\/([A-Za-z0-9_-]{8,128})$/u.exec(url.pathname);
+    if (request.method === 'DELETE' && cancelPlanMatch) {
+      if (!this.options.application.cancel) throw new DashboardHttpError('not_supported', 'Plan cancellation is unavailable.', 404);
+      this.requireAuthorizedMutation(request, token);
+      await readEmptyJsonBody(request, this.maxBodyBytes);
+      const current = this.options.auth.recordActivity(token);
+      if (!current) throw new DashboardHttpError('authentication_required', 'Dashboard authentication is required.', 401);
+      const result = this.options.application.cancel(cancelPlanMatch[1]!, current.actorId);
+      this.recoveryPlans.delete(cancelPlanMatch[1]!);
+      sendApplicationJson(response, 200, result);
       return;
     }
     const viewMatch = /^\/api\/v1\/computers\/([0-9a-f-]{36})\/view$/u.exec(url.pathname);
@@ -627,7 +640,7 @@ function queryResource(path: string): string | undefined {
   if (['/api/v1/snapshot', '/api/v1/activity', '/api/v1/backups', '/api/v1/updates', '/api/v1/diagnostics', '/api/v1/settings'].includes(path)) {
     return path.slice('/api/v1'.length);
   }
-  const match = /^\/api\/v1\/computers\/([0-9a-f-]{36})(\/(?:credentials|processes|previews|tools|skills))?$/u.exec(path);
+  const match = /^\/api\/v1\/computers\/([0-9a-f-]{36})(\/(?:clients|credentials|processes|previews|tools|skills))?$/u.exec(path);
   if (!match || !COMPUTER_ID.test(match[1]!)) return undefined;
   return path.slice('/api/v1'.length);
 }

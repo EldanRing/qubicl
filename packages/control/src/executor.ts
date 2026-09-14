@@ -3,7 +3,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
-import { annotateUntrustedToolResult, MODEL_TEXT_BUDGET_BYTES, toolDefinitions, type ComputerManifest, type DesktopApplicationName, type ToolName } from '@qubicl/core';
+import { existsSync } from 'node:fs';
+import { annotateUntrustedToolResult, clientScopesAllowTool, isInteractiveInputTool, isToolName, MODEL_TEXT_BUDGET_BYTES, requiredClientScopesForTool, toolDefinitions, type ComputerManifest, type DesktopApplicationName, type ToolName } from '@qubicl/core';
 import type { z } from 'zod';
 import { QubiclError } from './errors.js';
 import { creationTime, mapFileSystemError, type FileErrorContext } from './file-errors.js';
@@ -11,17 +12,19 @@ import { DesktopApplicationManager } from './desktop-applications.js';
 import { LeaseManager, type LeaseActor, type LeaseProof } from './lease.js';
 import {
   ProcessManager,
+  type AgentProcessSummary,
   type CompatibilityProcessOutput,
   type CompatibilityProcessSummary,
   type CompatibilityStatusOptions,
   type ManagementProcessSummary,
+  type ProcessLifecycle,
   type ProcessOutputMode,
   type StopSignal,
 } from './processes.js';
 import { readEffectiveResourceLimits } from './resource-limits.js';
 import { developmentComputerManifest } from './image-manifest.js';
 import { withFileMutation } from './file-mutations.js';
-import { BrowserManager, type BrowserComputerAction, type BrowserMouseButton, type BrowserViewerResult } from './browser.js';
+import { BrowserManager, type BrowserComputerAction, type BrowserHealth, type BrowserMouseButton, type BrowserViewerResult } from './browser.js';
 import { desktopHelperEnvironment } from './environments.js';
 import { RemoteBrokerManager, RemoteBrowserManager, RemoteDesktopApplicationManager, RemoteDesktopManager, RemotePortManager, RemoteProcessManager, RemoteWebManager, type RemoteProcessStatus } from './remote-runners.js';
 import { discoverListeningPorts } from './ports.js';
@@ -32,8 +35,15 @@ import { RuntimePolicy } from './policy.js';
 import { ViewerPointerStore, type ViewerPointerUpdate } from './viewer-actions.js';
 import { BoundedFileSystem, BoundedPathError, type BoundedListOptions } from './bounded-files.js';
 import { createOpenTerminalArchive, OPEN_TERMINAL_ARCHIVE_LIMITS, type OpenTerminalArchive } from './open-terminal-archive.js';
+import type { ClientCredentialContext } from './client-scope.js';
 
 type ToolInput = Record<string, unknown>;
+
+function clientAuditMetadata(context: ToolCallContext): Record<string, string> {
+  return context.clientCredential
+    ? { clientCredentialId: context.clientCredential.id, clientCredentialLabel: context.clientCredential.label }
+    : {};
+}
 
 export interface ToolExecutorOptions {
   processes?: ProcessController;
@@ -60,16 +70,28 @@ type ProcessController = Pick<ProcessManager,
   | 'inputCompatibility'
   | 'deleteCompatibility'
   | 'terminateOwner'
+  | 'terminalOpen'
+  | 'terminalRead'
+  | 'terminalWrite'
+  | 'terminalResize'
+  | 'terminalSignal'
+  | 'terminalClose'
 > & {
   count(): number | Promise<number>;
+  listForAgent(): ReturnType<ProcessManager['listForAgent']> | Promise<ReturnType<ProcessManager['listForAgent']>>;
   listCompatibility(owner: LeaseProof): ReturnType<ProcessManager['listCompatibility']> | Promise<ReturnType<ProcessManager['listCompatibility']>>;
   listForManagement(): ReturnType<ProcessManager['listForManagement']> | Promise<ReturnType<ProcessManager['listForManagement']>>;
   stopForManagement(id: string): ReturnType<ProcessManager['stopForManagement']>;
+  readOutput(id: string, offset: number, maxBytes: number, tailBytes: number | undefined, encoding: 'utf8' | 'base64'): ReturnType<ProcessManager['readOutput']> | Promise<ReturnType<ProcessManager['readOutput']>>;
+  saveOutput(id: string, path: string, maxBytes: number): ReturnType<ProcessManager['saveOutput']>;
+  terminalList(): ReturnType<ProcessManager['terminalList']> | Promise<ReturnType<ProcessManager['terminalList']>>;
+  limits?(): ReturnType<ProcessManager['limits']> | Promise<ReturnType<ProcessManager['limits']>>;
   status?(): Promise<RemoteProcessStatus>;
 };
 
 export interface ToolCallContext {
   leaseActor?: LeaseActor;
+  clientCredential?: ClientCredentialContext;
 }
 
 export interface OperatorControllerSnapshot {
@@ -83,8 +105,9 @@ export interface OperatorManagementStatus {
   controller: OperatorControllerSnapshot;
   managedProcesses: number;
   activePreviews: number;
+  browser?: BrowserHealth;
 }
-type DesktopApplicationController = Pick<DesktopApplicationManager, 'open' | 'close' | 'shutdown'> & {
+type DesktopApplicationController = Pick<DesktopApplicationManager, 'open' | 'close' | 'shutdown' | 'available'> & {
   list(): ReturnType<DesktopApplicationManager['list']> | Promise<ReturnType<DesktopApplicationManager['list']>>;
   count(): number | Promise<number>;
 };
@@ -133,6 +156,8 @@ export class ToolExecutor {
   private reservedArchiveBytes = 0;
   private gatewayEpoch: string | undefined;
   private gatewayTransition: Promise<void> | undefined;
+  private browserOperationQueue = Promise.resolve<unknown>(undefined);
+  private pendingBrowserOperations = 0;
 
   constructor(contract = developmentComputerManifest(), options: ToolExecutorOptions = {}) {
     this.manifest = contract.manifest;
@@ -179,17 +204,39 @@ export class ToolExecutor {
   async call(name: ToolName, rawInput: unknown, context: ToolCallContext = {}): Promise<unknown> {
     const started = Date.now();
     try {
-      const result = annotateUntrustedToolResult(name, await this.executeCall(name, rawInput, context));
-      this.audit.record({ type: 'tool', tool: name, status: 'ok', durationMs: Date.now() - started, ...toolAuditMetadata(name, (rawInput ?? {}) as Record<string, unknown>), ...contentAuditMetadata(result) });
+      const executed = await this.executeCall(name, rawInput, context);
+      if (toolDefinitions[name].lease && requiresStrictPostCallFence(name, rawInput)) {
+        const proof = (rawInput as { lease: LeaseProof }).lease;
+        try {
+          this.leases.verify(proof);
+        } catch (boundaryError) {
+          try { await this.leases.revokeAgentControlFor(proof); }
+          catch (fenceError) {
+            throw new QubiclError(
+              'process_fencing_failed',
+              `The operation crossed an ownership boundary and its result was discarded, but owner fencing could not be confirmed: ${(fenceError as Error).message}`,
+              500,
+            );
+          }
+          throw boundaryError;
+        }
+      }
+      const result = annotateUntrustedToolResult(name, executed);
+      this.audit.record({ type: 'tool', tool: name, status: 'ok', durationMs: Date.now() - started, ...clientAuditMetadata(context), ...toolAuditMetadata(name, (rawInput ?? {}) as Record<string, unknown>), ...contentAuditMetadata(result) });
       return result;
     } catch (error) {
-      this.audit.record({ type: 'tool', tool: name, status: 'error', durationMs: Date.now() - started, code: error instanceof QubiclError ? error.code : 'internal_error', ...toolAuditMetadata(name, (rawInput ?? {}) as Record<string, unknown>) });
+      this.audit.record({ type: 'tool', tool: name, status: 'error', durationMs: Date.now() - started, code: error instanceof QubiclError ? error.code : 'internal_error', ...clientAuditMetadata(context), ...toolAuditMetadata(name, (rawInput ?? {}) as Record<string, unknown>) });
       throw error;
     }
   }
 
   private async executeCall(name: ToolName, rawInput: unknown, context: ToolCallContext): Promise<unknown> {
-    if (!this.policy.isToolEnabled(name)) throw new QubiclError('capability_unsupported', `Tool ${name} is not supported because it is disabled by this computer's operator policy or capability contract.`, 404);
+    if (!this.policy.isToolEnabled(name)) throw new QubiclError('capability_unsupported', `Tool ${name} is not supported because it is disabled by this computer's operator policy or capability contract.`, 404, {
+      tool: name,
+      supportedByImage: this.manifest.tools.includes(name),
+      enabledByOperator: false,
+      remedy: 'ask-the-operator-to-enable-this-tool-or-select-a-capable-image',
+    });
     const schema = toolDefinitions[name].input as z.ZodType<ToolInput>;
     const parsed = schema.safeParse(rawInput ?? {});
     if (!parsed.success) {
@@ -199,12 +246,14 @@ export class ToolExecutor {
     let owner: LeaseProof | undefined;
     if (toolDefinitions[name].lease) {
       owner = this.leases.verify(input.lease as LeaseProof, true);
+      if (isInteractiveInputTool(name) || (name === 'publish_port' && input.openInBrowser === true)) this.leases.verifyInteractive(owner);
     }
     const respond = (value: unknown): unknown => value;
     const respondBrowser = <T>(value: BrowserViewerResult<T>): T => {
       for (const action of value.pointerActions) this.viewerPointers.record(action);
       return value.result;
     };
+    const runBrowser = <T>(operation: () => Promise<T>): Promise<T> => this.runBrowserOperation(owner, operation);
 
     switch (name) {
       case 'get_computer_status': {
@@ -213,6 +262,7 @@ export class ToolExecutor {
         // commands actually run—rather than mislabeling controller limits as
         // the workload's scheduling capacity.
         const processStatus = await this.processes.status?.();
+        const taskLimits = processStatus?.taskLimits ?? await this.processes.limits?.();
         const effectiveResourceLimits = processStatus?.effectiveResourceLimits ?? await readEffectiveResourceLimits();
         const lease = this.leases.snapshot();
         const full = input.detail === 'full';
@@ -231,6 +281,7 @@ export class ToolExecutor {
           ...(full ? {
             lease,
             leasePolicy: { activityRefresh: true },
+            ...(taskLimits ? { taskLimits } : {}),
             resourceVisibility: {
               authoritativeForScheduling: 'effectiveResourceLimits',
               standardSystemInterfacesMayReportHostDerivedValues: true,
@@ -241,11 +292,44 @@ export class ToolExecutor {
             policy: this.policy.snapshot(),
             manifestSha256: this.manifestSha256,
             ...(this.manifest.viewer ? { desktop: { display: process.env.DISPLAY ?? ':0' } } : {}),
+            ...(this.manifest.capabilities.includes('browser') ? { browser: await this.browser.health() } : {}),
           } : {}),
         };
       }
+      case 'explain_capability': {
+        const requested = input.tool;
+        if (requested !== undefined && (typeof requested !== 'string' || !isToolName(requested))) {
+          throw new QubiclError('tool_not_found', `Tool ${String(requested)} is not part of this Qubicl contract.`, 404, { category: 'tool-contract', remedy: 'list-effective-tools' });
+        }
+        const names = requested ? [requested] : (Object.keys(toolDefinitions) as ToolName[]);
+        const lease = this.leases.snapshot();
+        const client = context.clientCredential;
+        return respond({
+          computer: { id: this.computerId, name: this.computerName, preset: this.manifest.preset },
+          ownership: lease,
+          tools: names.map((tool) => {
+            const supported = this.manifest.tools.includes(tool);
+            const enabled = supported && this.policy.isToolEnabled(tool);
+            const clientAllowed = !client || clientScopesAllowTool(client.scopes, tool);
+            const interactiveBlocked = enabled && clientAllowed && isInteractiveInputTool(tool) && lease.controller === 'human';
+            const available = enabled && clientAllowed && !interactiveBlocked;
+            return {
+              tool,
+              available,
+              supportedByImage: supported,
+              enabledByOperator: enabled,
+              authorizedForClient: clientAllowed,
+              requiresClientScopes: requiredClientScopesForTool(tool),
+              ...(interactiveBlocked ? { temporaryBlock: 'human-control', remedy: 'wait-for-viewer-release-or-use-background-tools' } : {}),
+              ...(!supported ? { remedy: 'choose-a-capable-preset-or-approved-image' } : {}),
+              ...(supported && !enabled ? { remedy: 'ask-owner-to-enable-tool' } : {}),
+              ...(enabled && !clientAllowed ? { remedy: 'use-or-create-scoped-client' } : {}),
+            };
+          }),
+        });
+      }
       case 'acquire_lease':
-        return this.leases.acquire(input.durationSeconds as number, context.leaseActor);
+        return this.leases.acquireWaiting(input.durationSeconds as number, context.leaseActor, input.waitSeconds as number);
       case 'renew_lease':
         return this.leases.renew(input.lease as LeaseProof, input.durationSeconds as number);
       case 'release_lease':
@@ -260,9 +344,39 @@ export class ToolExecutor {
           owner!,
           input.timeoutMs as number | undefined,
           input.outputMode as ProcessOutputMode,
+          input.lifecycle as ProcessLifecycle,
+          input.label as string,
         );
         return respond(result);
       }
+      case 'list_managed_processes':
+        return respond({ processes: await this.processes.listForAgent() as AgentProcessSummary[] });
+      case 'process_output':
+        return respond(await this.processes.readOutput(input.processId as string, input.offset as number, input.maxBytes as number, input.tailBytes as number | undefined, input.encoding as 'utf8' | 'base64'));
+      case 'save_process_output':
+        return respond(await this.processes.saveOutput(input.processId as string, input.path as string, input.maxBytes as number));
+      case 'terminal_open':
+        return respond(await this.processes.terminalOpen(
+          input.command as string,
+          commandWorkingDirectory(this.durableRoot, input.cwd as string),
+          input.rows as number,
+          input.columns as number,
+          owner!,
+          input.lifecycle as 'session' | 'task',
+          input.label as string,
+        ));
+      case 'terminal_list':
+        return respond({ terminals: await this.processes.terminalList() });
+      case 'terminal_read':
+        return respond(await this.processes.terminalRead(input.terminalId as string, owner!, input.offset as number, input.maxBytes as number, input.waitMs as number, input.encoding as 'utf8' | 'base64'));
+      case 'terminal_write':
+        return respond(await this.processes.terminalWrite(input.terminalId as string, owner!, input.input as string));
+      case 'terminal_resize':
+        return respond(await this.processes.terminalResize(input.terminalId as string, owner!, input.rows as number, input.columns as number));
+      case 'terminal_signal':
+        return respond(await this.processes.terminalSignal(input.terminalId as string, owner!, input.signal as StopSignal));
+      case 'terminal_close':
+        return respond(await this.processes.terminalClose(input.terminalId as string, owner!, input.force as boolean));
       case 'write_stdin':
         return respond(await this.processes.write(input.processId as string, input.input as string, input.close as boolean, input.yieldTimeMs as number, owner!));
       case 'stop_process':
@@ -270,10 +384,10 @@ export class ToolExecutor {
       case 'list_ports':
         return respond({ ports: await this.previews.listPorts() });
       case 'publish_port': {
-        const publication = await this.previews.publish(input.port as number, input.expiresInSeconds as number);
+        const publication = await this.previews.publish(input.port as number, input.expiresInSeconds as number | undefined);
         if (input.openInBrowser) {
           try {
-            publication.browser = await this.browser.navigate(publication.browserUrl as string);
+            publication.browser = await runBrowser(() => this.browser.navigate(publication.browserUrl as string));
           } catch (error) {
             this.previews.unpublish(publication.id as string);
             throw error;
@@ -285,6 +399,10 @@ export class ToolExecutor {
         return respond({ previews: this.previews.list() });
       case 'unpublish_port':
         return respond({ publicationId: input.publicationId, unpublished: this.previews.unpublish(input.publicationId as string) });
+      case 'share_preview':
+        return respond(this.previews.share(input.publicationId as string, input.expiresInSeconds as number));
+      case 'revoke_preview_share':
+        return respond({ publicationId: input.publicationId, revoked: this.previews.revokeShare(input.publicationId as string) });
       case 'broker_request': {
         if (!this.broker) throw new QubiclError('credential_broker_unavailable', 'This runtime has no credential broker.', 503);
         const { lease: _lease, ...request } = input;
@@ -306,17 +424,17 @@ export class ToolExecutor {
         const url = input.url as string;
         const format = input.format as 'markdown' | 'text';
         const maxChars = input.maxChars as number;
-        if (render === 'browser') return respond(await this.browserExtract(url, format, maxChars));
+        if (render === 'browser') return respond(await this.browserExtract(url, format, maxChars, owner!));
         try {
           const extracted = await this.web.extract({ url, format, maxChars });
           if (render === 'auto' && extracted.browserRecommended === true && this.manifest.capabilities.includes('browser')) {
-            return respond(await this.browserExtract(url, format, maxChars));
+            return respond(await this.browserExtract(url, format, maxChars, owner!));
           }
           return respond(extracted);
         } catch (error) {
           if (render === 'auto' && this.manifest.capabilities.includes('browser') && error instanceof QubiclError
             && ['web_upstream_error', 'web_unsupported_content_type'].includes(error.code)) {
-            return respond(await this.browserExtract(url, format, maxChars));
+            return respond(await this.browserExtract(url, format, maxChars, owner!));
           }
           throw error;
         }
@@ -402,69 +520,85 @@ export class ToolExecutor {
           }
         }
       case 'browser_navigate':
-        return respond(await this.browser.navigate(input.url as string));
+        return respond(await runBrowser(() => this.browser.navigate(input.url as string)));
       case 'browser_snapshot':
-        return respond(await this.browser.snapshot());
+        return respond(await runBrowser(() => this.browser.snapshot(input.cursor as number, input.limit as number, input.frameIndex as number)));
       case 'browser_screenshot':
-        return respond(await this.browser.screenshot(input.full_page as boolean));
+        return respond(await runBrowser(() => this.browser.screenshot(input.full_page as boolean)));
       case 'browser_click':
-        return respond(respondBrowser(await this.browser.clickWithViewerPointer(input.ref as string, input.button as 'left' | 'right', owner!.generation)));
+        return respond(respondBrowser(await runBrowser(() => this.browser.clickWithViewerPointer(input.ref as string, input.button as 'left' | 'right', owner!.generation))));
       case 'browser_type':
-        return respond(await this.browser.type(input.ref as string, input.text as string, input.submit as boolean, input.clear as boolean));
+        return respond(await runBrowser(() => this.browser.type(input.ref as string, input.text as string, input.submit as boolean, input.clear as boolean)));
       case 'browser_select':
-        return respond(await this.browser.select(input.ref as string, input.value as string));
+        return respond(await runBrowser(() => this.browser.select(input.ref as string, input.value as string)));
       case 'browser_press':
-        return respond(await this.browser.press(input.key as string, input.ref as string | undefined));
+        return respond(await runBrowser(() => this.browser.press(input.key as string, input.ref as string | undefined)));
       case 'browser_scroll':
-        return respond(await this.browser.scroll(input.direction as 'up' | 'down', input.amount as number));
+        return respond(await runBrowser(() => this.browser.scroll(input.direction as 'up' | 'down', input.amount as number)));
       case 'browser_history':
-        return respond(await this.browser.history(input.action as 'back' | 'forward' | 'reload'));
+        return respond(await runBrowser(() => this.browser.history(input.action as 'back' | 'forward' | 'reload')));
       case 'browser_wait':
-        return respond(await this.browser.wait(input.milliseconds as number));
+        return respond(await runBrowser(() => this.browser.wait(input.milliseconds as number)));
       case 'browser_tabs':
-        return respond(await this.browser.tabs());
+        return respond(await runBrowser(() => this.browser.tabs()));
       case 'browser_use_tab':
-        return respond(await this.browser.useTab(input.index as number));
+        return respond(await runBrowser(() => this.browser.useTab((input.tabId as string | undefined) ?? input.index as number)));
       case 'browser_new_tab':
-        return respond(await this.browser.newTab(input.url as string | undefined));
+        return respond(await runBrowser(() => this.browser.newTab(input.url as string | undefined)));
       case 'browser_close_tab':
-        return respond(await this.browser.closeTab(input.index as number));
+        return respond(await runBrowser(() => this.browser.closeTab((input.tabId as string | undefined) ?? input.index as number | undefined ?? -1)));
       case 'browser_reset':
-        return respond(await this.browser.reset());
+        return respond(await runBrowser(() => this.browser.reset()));
+      case 'browser_upload':
+        return respond(await runBrowser(() => this.browser.upload(input.ref as string, input.paths as string[])));
+      case 'browser_downloads':
+        return respond(await runBrowser(() => this.browser.listDownloads()));
+      case 'browser_cancel_download':
+        return respond(await runBrowser(() => this.browser.cancelDownload(input.downloadId as string)));
+      case 'browser_dialogs':
+        return respond(await runBrowser(() => this.browser.listDialogs()));
+      case 'browser_respond_dialog':
+        return respond(await runBrowser(() => this.browser.respondDialog(input.dialogId as string, input.action as 'accept' | 'dismiss', input.promptText as string | undefined)));
+      case 'browser_permissions':
+        return respond(await runBrowser(() => this.browser.permissions(input.origin as string, input.permissions as string[], input.clear as boolean)));
+      case 'browser_diagnostics':
+        return respond(await runBrowser(() => this.browser.browserDiagnostics()));
+      case 'browser_set_viewport':
+        return respond(await runBrowser(() => this.browser.setViewport(input.width as number, input.height as number)));
       case 'browser_click_at':
-        return respond(respondBrowser(await this.browser.computerWithViewerPointers([{
+        return respond(respondBrowser(await runBrowser(() => this.browser.computerWithViewerPointers([{
           type: 'click', x: input.x as number, y: input.y as number, button: input.button as BrowserMouseButton,
-        }], owner!.generation)));
+        }], owner!.generation, input.geometry_generation as number | undefined))));
       case 'browser_double_click_at':
-        return respond(respondBrowser(await this.browser.computerWithViewerPointers([{
+        return respond(respondBrowser(await runBrowser(() => this.browser.computerWithViewerPointers([{
           type: 'double_click', x: input.x as number, y: input.y as number, button: input.button as BrowserMouseButton,
-        }], owner!.generation)));
+        }], owner!.generation, input.geometry_generation as number | undefined))));
       case 'browser_hover_at':
-        return respond(respondBrowser(await this.browser.computerWithViewerPointers([{
+        return respond(respondBrowser(await runBrowser(() => this.browser.computerWithViewerPointers([{
           type: 'move', x: input.x as number, y: input.y as number,
-        }], owner!.generation)));
+        }], owner!.generation, input.geometry_generation as number | undefined))));
       case 'browser_drag':
-        return respond(respondBrowser(await this.browser.computerWithViewerPointers([{
+        return respond(respondBrowser(await runBrowser(() => this.browser.computerWithViewerPointers([{
           type: 'drag',
           path: [
             { x: input.start_x as number, y: input.start_y as number },
             { x: input.end_x as number, y: input.end_y as number },
           ],
-        }], owner!.generation)));
+        }], owner!.generation, input.geometry_generation as number | undefined))));
       case 'browser_scroll_at':
-        return respond(respondBrowser(await this.browser.computerWithViewerPointers([{
+        return respond(respondBrowser(await runBrowser(() => this.browser.computerWithViewerPointers([{
           type: 'scroll',
           x: input.x as number,
           y: input.y as number,
           scroll_x: input.scroll_x as number,
           scroll_y: input.scroll_y as number,
-        }], owner!.generation)));
+        }], owner!.generation, input.geometry_generation as number | undefined))));
       case 'browser_type_focused':
-        return respond(await this.browser.typeFocused(input.text as string));
+        return respond(await runBrowser(() => this.browser.typeFocused(input.text as string)));
       case 'browser_inspect_at':
-        return respond(await this.browser.inspectAt(input.x as number, input.y as number));
+        return respond(await runBrowser(() => this.browser.inspectAt(input.x as number, input.y as number, input.geometry_generation as number | undefined)));
       case 'browser_computer':
-        return respond(respondBrowser(await this.browser.computerWithViewerPointers(input.actions as BrowserComputerAction[], owner!.generation)));
+        return respond(respondBrowser(await runBrowser(() => this.browser.computerWithViewerPointers(input.actions as BrowserComputerAction[], owner!.generation, input.geometry_generation as number | undefined))));
       case 'read_clipboard': {
         return respond(await this.desktop.readClipboard());
       }
@@ -477,9 +611,12 @@ export class ToolExecutor {
           input.paths as string[],
         ));
       case 'list_desktop_applications':
-        return respond({ applications: await this.desktopApplications.list() });
+        return respond({
+          applications: await this.desktopApplications.list(),
+          availableApplications: await this.desktopApplications.available(),
+        });
       case 'close_desktop_application':
-        return respond(await this.desktopApplications.close(input.applicationId as string));
+        return respond(await this.desktopApplications.close(input.applicationId as string, input.discardUnsavedChanges as boolean));
     }
   }
 
@@ -491,6 +628,7 @@ export class ToolExecutor {
       controller: { kind, ...snapshot },
       managedProcesses: await this.processes.count(),
       activePreviews: this.previews.listForManagement().length,
+      ...(this.manifest.capabilities.includes('browser') ? { browser: await this.browser.health() } : {}),
     };
   }
 
@@ -508,6 +646,16 @@ export class ToolExecutor {
 
   revokeOperatorPreview(id: string): { id: string; status: 'revoked' } {
     return this.previews.revokeForManagement(id);
+  }
+
+  shareOperatorPreview(id: string, duration: number): { id: string; status: 'shared'; expiresAt: string } {
+    const share = this.previews.share(id, duration);
+    return { id, status: 'shared', expiresAt: share.expiresAt };
+  }
+
+  unshareOperatorPreview(id: string): { id: string; status: 'unshared' } {
+    if (!this.previews.revokeShare(id)) throw new QubiclError('preview_share_not_found', `Published preview ${id} has no remote share.`, 404);
+    return { id, status: 'unshared' };
   }
 
   openOperatorPreview(id: string, access: 'local' | 'remote'): ManagementPreviewTicket {
@@ -703,12 +851,28 @@ export class ToolExecutor {
     }
   }
 
-  private async browserExtract(url: string, format: 'markdown' | 'text', maxChars: number): Promise<Record<string, unknown>> {
+  private runBrowserOperation<T>(owner: LeaseProof | undefined, operation: () => Promise<T>): Promise<T> {
+    if (this.pendingBrowserOperations >= 32) {
+      throw new QubiclError('browser_busy', 'The browser already has 32 admitted operations. Wait for current work or take human control to cancel queued agent work.', 429);
+    }
+    this.pendingBrowserOperations += 1;
+    const execute = async (): Promise<T> => {
+      if (owner) this.leases.verify(owner);
+      const result = await operation();
+      if (owner) this.leases.verify(owner);
+      return result;
+    };
+    const next = this.browserOperationQueue.then(execute, execute);
+    this.browserOperationQueue = next.catch(() => undefined);
+    return next.finally(() => { this.pendingBrowserOperations -= 1; });
+  }
+
+  private async browserExtract(url: string, format: 'markdown' | 'text', maxChars: number, owner: LeaseProof): Promise<Record<string, unknown>> {
     if (!this.manifest.capabilities.includes('browser')) {
       throw new QubiclError('capability_unsupported', 'Browser-rendered extraction requires a browser-capable computer preset.', 400);
     }
     if (!this.web) throw new QubiclError('web_service_unavailable', 'This runtime has no isolated web service.', 503);
-    const rendered = await this.browser.renderForExtraction(url);
+    const rendered = await this.runBrowserOperation(owner, () => this.browser.renderForExtraction(url));
     return this.web.extractRendered({ ...rendered, format, maxChars });
   }
 
@@ -766,6 +930,14 @@ export class ToolExecutor {
   }
 }
 
+function requiresStrictPostCallFence(name: ToolName, rawInput: unknown): boolean {
+  if (isInteractiveInputTool(name)) return true;
+  const input = rawInput && typeof rawInput === 'object' && !Array.isArray(rawInput) ? rawInput as Record<string, unknown> : {};
+  return (name === 'publish_port' && input.openInBrowser === true)
+    || (name === 'exec_command' && input.lifecycle === 'session')
+    || (name === 'terminal_open' && input.lifecycle === 'session');
+}
+
 function configuredResourceEnvelope(): unknown {
   const value = process.env.QUBICL_RESOURCE_ENVELOPE_JSON;
   if (!value) return undefined;
@@ -779,7 +951,10 @@ function configuredProcessController(root: string): ProcessController {
     if (!url || !key) throw new Error('QUBICL_EXECUTOR_URL and QUBICL_EXECUTOR_KEY must be configured together.');
     return new RemoteProcessManager(url, key);
   }
-  return new ProcessManager({ home: root });
+  return new ProcessManager({
+    home: root,
+    ...(existsSync(root) ? { outputDirectory: resolve(root, '.qubicl-tasks') } : {}),
+  });
 }
 
 function configuredDesktopApplicationController(compatibility: ComputerManifest['compatibility'], root: string): DesktopApplicationController {

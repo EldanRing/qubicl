@@ -13,6 +13,7 @@ import {
   type ToolName,
 } from '@qubicl/core';
 import { QubiclError } from './errors.js';
+import { assertClientToolScope, clientCredentialFromNodeHeaders, scopedTools, type ClientCredentialContext } from './client-scope.js';
 import type { ToolExecutor } from './executor.js';
 import { mapFileSystemError, type FileErrorContext } from './file-errors.js';
 import type { LeaseActor, LeaseProof } from './lease.js';
@@ -50,6 +51,12 @@ interface SessionCwd {
   touchedAt: number;
 }
 
+interface CompatibilityLeaseState {
+  proof: LeaseProof | undefined;
+  acquiring: Promise<LeaseProof> | undefined;
+  touchedAt: number;
+}
+
 interface MultipartFile {
   filename: string;
   data: Buffer;
@@ -64,9 +71,10 @@ export class OpenTerminalCompatibility {
   private readonly sessionCwds = new Map<string, SessionCwd>();
   private fileGeneration = 0;
   private readonly matchCache = new Map<string, { expires: number; proof: string; matches: { results: Array<Record<string, unknown>>; truncated: boolean } }>();
-  private lease: LeaseProof | undefined;
-  private acquiringLease: Promise<LeaseProof> | undefined;
+  private readonly leases = new Map<string, CompatibilityLeaseState>();
+  private readonly leaseKey = new AsyncLocalStorage<string>();
   private readonly leaseActor = new AsyncLocalStorage<LeaseActor>();
+  private readonly clientCredential = new AsyncLocalStorage<ClientCredentialContext>();
 
   constructor(
     private readonly executor: ToolExecutor,
@@ -83,7 +91,8 @@ export class OpenTerminalCompatibility {
     if (url.pathname !== PREFIX && !url.pathname.startsWith(`${PREFIX}/`)) return false;
     try {
       if (request.method !== 'GET') { this.matchCache.clear(); this.fileGeneration++; }
-      await this.leaseActor.run(openTerminalLeaseActor(request), () => this.dispatch(request, response, url));
+      const client = clientCredentialFromNodeHeaders(request.headers);
+      await this.clientCredential.run(client, () => this.leaseKey.run(client.id, () => this.leaseActor.run(openTerminalLeaseActor(client), () => this.dispatch(request, response, url))));
     } catch (error) {
       sendCompatibilityError(response, error instanceof BoundedPathError
         ? new QubiclError('path_outside_home', `Open Terminal compatibility is restricted to ${this.home}.`, 403)
@@ -93,14 +102,15 @@ export class OpenTerminalCompatibility {
   }
 
   async shutdown(): Promise<void> {
-    const proof = this.lease;
-    this.lease = undefined;
-    if (!proof) return;
-    try {
-      await this.executor.call('release_lease', { lease: proof });
-    } catch {
-      // A human takeover, expiry, or gateway epoch change may already have
-      // fenced this compatibility lease.
+    const proofs = [...this.leases.values()].flatMap(({ proof }) => proof ? [proof] : []);
+    this.leases.clear();
+    for (const proof of proofs) {
+      try {
+        await this.executor.call('release_lease', { lease: proof });
+      } catch {
+        // A human takeover, expiry, or another session may already have
+        // fenced this compatibility lease.
+      }
     }
   }
 
@@ -129,7 +139,7 @@ export class OpenTerminalCompatibility {
       return;
     }
     if (request.method === 'GET' && path === '/openapi.json') {
-      sendJson(response, 200, buildOpenTerminalOpenApi(this.executor.computerId, this.executor.enabledToolNames()));
+      sendJson(response, 200, buildOpenTerminalOpenApi(this.executor.computerId, scopedTools(this.currentClient(), this.executor.enabledToolNames())));
       return;
     }
     if (request.method === 'GET' && path === '/ports') {
@@ -536,16 +546,18 @@ export class OpenTerminalCompatibility {
 
   private async callTool(name: ToolName, rawInput: unknown): Promise<unknown> {
     this.requireTools(name);
+    const clientCredential = this.currentClient();
     const input = objectInput(rawInput);
-    if (!toolDefinitions[name].lease) return this.executor.call(name, input);
+    if (!toolDefinitions[name].lease) return this.executor.call(name, input, { clientCredential });
     const { lease: _ignored, ...withoutLease } = input;
+    const state = this.currentLeaseState();
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const proof = await this.ensureLease();
       try {
-        return await this.executor.call(name, { ...withoutLease, lease: proof });
+        return await this.executor.call(name, { ...withoutLease, lease: proof }, { clientCredential });
       } catch (error) {
         if (!(error instanceof QubiclError) || error.code !== 'stale_lease' || attempt > 0) throw error;
-        if (sameProof(this.lease, proof)) this.lease = undefined;
+        if (sameProof(state.proof, proof)) state.proof = undefined;
       }
     }
     throw new QubiclError('stale_lease', 'The Open Terminal compatibility lease could not be renewed.', 409);
@@ -654,6 +666,7 @@ export class OpenTerminalCompatibility {
   }
 
   private async withLease<T>(action: (proof: LeaseProof) => Promise<T>): Promise<T> {
+    const state = this.currentLeaseState();
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const proof = await this.ensureLease();
       let actionInvoked = false;
@@ -663,16 +676,19 @@ export class OpenTerminalCompatibility {
         return await action(proof);
       } catch (error) {
         if (actionInvoked || !(error instanceof QubiclError) || error.code !== 'stale_lease' || attempt > 0) throw error;
-        if (sameProof(this.lease, proof)) this.lease = undefined;
+        if (sameProof(state.proof, proof)) state.proof = undefined;
       }
     }
     throw new QubiclError('stale_lease', 'The Open Terminal compatibility lease could not be renewed.', 409);
   }
 
   private async ensureLease(): Promise<LeaseProof> {
-    if (this.lease) return this.lease;
-    this.acquiringLease ??= this.executor.call('acquire_lease', { durationSeconds: LEASE_SECONDS }, {
+    const state = this.currentLeaseState();
+    state.touchedAt = Date.now();
+    if (state.proof) return state.proof;
+    state.acquiring ??= this.executor.call('acquire_lease', { durationSeconds: LEASE_SECONDS, waitSeconds: 0 }, {
       leaseActor: this.leaseActor.getStore() ?? { protocol: 'open-terminal', untrustedLabel: 'Open Terminal client' },
+      clientCredential: this.currentClient(),
     })
       .then((value) => {
         const record = objectInput(value);
@@ -681,16 +697,32 @@ export class OpenTerminalCompatibility {
           generation: numberField(record, 'generation'),
           epoch: stringField(record, 'epoch'),
         };
-        this.lease = proof;
+        state.proof = proof;
         return proof;
       })
       .finally(() => {
-        this.acquiringLease = undefined;
+        state.acquiring = undefined;
       });
-    return this.acquiringLease;
+    return state.acquiring;
+  }
+
+  private currentLeaseState(): CompatibilityLeaseState {
+    const key = this.leaseKey.getStore() ?? `${this.currentClient().id}:default`;
+    let state = this.leases.get(key);
+    if (!state) {
+      if (this.leases.size >= MAX_SESSION_CWDS) {
+        const oldest = [...this.leases.entries()].filter(([, item]) => !item.acquiring && !item.proof).sort((a, b) => a[1].touchedAt - b[1].touchedAt)[0];
+        if (oldest) this.leases.delete(oldest[0]);
+        else throw new QubiclError('session_limit', `Open Terminal supports at most ${MAX_SESSION_CWDS} active client sessions. Release an idle connection and retry.`, 429);
+      }
+      state = { proof: undefined, acquiring: undefined, touchedAt: Date.now() };
+      this.leases.set(key, state);
+    }
+    return state;
   }
 
   private requireTools(...names: ToolName[]): void {
+    for (const name of names) assertClientToolScope(this.currentClient(), name);
     const enabled = new Set(this.executor.enabledToolNames());
     const unavailable = names.filter((name) => !enabled.has(name));
     if (unavailable.length) {
@@ -700,6 +732,10 @@ export class OpenTerminalCompatibility {
         404,
       );
     }
+  }
+
+  private currentClient(): ClientCredentialContext {
+    return this.clientCredential.getStore() ?? clientCredentialFromNodeHeaders({});
   }
 
   private cwdFor(request: IncomingMessage): string {
@@ -917,8 +953,8 @@ function sessionKey(request: IncomingMessage): string {
   return typeof value === 'string' && value.length > 0 && value.length <= 256 ? value : 'default';
 }
 
-function openTerminalLeaseActor(request: IncomingMessage): LeaseActor {
-  const raw = `Open Terminal session ${sessionKey(request)}`;
+function openTerminalLeaseActor(client: ClientCredentialContext): LeaseActor {
+  const raw = `${client.label}; Open Terminal connection`;
   const normalized = [...raw].map((character) => {
     const code = character.codePointAt(0)!;
     return code <= 0x1f || code === 0x7f ? ' ' : character;

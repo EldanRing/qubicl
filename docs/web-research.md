@@ -12,7 +12,20 @@
 
 For HTML, Trafilatura is the primary extractor and favors the article or main body while preserving useful headings, lists, links, and tables in Markdown. If it cannot produce meaningful content, Qubicl tries readability-lxml over the already-fetched document, then a small local structural heuristic. Plain-text output removes Markdown link and heading syntax while retaining readable list and table structure. These extractors never fetch independently: Qubicl's existing validated fetch result is their only input. Non-HTML handling is unchanged.
 
-`auto` normally stays local and may use Qubicl's existing managed Chromium when HTML is clearly unusable without JavaScript. `browser` forces that path; `never` prohibits it. Browser rendering requires a `browser`, `computer`, or `workstation` preset. The browser waits for the main DOM to become stable within a fixed five-second budget, strips executable and non-content nodes, bounds the rendered HTML at 1.5 MB, and sends it to the existing isolated web service. Trafilatura/readability then process that rendered DOM just like directly fetched HTML, so links, tables, headings, and boilerplate behavior remain consistent. High-signal JSON-LD, product/offer microdata, common price attributes, and price-like accessible labels can supplement content that the article extractor did not already include.
+`auto` normally stays local and may use an ephemeral Chromium context when HTML
+is clearly unusable without JavaScript. `browser` forces that path; `never`
+prohibits it. Browser rendering requires a `browser`, `computer`, or
+`workstation` preset, but it does not use that computer's persistent cookies,
+logins, extensions, or service workers. The context waits for the main DOM to
+become stable within a fixed five-second budget, enforces the public-destination
+policy on page requests, strips executable and non-content nodes, bounds the
+rendered HTML at 1.5 MB, and sends it to the isolated web service.
+Trafilatura/readability then process that rendered DOM like directly fetched
+HTML, so links, tables, headings, and boilerplate behavior remain consistent.
+High-signal JSON-LD, product/offer microdata, common price attributes, and
+price-like accessible labels can supplement content the article extractor did
+not already include. Browser/runtime and complete request-boundary qualification
+remain release evidence; see the [security limitations](security-model.md#limitations).
 
 Canvas-only pixels are not HTML and therefore remain outside automatic extraction. Use the explicit browser screenshot/inspection tools when visual evidence is required; Qubicl does not silently OCR pages or capture arbitrary network responses. Dynamic facts can change immediately after observation, so models should prefer an official data source for consequential live prices.
 

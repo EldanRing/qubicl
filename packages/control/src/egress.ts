@@ -3,7 +3,7 @@ import { lookup } from 'node:dns/promises';
 import { readFile } from 'node:fs/promises';
 import { request as httpRequest, createServer, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import { isIP, connect as netConnect } from 'node:net';
+import { BlockList, isIP, connect as netConnect } from 'node:net';
 import { QubiclError } from './errors.js';
 import { AuditLog } from './audit.js';
 import { isGloballyRoutableIp } from './network-address.js';
@@ -14,6 +14,8 @@ export interface EgressNetworkPolicy {
   profile: 'developer' | 'web-only' | 'offline' | 'custom';
   allowDomains: string[];
   denyDomains: string[];
+  allowCidrs: string[];
+  allowTcpPorts: number[];
   temporaryApprovals: Array<{ domain: string; expiresAt: string }>;
 }
 
@@ -79,15 +81,29 @@ export function createEgressServer(options?: EgressServerOptions): ReturnType<ty
         const configuration = proxyConfiguration(request.headers['proxy-authorization'], configurations());
         if (!configuration) throw new QubiclError('proxy_authentication_required', 'Proxy authentication is required.', 407);
         const { host, port } = connectTarget(request.url ?? '');
-        const address = await authorizeTarget(host, port, configuration.policy);
-        const upstream = netConnect({ host: address, port }, () => {
+        const authorization = await authorizeTarget(host, port, configuration.policy);
+        const upstream = netConnect({ host: authorization.address, port }, () => {
           client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
           if (head.length) upstream.write(head);
           upstream.pipe(client);
           client.pipe(upstream);
           audit(configuration, 'egress_connect', { host, port, profile: configuration.policy.profile });
         });
+        const expiryTimer = authorization.expiresAt === undefined ? undefined : setTimeout(() => {
+          upstream.destroy(new Error('Temporary network approval expired.'));
+          client.destroy();
+        }, Math.max(1, authorization.expiresAt - Date.now() + 1));
+        expiryTimer?.unref();
+        const policyTimer = options ? setInterval(() => {
+          const current = configurations().find(({ id }) => id === configuration.id);
+          if (!current || !policyAllows(host, port, current.policy).allowed) {
+            upstream.destroy(new Error('Network policy no longer allows this tunnel.'));
+            client.destroy();
+          }
+        }, 1_000) : undefined;
+        policyTimer?.unref();
         client.once('close', () => upstream.destroy());
+        upstream.once('close', () => { if (expiryTimer) clearTimeout(expiryTimer); if (policyTimer) clearInterval(policyTimer); });
         upstream.on('error', () => client.destroy());
       } catch (error) {
         const status = error instanceof QubiclError ? error.status : 502;
@@ -103,14 +119,19 @@ async function forwardHttp(request: IncomingMessage, response: ServerResponse, c
   const target = new URL(request.url ?? '');
   if (target.protocol !== 'http:' && target.protocol !== 'https:') throw new QubiclError('network_policy_denied', 'Only HTTP and HTTPS proxy requests are supported.', 403);
   const port = Number(target.port || (target.protocol === 'https:' ? 443 : 80));
-  const address = await authorizeTarget(target.hostname, port, policy);
+  const authorization = await authorizeTarget(target.hostname, port, policy);
   const headers = sanitizedForwardHeaders(request.headers, target.host);
   const factory = target.protocol === 'https:' ? httpsRequest : httpRequest;
-  const upstream = factory({ hostname: address, servername: target.hostname, port, method: request.method, path: `${target.pathname}${target.search}`, headers }, (incoming) => {
+  const upstream = factory({ hostname: authorization.address, servername: target.hostname, port, method: request.method, path: `${target.pathname}${target.search}`, headers }, (incoming) => {
     response.writeHead(incoming.statusCode ?? 502, sanitizedResponseHeaders(incoming.headers));
     incoming.pipe(response);
   });
   upstream.on('error', (error) => response.destroy(error));
+  if (authorization.expiresAt !== undefined) {
+    const timer = setTimeout(() => upstream.destroy(new Error('Temporary network approval expired.')), Math.max(1, authorization.expiresAt - Date.now() + 1));
+    timer.unref();
+    upstream.once('close', () => clearTimeout(timer));
+  }
   request.pipe(upstream);
   audit(configuration, 'egress_http', { host: target.hostname, port, method: request.method, profile: policy.profile });
 }
@@ -128,12 +149,12 @@ async function brokerRequest(request: IncomingMessage, response: ServerResponse,
   if (!credential.methods.includes(method)) throw new QubiclError('credential_scope_denied', `Credential ${id} does not allow ${method}.`, 403);
   const target = canonicalBrokerTarget(credential.baseUrl, string(body.path ?? '/', 'path'), credential.pathPrefix, id);
   const targetPort = Number(target.port || 443);
-  const targetAddress = await authorizeTarget(target.hostname, targetPort, policy);
+  const targetAuthorization = await authorizeTarget(target.hostname, targetPort, policy);
   const extraHeaders = stringRecord(body.headers);
   for (const name of ['authorization', 'cookie', 'host', 'connection', 'proxy-authorization', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade', credential.header.toLowerCase()]) delete extraHeaders[name];
   const payload = typeof body.body === 'string' ? Buffer.from(body.body, body.bodyEncoding === 'base64' ? 'base64' : 'utf8') : undefined;
   const result = await new Promise<{ status: number; headers: Record<string, string | string[]>; data: Buffer }>((resolve, reject) => {
-    const outgoing = httpsRequest({ hostname: targetAddress, servername: target.hostname, port: targetPort, method, path: `${target.pathname}${target.search}`, headers: { ...extraHeaders, host: target.host, [credential.header]: credential.value, ...(payload ? { 'content-length': `${payload.length}` } : {}) } }, (incoming) => {
+    const outgoing = httpsRequest({ hostname: targetAuthorization.address, servername: target.hostname, port: targetPort, method, path: `${target.pathname}${target.search}`, headers: { ...extraHeaders, host: target.host, [credential.header]: credential.value, ...(payload ? { 'content-length': `${payload.length}` } : {}) } }, (incoming) => {
       const chunks: Buffer[] = [];
       let bytes = 0;
       incoming.on('data', (chunk: Buffer) => {
@@ -145,6 +166,11 @@ async function brokerRequest(request: IncomingMessage, response: ServerResponse,
       incoming.on('error', reject);
     });
     outgoing.on('error', reject);
+    if (targetAuthorization.expiresAt !== undefined) {
+      const timer = setTimeout(() => outgoing.destroy(new Error('Temporary network approval expired.')), Math.max(1, targetAuthorization.expiresAt - Date.now() + 1));
+      timer.unref();
+      outgoing.once('close', () => clearTimeout(timer));
+    }
     outgoing.end(payload);
   });
   audit(configuration, 'credential_broker_use', { credentialId: id, host: target.hostname, method });
@@ -159,25 +185,59 @@ async function brokerRequest(request: IncomingMessage, response: ServerResponse,
   });
 }
 
-async function authorizeTarget(host: string, port: number, policy: EgressNetworkPolicy): Promise<string> {
+async function authorizeTarget(host: string, port: number, policy: EgressNetworkPolicy): Promise<{ address: string; expiresAt?: number }> {
   const normalized = host.toLowerCase().replace(/\.$/u, '');
-  if (policy.profile === 'offline') throw new QubiclError('network_policy_denied', 'Outbound access is disabled by the offline network profile.', 403);
-  if ((policy.profile === 'web-only' || policy.profile === 'custom') && port !== 80 && port !== 443) throw new QubiclError('network_policy_denied', `Port ${port} is not allowed by ${policy.profile}.`, 403);
-  const temporary = policy.temporaryApprovals.some((entry) => Date.parse(entry.expiresAt) > Date.now() && domainMatches(normalized, entry.domain));
-  if (!temporary && policy.denyDomains.some((pattern) => domainMatches(normalized, pattern))) throw new QubiclError('network_policy_denied', `${normalized} is denied by network policy.`, 403);
-  if (policy.profile === 'custom' && !temporary && !policy.allowDomains.some((pattern) => domainMatches(normalized, pattern))) throw new QubiclError('network_policy_denied', `${normalized} is not in the custom allowlist.`, 403);
+  const policyResult = policyAllows(normalized, port, policy);
+  if (!policyResult.allowed) throw new QubiclError('network_policy_denied', policyResult.reason, 403);
   const addresses = isIP(normalized) ? [{ address: normalized }] : await lookup(normalized, { all: true, verbatim: true });
   if (!addresses.length) throw new QubiclError('network_policy_denied', `No address resolved for ${normalized}.`, 403);
-  const allowed = addresses.find(({ address }) => policy.profile === 'developer' || isGloballyRoutableIp(address));
-  if (!allowed) throw new QubiclError('network_policy_denied', `${normalized} resolves only to a private, loopback, link-local, or metadata address.`, 403);
-  return allowed.address;
+  const allowed = addresses.find(({ address }) => policy.profile === 'developer' || isGloballyRoutableIp(address) || addressAllowedByCidrs(address, policy.allowCidrs));
+  if (!allowed) throw new QubiclError('network_policy_denied', `${normalized} resolves only to private or special-use addresses outside the approved CIDRs.`, 403);
+  return { address: allowed.address, ...(policyResult.expiresAt === undefined ? {} : { expiresAt: policyResult.expiresAt }) };
+}
+
+function policyAllows(host: string, port: number, policy: EgressNetworkPolicy): { allowed: true; expiresAt?: number } | { allowed: false; reason: string } {
+  const normalized = host.toLowerCase().replace(/\.$/u, '');
+  if (policy.profile === 'offline') return { allowed: false, reason: 'Outbound access is disabled by the offline network profile.' };
+  if (policy.profile === 'web-only' && port !== 80 && port !== 443) return { allowed: false, reason: `Port ${port} is not allowed by web-only.` };
+  if (policy.profile === 'custom' && port !== 80 && port !== 443 && !policy.allowTcpPorts.includes(port)) return { allowed: false, reason: `Port ${port} is not in the custom TCP-port allowlist.` };
+  const temporary = policy.temporaryApprovals
+    .filter((entry) => domainMatches(normalized, entry.domain))
+    .map((entry) => Date.parse(entry.expiresAt))
+    .filter((expiresAt) => expiresAt > Date.now())
+    .sort((left, right) => right - left)[0];
+  const explicitAddress = isIP(normalized) !== 0 && addressAllowedByCidrs(normalized, policy.allowCidrs);
+  const explicitlyDenied = policy.denyDomains.some((pattern) => domainMatches(normalized, pattern));
+  const outsideCustomScope = policy.profile === 'custom' && !explicitAddress && !policy.allowDomains.some((pattern) => domainMatches(normalized, pattern));
+  const needsTemporary = explicitlyDenied || outsideCustomScope;
+  if (needsTemporary && temporary === undefined) return {
+    allowed: false,
+    reason: outsideCustomScope
+      ? `${normalized} is not in the custom domain or CIDR allowlists.`
+      : `${normalized} is denied by network policy.`,
+  };
+  if (needsTemporary) return { allowed: true, expiresAt: temporary! };
+  return { allowed: true };
 }
 
 function parsePolicy(value: string | undefined): EgressNetworkPolicy {
-  if (!value) return { profile: 'developer', allowDomains: [], denyDomains: [], temporaryApprovals: [] };
+  if (!value) return { profile: 'developer', allowDomains: [], denyDomains: [], allowCidrs: [], allowTcpPorts: [], temporaryApprovals: [] };
   const policy = JSON.parse(value) as EgressNetworkPolicy;
   if (!['developer', 'web-only', 'offline', 'custom'].includes(policy.profile)) throw new Error('QUBICL_NETWORK_POLICY is invalid.');
-  return { profile: policy.profile, allowDomains: policy.allowDomains ?? [], denyDomains: policy.denyDomains ?? [], temporaryApprovals: policy.temporaryApprovals ?? [] };
+  return { profile: policy.profile, allowDomains: policy.allowDomains ?? [], denyDomains: policy.denyDomains ?? [], allowCidrs: policy.allowCidrs ?? [], allowTcpPorts: policy.allowTcpPorts ?? [], temporaryApprovals: policy.temporaryApprovals ?? [] };
+}
+
+function addressAllowedByCidrs(address: string, cidrs: readonly string[]): boolean {
+  const family = isIP(address);
+  if (!family) return false;
+  const block = new BlockList();
+  for (const cidr of cidrs) {
+    const separator = cidr.lastIndexOf('/');
+    const base = cidr.slice(0, separator);
+    const prefix = Number(cidr.slice(separator + 1));
+    if (isIP(base) === family) block.addSubnet(base, prefix, family === 4 ? 'ipv4' : 'ipv6');
+  }
+  return block.check(address, family === 4 ? 'ipv4' : 'ipv6');
 }
 
 function proxyConfiguration(value: string | undefined, configurations: readonly EgressConfiguration[]): EgressConfiguration | undefined {

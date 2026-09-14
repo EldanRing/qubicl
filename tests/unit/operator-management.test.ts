@@ -45,6 +45,8 @@ test('operator process metadata omits commands and exact stop preserves managed-
     const items = processes.listForManagement();
     assert.deepEqual(items, [{
       id: started.processId,
+      label: 'Task',
+      lifecycle: 'session',
       status: 'running',
       startedAt: items[0]!.startedAt,
       owner: 'agent',
@@ -82,23 +84,23 @@ test('operator preview tickets are short-lived, single-use, surface-bound, and c
   });
   const proxyPort = await listen(proxy);
   try {
-    const published = await manager.publish(targetPort, 300) as { id: string };
+    const published = await manager.publish(targetPort) as { id: string };
     const summaries = manager.listForManagement();
     assert.deepEqual(summaries, [{
       id: published.id,
       kind: 'port',
       status: 'published',
       createdAt: summaries[0]!.createdAt,
-      expiresAt: summaries[0]!.expiresAt,
+      lifetime: 'while-listening',
       port: targetPort,
     }]);
     assert.equal(JSON.stringify(summaries).includes('token'), false);
     assert.equal(JSON.stringify(summaries).includes('url'), false);
 
     const local = manager.openForManagement(published.id, 'local');
-    assert.match(local.path, new RegExp(`^/computers/${computerId}/previews/${published.id}/\\?ticket=`, 'u'));
+    assert.match(local.path, /^\/\?ticket=/u);
     assert.equal(local.path.includes('://'), false);
-    const internalPath = local.path.replace(`/computers/${computerId}/previews`, '/_qubicl/previews');
+    const internalPath = `/_qubicl/previews/${published.id}${local.path}`;
     const opened = await request(proxyPort, internalPath, { 'x-qubicl-access-surface': 'local' });
     assert.equal(opened.status, 200);
     assert.equal(opened.body, 'preview-ok');
@@ -108,7 +110,7 @@ test('operator preview tickets are short-lived, single-use, surface-bound, and c
     assert.equal((await request(proxyPort, internalPath.split('?', 1)[0]!, { cookie })).status, 200, 'redeemed cookie remains publication-scoped');
 
     const remote = manager.openForManagement(published.id, 'remote');
-    const remoteInternalPath = remote.path.replace(`/computers/${computerId}/previews`, '/_qubicl/previews');
+    const remoteInternalPath = `/_qubicl/previews/${published.id}${remote.path}`;
     assert.equal((await request(proxyPort, remoteInternalPath, { 'x-qubicl-access-surface': 'local' })).status, 401);
     assert.deepEqual(manager.revokeForManagement(published.id), { id: published.id, status: 'revoked' });
     assert.equal((await request(proxyPort, internalPath.split('?', 1)[0]!, { cookie })).status, 401);
@@ -130,7 +132,7 @@ test('gateway operator management routes require the exact local operator key an
   const id = '123e4567-e89b-42d3-a456-426614174000';
   const internalKey = 'K'.repeat(43);
   await writeFile(routePath, `${JSON.stringify({
-    version: 2,
+    version: 3,
     generatedAt: new Date().toISOString(),
     routes: [{
       id, name: 'operator-test', host: '127.0.0.1', controlPort: backendPort,

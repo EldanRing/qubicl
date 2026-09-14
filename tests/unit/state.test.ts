@@ -42,7 +42,7 @@ test('state uses secure modes and runtime contains capability contracts but no b
   const hostGid = process.getgid?.() ?? 1000;
   assert.equal(routes.includes(token), false);
   assert.equal(compose.includes(token), false);
-  assert.match(routes, /"version": 2/);
+  assert.match(routes, /"version": 3/);
   assert.match(routes, /"capabilities"/);
   assert.match(routes, new RegExp(configured.image.manifestSha256!));
   assert.match(compose, /127\.0\.0\.1:3211:3211/);

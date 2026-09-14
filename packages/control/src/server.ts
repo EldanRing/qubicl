@@ -10,6 +10,7 @@ import { loadComputerManifest } from './image-manifest.js';
 import { OpenTerminalCompatibility } from './open-terminal.js';
 import { parseViewerPointerUpdate } from './viewer-actions.js';
 import type { LeaseActor } from './lease.js';
+import { assertClientToolScope, clientCredentialFromFetchHeaders, clientCredentialFromNodeHeaders, scopedTools, type ClientCredentialContext } from './client-scope.js';
 
 const loadedManifest = loadComputerManifest();
 const executor = new ToolExecutor(loadedManifest);
@@ -25,11 +26,12 @@ export async function shutdownControlService(): Promise<void> {
 }
 
 const mcp = createMcpHandler(({ requestInfo }) => {
+  const clientCredential = clientCredentialFromFetchHeaders(requestInfo?.headers);
   const server = new McpServer(
     { name: `qubicl-${executor.computerId}`, version: QUBICL_BUILD.version },
     { instructions: QUBICL_MODEL_INSTRUCTIONS },
   );
-  for (const name of executor.enabledToolNames()) {
+  for (const name of scopedTools(clientCredential, executor.enabledToolNames())) {
     const definition = toolDefinitions[name];
     const title = toolTitle(name);
     const config: { title?: string; description: string; inputSchema: StandardSchemaWithJSON } = {
@@ -42,7 +44,10 @@ const mcp = createMcpHandler(({ requestInfo }) => {
       config,
       async (input: unknown) => {
         const outcome = await invokeTool({
-          call: (tool, value) => executor.call(tool, value, { leaseActor: mcpLeaseActor(server.server.getClientVersion(), requestInfo) }),
+          call: (tool, value) => executor.call(tool, value, {
+            leaseActor: mcpLeaseActor(server.server.getClientVersion(), requestInfo, clientCredential),
+            clientCredential,
+          }),
         }, name, input);
         if (!outcome.ok && outcome.status === 500) console.error(outcome.cause);
         return mcpResult(outcome);
@@ -89,6 +94,7 @@ export const controlServer = createServer(async (request, response) => {
       return;
     }
     await executor.observeGatewayEpoch(gatewayEpoch);
+    const clientCredential = clientCredentialFromNodeHeaders(request.headers);
     if (executor.previews.handle(request, response, url)) return;
     if (await openTerminal.handle(request, response, url)) return;
     if (request.method === 'POST' && url.pathname === '/_qubicl/gateway-epoch') {
@@ -127,6 +133,19 @@ export const controlServer = createServer(async (request, response) => {
         json(response, 200, executor.revokeOperatorPreview(managedId(body.previewId, 'previewId')));
         return;
       }
+      if (request.method === 'POST' && url.pathname === '/_qubicl/operator/management/previews/share') {
+        requireJson(request);
+        const body = exactOperatorBody(await readJson(request, 4096), ['duration', 'previewId']);
+        if (!Number.isSafeInteger(body.duration) || Number(body.duration) < 60 || Number(body.duration) > 86_400) throw new QubiclError('invalid_arguments', 'duration must be an integer from 60 through 86400.', 400);
+        json(response, 200, executor.shareOperatorPreview(managedId(body.previewId, 'previewId'), Number(body.duration)));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/_qubicl/operator/management/previews/unshare') {
+        requireJson(request);
+        const body = exactOperatorBody(await readJson(request, 4096), ['previewId']);
+        json(response, 200, executor.unshareOperatorPreview(managedId(body.previewId, 'previewId')));
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/_qubicl/operator/management/previews/open') {
         requireJson(request);
         const body = exactOperatorBody(await readJson(request, 4096), ['access', 'previewId']);
@@ -141,7 +160,7 @@ export const controlServer = createServer(async (request, response) => {
       return;
     }
     if (request.method === 'GET' && url.pathname === '/openapi.json') {
-      json(response, 200, buildOpenApi(executor.computerId, executor.enabledToolNames()));
+      json(response, 200, buildOpenApi(executor.computerId, scopedTools(clientCredential, executor.enabledToolNames())));
       return;
     }
     if (request.method === 'GET' && url.pathname === '/_qubicl/view/actions') {
@@ -155,8 +174,12 @@ export const controlServer = createServer(async (request, response) => {
     if (request.method === 'POST' && url.pathname.startsWith('/v1/tools/')) {
       const name = url.pathname.slice('/v1/tools/'.length);
       if (!isToolName(name) || !executor.enabledToolNames().includes(name)) throw new QubiclError('tool_not_found', `Tool ${name} is not available for this computer's operator policy or capability contract.`, 404);
+      assertClientToolScope(clientCredential, name);
       const outcome = await invokeTool({
-        call: (tool, value) => executor.call(tool, value, { leaseActor: openApiLeaseActor(request) }),
+        call: (tool, value) => executor.call(tool, value, {
+          leaseActor: openApiLeaseActor(request, clientCredential),
+          clientCredential,
+        }),
       }, name, await readJson(request));
       if (!outcome.ok && outcome.status === 500) console.error(outcome.cause);
       json(response, outcome.status, outcome.value);
@@ -257,14 +280,15 @@ function managedId(value: unknown, name: string): string {
   return value;
 }
 
-function mcpLeaseActor(client: { name: string; version: string } | undefined, request: Request | undefined): LeaseActor {
+function mcpLeaseActor(client: { name: string; version: string } | undefined, request: Request | undefined, credential: ClientCredentialContext): LeaseActor {
   const fallback = request?.headers.get('user-agent') ?? 'MCP client';
-  return { protocol: 'mcp', untrustedLabel: displayLabel(client ? `${client.name} ${client.version}` : fallback, 'MCP client') };
+  const protocolClient = displayLabel(client ? `${client.name} ${client.version}` : fallback, 'MCP client');
+  return { protocol: 'mcp', untrustedLabel: displayLabel(`${credential.label}; ${protocolClient}`, 'MCP client') };
 }
 
-function openApiLeaseActor(request: IncomingMessage): LeaseActor {
+function openApiLeaseActor(request: IncomingMessage, credential: ClientCredentialContext): LeaseActor {
   const value = typeof request.headers['user-agent'] === 'string' ? request.headers['user-agent'] : 'OpenAPI client';
-  return { protocol: 'openapi', untrustedLabel: displayLabel(value, 'OpenAPI client') };
+  return { protocol: 'openapi', untrustedLabel: displayLabel(`${credential.label}; ${value}`, 'OpenAPI client') };
 }
 
 function displayLabel(value: string, fallback: string): string {

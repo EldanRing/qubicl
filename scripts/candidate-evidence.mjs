@@ -5,6 +5,7 @@ import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, resolve, win32 } from 'node:path';
 import { promisify } from 'node:util';
+import { requiresReleaseImpact, verifyReleaseImpactDocument } from './release-impact.mjs';
 import {
   assertNativeArtifact,
   assertNpmArtifact,
@@ -459,6 +460,12 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
   const dependencyEvidencePath = join(candidateDirectory, 'dependency-evidence.json');
   assert(await sha256(dependencyEvidencePath) === candidate.dependencies.sha256, 'candidate.json dependency-evidence hash does not match.');
   await assertDependencyEvidence(await jsonFile(dependencyEvidencePath), candidate, root);
+  if (candidate.releaseImpact) {
+    const impactPath = join(candidateDirectory, candidate.releaseImpact.name);
+    assert(await sha256(impactPath) === candidate.releaseImpact.sha256, 'candidate.json release-impact hash does not match.');
+    const impact = await verifyReleaseImpactDocument(impactPath, { revision: candidate.revision, repositoryRoot: root });
+    assert(impact.profile === candidate.releaseImpact.profile && impact.baseRevision === candidate.releaseImpact.baseRevision, 'candidate.json release-impact identity does not match.');
+  }
 
   const temporary = await mkdtemp(join(tmpdir(), 'qubicl-candidate-verify-'));
   try {
@@ -842,7 +849,7 @@ function normalizeScanTarget(value) {
 }
 
 function assertCandidateManifest(candidate) {
-  assert(candidate?.schemaVersion === 5, 'candidate.json schemaVersion must be 5.');
+  assert([5, 6].includes(candidate?.schemaVersion), 'candidate.json schemaVersion must be 5 or 6.');
   for (const field of ['version', 'revision', 'created', 'source']) assert(nonemptyString(candidate[field]), `candidate.json requires ${field}.`);
   assert(/^[a-f0-9]{40}$/u.test(candidate.revision), 'candidate.json revision must be the exact reviewed Git commit.');
   assert(Number.isFinite(Date.parse(candidate.created)), 'candidate.json created must be an ISO timestamp.');
@@ -852,6 +859,14 @@ function assertCandidateManifest(candidate) {
   assert(candidate.host && nonemptyString(candidate.host.target), 'candidate.json requires a host target.');
   assert(candidate.tools && /^v[0-9]+[.][0-9]+[.][0-9]+$/.test(candidate.tools.node ?? ''), 'candidate.json requires the exact Node tool version.');
   assert(candidate.dependencies?.name === 'dependency-evidence.json' && /^[a-f0-9]{64}$/u.test(candidate.dependencies?.sha256 ?? ''), 'candidate.json requires exact dependency evidence.');
+  if (requiresReleaseImpact(candidate.version)) {
+    assert(candidate.schemaVersion === 6 && candidate.releaseImpact?.name === 'release-impact.json'
+      && /^[a-f0-9]{64}$/u.test(candidate.releaseImpact?.sha256 ?? '')
+      && ['documentation', 'npm-presentation', 'cli', 'runtime-component', 'full'].includes(candidate.releaseImpact?.profile)
+      && /^[a-f0-9]{40}$/u.test(candidate.releaseImpact?.baseRevision ?? ''), 'Qubicl 0.6 and later candidates require exact release-impact evidence.');
+  } else {
+    assert(candidate.schemaVersion === 5 && candidate.releaseImpact === undefined, 'Release-impact candidate schema is reserved for Qubicl 0.6 and later.');
+  }
   assert(candidate.modes && typeof candidate.modes.binaryOnly === 'boolean'
     && typeof candidate.modes.images === 'boolean'
     && typeof candidate.modes.scans === 'boolean'
@@ -894,6 +909,7 @@ function expectedArtifactNames(candidate) {
     `qubicl-${candidate.version}-${candidate.host.target}.tar.gz`,
     `qubicl-${candidate.version}-${candidate.host.target}.spdx.json`,
   ];
+  if (candidate.releaseImpact) names.push(candidate.releaseImpact.name);
   if (!candidate.modes.binaryOnly) names.push(`qubicl-cli-${candidate.version}.tgz`, 'qubicl-npm.spdx.json');
   if (candidate.modes.images) {
     names.push(...IMAGE_NAMES.map((name) => `qubicl-${name}.oci.tar`));

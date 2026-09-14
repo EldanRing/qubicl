@@ -206,6 +206,13 @@ legend { margin-bottom: 9px; color: var(--ink-soft); font-size: .77rem; font-wei
 .approval-list span { display: grid; gap: 2px; }
 .approval-list small { color: var(--muted); font-size: .68rem; }
 .credential-list { display: grid; gap: 8px; margin-bottom: 22px; }
+.scope-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 9px; }
+.scope-grid label { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+.scope-grid input { width: 16px; height: 16px; }
+.command-example { display: block; overflow-x: auto; padding: 13px 15px; border-radius: 8px; background: var(--paper-deep); font-size: .72rem; white-space: nowrap; }
+.one-time-secret { width: 100%; margin: 8px 0 25px; padding: 18px; border: 1px solid color-mix(in srgb, var(--lime) 55%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--lime) 10%, var(--paper)); text-align: left; }
+.one-time-secret p { font-size: .76rem; }
+.one-time-secret code { display: block; overflow-wrap: anywhere; margin: 12px 0; padding: 12px; border-radius: 7px; background: var(--paper-deep); user-select: all; }
 
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper-raised); }
 table { width: 100%; border-collapse: collapse; font-size: .78rem; }
@@ -256,7 +263,7 @@ td small { display: block; margin-top: 4px; color: var(--muted); }
 .job-dialog { display: flex; flex-direction: column; align-items: center; padding-block: 52px; text-align: center; }
 .job-orbit { width: 62px; height: 62px; margin-bottom: 27px; border: 2px solid var(--line); border-top-color: var(--lime); border-radius: 50%; animation: spin 1s linear infinite; }
 .job-orbit.succeeded { border: 13px solid var(--lime); animation: none; }
-.job-orbit.failed, .job-orbit.recovery-required { border: 13px solid var(--danger); animation: none; }
+.job-orbit.failed, .job-orbit.recovery-required, .job-orbit.outcome-unknown { border: 13px solid var(--danger); animation: none; }
 .job-dialog > p { max-width: 430px; }
 .job-status { display: flex; align-items: center; gap: 12px; margin: 12px 0 24px; color: var(--muted); font-size: .7rem; }
 .toast-region { position: fixed; z-index: 110; right: 18px; bottom: 18px; width: min(360px, calc(100vw - 36px)); display: grid; gap: 8px; }

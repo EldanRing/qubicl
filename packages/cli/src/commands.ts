@@ -3,15 +3,22 @@ import type { ManagementRequest } from './dashboard/contracts.js';
 import { operationOutput } from './operation-context.js';
 import { access, lstat, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { join, resolve } from 'node:path';
 import YAML from 'yaml';
 import {
   ComputerDefaultsSchema,
+  DEFAULT_TASK_POLICY,
+  CLIENT_CREDENTIAL_SCOPES,
+  ClientCredentialIdSchema,
+  ClientCredentialScopeSchema,
   COMPUTER_PREVIEW_ACCESS_PROTOCOL,
   CORE_SKILL_IDS,
   ConfigSchema,
+  SecretsSchema,
+  TaskPolicySchema,
   GATEWAY_EXTERNAL_CONTAINER_PORT,
   GatewayExposureRuntimeSchema,
   IMAGE_CATALOG,
@@ -38,6 +45,7 @@ import {
   versionSummary,
   type ComputerConfig,
   type ComputerDefaults,
+  type ClientCredentialScope,
   type QubiclManifest,
 } from '@qubicl/core';
 import type { ParsedArgs } from './args.js';
@@ -75,7 +83,7 @@ import {
 } from './docker.js';
 import { serveMcpBridge } from './mcp.js';
 import { ensureCurrentState, inspectStateFormat, recoverStateMigration } from './migrations.js';
-import { LEGACY_SPLIT_CONTROL_PROTOCOL_VERSION, PREVIEW_ACCESS_CONTAINER_PATH, computerContainerName, computerEgressContainerName, computerEgressServiceName, computerExecutorContainerName, computerExecutorServiceName, computerResourceEnvelope, computerServiceName, computerSessionContainerName, computerSessionServiceName, computerSshContainerName, computerSshServiceName, computerWebContainerName, controlNetwork, gatewayContainerName, GATEWAY_PIDS_LIMIT, gatewayNetworkName, hostIdentity, isPrimaryRuntimeRoot, projectName, renderRuntime, usesUnifiedComputerRuntime, workspaceNetwork } from './runtime.js';
+import { LEGACY_SPLIT_CONTROL_PROTOCOL_VERSION, PREVIEW_ACCESS_CONTAINER_PATH, computerContainerName, computerEgressContainerName, computerEgressServiceName, computerExecutorContainerName, computerExecutorServiceName, computerResourceEnvelope, computerServiceName, computerSessionContainerName, computerSessionServiceName, computerSshContainerName, computerSshServiceName, computerWebContainerName, controlNetwork, gatewayContainerName, GATEWAY_PIDS_LIMIT, gatewayNetworkName, hostIdentity, projectName, renderRuntime, usesUnifiedComputerRuntime, workspaceNetwork } from './runtime.js';
 import {
   auditState,
   atomicWrite,
@@ -97,7 +105,7 @@ import {
 import { upgradedComputer } from './upgrade.js';
 import { setupCommand } from './setup.js';
 import { checkViewerHealth } from './viewer-health.js';
-import { networkCommand } from './network-policy.js';
+import { commitPolicyChange, networkCommand } from './network-policy.js';
 import { secretCommand, manageBrokerCredential } from './secret-broker.js';
 import { sshCommand } from './ssh-access.js';
 import { backupCommand, checkpointCommand, cloneCommand } from './backups.js';
@@ -124,6 +132,9 @@ import {
   writeUpdateNotificationPreference,
 } from './update-notifications.js';
 import { gatewayCommand } from './gateway-command.js';
+import { storageCommand } from './storage-command.js';
+import { updateCommand } from './update-command.js';
+import { installationCommand } from './installation-backup.js';
 import {
   GatewayExposureManualProbeRequiredError,
   gatewayBindAddressPresent,
@@ -144,13 +155,17 @@ export async function execute(command: string | undefined, args: ParsedArgs): Pr
 }
 
 function cliRequiresInstallationLock(command: string | undefined, args: ParsedArgs): boolean {
-  if (!command || ['help', 'version', 'image', 'doctor', 'dashboard', 'mcp', 'logs', 'view', 'connect', 'list', 'status', 'inspect', 'export'].includes(command)) return false;
+  if (!command || ['help', 'version', 'update', 'image', 'doctor', 'dashboard', 'mcp', 'logs', 'view', 'connect', 'list', 'status', 'inspect', 'export'].includes(command)) return false;
   if (command === 'config') return args.positionals[0] === 'set';
   if (command === 'gateway') return args.positionals[0] !== 'status';
-  if (command === 'network') return args.positionals[0] !== 'show';
+  if (command === 'network') return !['show', 'explain'].includes(args.positionals[0] ?? '');
+  if (command === 'tasks') return args.positionals[0] !== 'show';
+  if (command === 'storage') return args.positionals[0] !== 'show';
+  if (command === 'recover') return (args.positionals[0] ?? 'resume') !== 'status';
+  if (command === 'installation') return args.positionals[0] !== 'inspect';
   if (command === 'backup') return !['list', 'verify'].includes(args.positionals[0] ?? '');
-  if (command === 'token') return args.positionals[0] !== 'show';
-  if (command === 'secret') return args.positionals[0] !== 'list';
+  if (command === 'token') return !['show', 'list'].includes(args.positionals[0] ?? '');
+  if (command === 'secret') return !['list', 'explain'].includes(args.positionals[0] ?? '');
   if (command === 'cleanup') return flag(args, 'yes');
   return true;
 }
@@ -178,12 +193,17 @@ async function executeUnlocked(command: string | undefined, args: ParsedArgs): P
     case 'down': return down();
     case 'create': return create(args);
     case 'upgrade': return upgrade(args);
+    case 'update': return updateCommand(args);
+    case 'installation': return installationCommand(args);
     case 'list': return list(args);
     case 'status': return status(args.positionals[0]);
     case 'inspect': return inspect(required(args.positionals[0], 'computer name'));
     case 'logs': return logs(args.positionals[0]);
     case 'doctor': return doctor(args);
     case 'recover': {
+      const action = args.positionals[0] ?? 'resume';
+      if (action === 'status') return recoveryStatus();
+      if (action !== 'resume') throw new Error(`Unknown recovery action ${action}; use status or resume.`);
       const paths = statePaths();
       if (!flag(args, 'yes')) {
         if (!stdin.isTTY) throw new Error('Reviewed journal recovery requires --yes in non-interactive use.');
@@ -199,6 +219,8 @@ async function executeUnlocked(command: string | undefined, args: ParsedArgs): P
     case 'restart': return restart(required(args.positionals[0], 'computer name'));
     case 'control': return control(args);
     case 'browser': return browserProfileCommand(args);
+    case 'tasks': return tasksCommand(args);
+    case 'storage': return storageCommand(args);
     case 'network': return networkCommand(args);
     case 'secret': return secretCommand(args);
     case 'ssh': return sshCommand(args);
@@ -224,6 +246,7 @@ async function executeUnlocked(command: string | undefined, args: ParsedArgs): P
       stringOption(args, 'result-mode'),
       stringOption(args, 'client-host'),
       stringOption(args, 'access'),
+      stringOption(args, 'credential'),
     );
     case 'mcp': return mcp(
       required(args.positionals[0], 'computer name'),
@@ -237,6 +260,90 @@ async function executeUnlocked(command: string | undefined, args: ParsedArgs): P
     case 'apply': return applyManifest(required(args.positionals[0], 'manifest path'), flag(args, 'dry-run'), flag(args, 'prune'));
     default: throw new Error(`Unknown command ${command}. Run qubicl help.`);
   }
+}
+
+async function tasksCommand(args: ParsedArgs): Promise<void> {
+  const action = required(args.positionals[0], 'tasks action');
+  const name = required(args.positionals[1], 'computer name');
+  const paths = statePaths();
+  await withStateLock(paths, async () => {
+    const state = await loadState(paths);
+    const computer = findComputer(state, name);
+    const effective = { ...DEFAULT_TASK_POLICY, ...computer.tasks };
+    if (action === 'show') {
+      operationOutput('log', JSON.stringify({ computer: computer.name, limits: effective, lifecycles: { session: 'stops on lease loss', task: 'survives disconnect and GUI takeover; never replays after runtime restart', service: 'restarts after runtime restart until stopped' } }, null, 2));
+      return;
+    }
+    if (action === 'set') {
+      const requested = {
+        maxConcurrent: numberOption(args, 'max-concurrent'),
+        maxLifetimeSeconds: numberOption(args, 'max-lifetime'),
+        maxOutputBytes: numberOption(args, 'max-output'),
+        completedRetentionSeconds: numberOption(args, 'retention'),
+      };
+      if (Object.values(requested).every((value) => value === undefined)) throw new Error('Tasks set requires at least one limit option.');
+      computer.tasks = TaskPolicySchema.parse({ ...effective, ...Object.fromEntries(Object.entries(requested).filter(([, value]) => value !== undefined)) });
+      await commitPolicyChange(state, computer);
+      operationOutput('log', JSON.stringify({ computer: computer.name, limits: computer.tasks, applied: 'runtime-recreated-with-prior-running-state-preserved' }, null, 2));
+      return;
+    }
+    if (action === 'stop-all') {
+      if (!flag(args, 'yes')) {
+        if (!stdin.isTTY) throw new Error('Stopping all managed work requires --yes in non-interactive use.');
+        const prompt = createInterface({ input: stdin, output: stdout });
+        try {
+          if ((await prompt.question(`Type ${computer.name} to stop every managed task, service, session command, and terminal: `)).trim() !== computer.name) throw new Error('Confirmation did not match; no work was stopped.');
+        } finally { prompt.close(); }
+      }
+      const base = `http://127.0.0.1:${state.config.gateway.port}/computers/${computer.id}/operator/management`;
+      const headers = { 'x-qubicl-operator-key': state.secrets.computers[computer.id]!.internalKey, 'content-type': 'application/json' };
+      const response = await fetch(`${base}/processes`, { headers });
+      const value = await response.json() as { items?: Array<{ id?: unknown; status?: unknown }>; error?: { message?: string } };
+      if (!response.ok || !Array.isArray(value.items)) throw new Error(value.error?.message ?? `Could not list managed work for ${computer.name}.`);
+      const running = value.items.filter((item): item is { id: string; status: 'running' } => typeof item.id === 'string' && item.status === 'running');
+      let stoppedCount = 0;
+      for (const item of running) {
+        const stopped = await fetch(`${base}/processes/stop`, { method: 'POST', headers, body: JSON.stringify({ processId: item.id }) });
+        if (!stopped.ok) throw new Error(`Stopped ${stoppedCount} of ${running.length} managed items; retry to reconcile the remainder.`);
+        await stopped.arrayBuffer();
+        stoppedCount += 1;
+      }
+      operationOutput('log', `Stopped ${stoppedCount} managed item${stoppedCount === 1 ? '' : 's'} on ${computer.name}.`);
+      return;
+    }
+    throw new Error(`Unknown tasks action ${action}; use show, set, or stop-all.`);
+  });
+}
+
+async function recoveryStatus(): Promise<void> {
+  const paths = statePaths();
+  const format = await inspectStateFormat(paths);
+  const items: Array<Record<string, unknown>> = [];
+  if (format.status === 'migration-pending') items.push({ kind: 'state-migration', status: 'pending', detail: format.detail, cancellable: false, next: 'qubicl recover resume --yes' });
+  if (format.status === 'current') {
+    const state = await loadState(paths);
+    const [transaction, backup, lifecycle, upgrade] = await Promise.all([
+      readPendingTransaction(paths),
+      import('./backups.js').then(({ inspectPendingBackupCreation }) => inspectPendingBackupCreation(state)),
+      import('./lifecycle-operations.js').then(({ inspectPendingComputerLifecycle }) => inspectPendingComputerLifecycle(state)),
+      import('./lifecycle-command.js').then(({ inspectPendingUpgradeAll }) => inspectPendingUpgradeAll(state)),
+    ]);
+    if (transaction) items.push({ kind: 'state-transaction', operationId: transaction.id, operation: transaction.operation, phase: transaction.phase, cancellable: false, next: 'qubicl recover resume --yes' });
+    if (backup) items.push({ kind: 'backup-create', operationId: backup.operationId, target: backup.computerId, phase: backup.phase, cancellable: false, next: 'qubicl recover resume --yes' });
+    if (lifecycle) items.push({ kind: 'computer-lifecycle', operationId: lifecycle.operationId, target: lifecycle.computerId, phase: lifecycle.operation, cancellable: false, next: 'qubicl recover resume --yes' });
+    if (upgrade) items.push({ kind: 'upgrade-all', operationId: upgrade.operationId, phase: upgrade.activeStep ? `applying:${upgrade.activeStep.key}` : 'accepted', cancellable: false, next: 'qubicl recover resume --yes' });
+  }
+  for (const [kind, path] of [['legacy-runtime-migration', paths.runtimeMigration], ['runtime-namespace-migration', paths.runtimeNamespacePending]] as const) {
+    try { await access(path, fsConstants.F_OK); items.push({ kind, status: 'pending', cancellable: false, next: 'qubicl recover resume --yes' }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') items.push({ kind, status: 'unreadable', cancellable: false, diagnostic: message(error) }); }
+  }
+  operationOutput('log', JSON.stringify({
+    state: format,
+    recoveryRequired: items.length > 0 || format.status === 'invalid',
+    items,
+    cancellationPolicy: 'Recorded operations roll forward because their completed phases may already be durable. Qubicl does not guess a rollback; status remains read-only.',
+    next: items.length ? 'Review the target and phase, correct any reported external problem, then run qubicl recover resume --yes.' : 'No recorded recovery is pending.',
+  }, null, 2));
 }
 
 async function config(args: ParsedArgs): Promise<void> {
@@ -254,6 +361,7 @@ async function config(args: ParsedArgs): Promise<void> {
     image: stringOption(args, 'default-image'),
     cpus: numberOption(args, 'default-cpus'),
     memory: stringOption(args, 'default-memory'),
+    viewerReconnectGraceSeconds: numberOption(args, 'viewer-reconnect-grace'),
     updateNotifications: parseUpdateNotificationPreference(stringOption(args, 'update-notifications')),
   };
   if (Object.values(requested).every((value) => value === undefined)) {
@@ -268,7 +376,8 @@ async function config(args: ParsedArgs): Promise<void> {
       || requested.preset !== undefined
       || requested.image !== undefined
       || requested.cpus !== undefined
-      || requested.memory !== undefined;
+      || requested.memory !== undefined
+      || requested.viewerReconnectGraceSeconds !== undefined;
     if (!changesManagedConfig) {
       const preferences = await writeUpdateNotificationPreference(requested.updateNotifications!, paths);
       operationOutput('log', JSON.stringify({ localPreferences: preferences }, null, 2));
@@ -277,6 +386,7 @@ async function config(args: ParsedArgs): Promise<void> {
     const prior = structuredClone(state.config);
     let dockerHost: Awaited<ReturnType<typeof validateDocker>> | undefined;
     if (requested.gatewayPort !== undefined) state.config.gateway.port = requested.gatewayPort;
+    if (requested.viewerReconnectGraceSeconds !== undefined) state.config.gateway.viewerReconnectGraceSeconds = requested.viewerReconnectGraceSeconds;
     if (requested.preset || requested.image) {
       const host = dockerHost ??= await validateDocker();
       if (requested.preset) {
@@ -308,8 +418,9 @@ async function config(args: ParsedArgs): Promise<void> {
     state.config = ConfigSchema.parse(state.config);
 
     const portChanged = state.config.gateway.port !== prior.gateway.port;
+    const gatewayBehaviorChanged = portChanged || state.config.gateway.viewerReconnectGraceSeconds !== prior.gateway.viewerReconnectGraceSeconds;
     if (portChanged) await assertGatewayPort(state);
-    const gatewayWasRunning = portChanged && (await gatewayStatus(state)).status === 'running';
+    const gatewayWasRunning = gatewayBehaviorChanged && (await gatewayStatus(state)).status === 'running';
     const runningComputerIds = gatewayWasRunning
       ? (await Promise.all(state.config.computers.map(async (computer) => ({
         id: computer.id,
@@ -988,36 +1099,28 @@ async function renameComputer(oldName: string, newName: string): Promise<void> {
     const computer = findComputer(state, oldName);
     await validateDocker();
     if (state.config.computers.some(({ name, id }) => name === newName && id !== computer.id)) throw new Error(`Computer name ${newName} is already in use.`);
-    const friendlyRuntime = isPrimaryRuntimeRoot(state.paths.root);
-    if (friendlyRuntime && newName === 'gateway') throw new Error('Computer name gateway is reserved by the primary Qubicl runtime.');
-    const runtimeObservation = friendlyRuntime ? undefined : await managedComputerRuntimeObservation(state, computer);
-    if (runtimeObservation?.group === 'partial' || runtimeObservation?.group === 'inconsistent') {
+    const runtimeObservation = await managedComputerRuntimeObservation(state, computer);
+    if (runtimeObservation.group === 'partial' || runtimeObservation.group === 'inconsistent') {
       throw new Error(`Computer ${computer.name} runtime is ${runtimeObservation.group}; rename requires a stable complete or absent runtime.`);
     }
-    if (runtimeObservation?.group === 'complete'
+    if (runtimeObservation.group === 'complete'
       && !['running', 'created', 'exited'].includes(runtimeObservation.status)) {
       throw new Error(`Computer ${computer.name} runtime is ${runtimeObservation.status}; rename requires a stable running or stopped runtime.`);
     }
-    // Recover against the retained old-name container before the primary
-    // namespace migration changes its lookup name.
-    if (friendlyRuntime) await reconcileRuntimeImageContracts(state);
-    else if (runtimeObservation?.group === 'complete') await ensureRuntimeImages(state, [computer], true);
+    if (runtimeObservation.group === 'complete') await ensureRuntimeImages(state, [computer], true);
     computer.name = newName;
-    if (friendlyRuntime) computer.runtimeName = newName;
-    if (friendlyRuntime) await prepareRuntimeMigration(state);
-    const runningReplacement = runtimeObservation?.group === 'complete' && runtimeObservation.status === 'running';
-    const stoppedReplacement = runtimeObservation?.group === 'complete'
+    const runningReplacement = runtimeObservation.group === 'complete' && runtimeObservation.status === 'running';
+    const stoppedReplacement = runtimeObservation.group === 'complete'
       && (runtimeObservation.status === 'created' || runtimeObservation.status === 'exited');
     await executeStateTransaction(paths, createStateTransaction('rename', state, {
       runtime: {
         replaceIds: runningReplacement ? [computer.id] : [],
         replaceStoppedIds: stoppedReplacement ? [computer.id] : [],
-        computerRuntimeBindings: runtimeObservation?.group === 'complete'
+        computerRuntimeBindings: runtimeObservation.group === 'complete'
           ? { [computer.id]: runtimeObservation.containers }
           : {},
       },
     }));
-    if (friendlyRuntime) await migrateLegacyRuntime(state);
     operationOutput('log', `Renamed ${oldName} to ${newName}. ID, routes, token, and home are unchanged.`);
   });
 }
@@ -1076,7 +1179,11 @@ async function purge(name: string, yes: boolean): Promise<void> {
       if (answer !== found.metadata.name) throw new Error('Confirmation did not match; nothing was purged.');
     }
     await rm(found.directory, { recursive: true, force: false });
-    await rm(join(state.paths.audits, `${found.metadata.id}.jsonl`), { force: true });
+    await Promise.all([
+      rm(join(state.paths.audits, `${found.metadata.id}.jsonl`), { force: true }),
+      rm(join(state.paths.audits, `${found.metadata.id}.control.jsonl`), { force: true }),
+      rm(join(state.paths.audits, `${found.metadata.id}.network.jsonl`), { force: true }),
+    ]);
     operationOutput('log', `Permanently purged ${found.metadata.name}. This cannot be recovered by Qubicl.`);
   });
 }
@@ -1106,6 +1213,7 @@ async function connectClient(
   resultMode: string | undefined,
   clientHost: string | undefined,
   accessValue: string | undefined,
+  credentialId: string | undefined,
 ): Promise<void> {
   if (profile) ToolProfileSchema.parse(profile);
   if (resultMode) McpResultModeSchema.parse(resultMode);
@@ -1124,6 +1232,7 @@ async function connectClient(
     ...(resultMode === undefined ? {} : { resultMode }),
     ...(clientHost === undefined ? {} : { clientHost }),
     ...(host === undefined ? {} : { stdioLauncher: windowsWslStdioLauncher(host) }),
+    ...(credentialId === undefined ? {} : { credentialId: ClientCredentialIdSchema.parse(credentialId) }),
   });
   if (access === 'remote' && snippet.transport === 'stdio') {
     throw new Error('--access remote requires an HTTP or OpenAPI connection; token-free stdio remains local.');
@@ -1139,20 +1248,131 @@ async function mcp(name: string, profile: import('@qubicl/core').ToolProfile, re
 }
 
 async function token(args: ParsedArgs): Promise<void> {
-  const action = required(args.positionals[0], 'token action (show or rotate)');
+  const action = required(args.positionals[0], 'token action (list, create, show, rotate, or revoke)');
   const name = required(args.positionals[1], 'computer name');
   const paths = statePaths();
   await withStateLock(paths, async () => {
     const state = await loadState(paths);
     const computer = findComputer(state, name);
-    if (action === 'show') { operationOutput('log', state.secrets.computers[computer.id]!.token); return; }
-    if (action !== 'rotate') throw new Error('Token action must be show or rotate.');
-    state.secrets.computers[computer.id]!.token = newSecret().token;
-    await executeStateTransaction(paths, createStateTransaction('token-rotate', state, {
+    const secret = state.secrets.computers[computer.id]!;
+    const clientId = args.positionals[2] ?? 'default';
+    if (action === 'list') {
+      if (args.positionals.length !== 2) throw new Error('Token list accepts only a computer name.');
+      const lastUsed = await clientCredentialLastUsed(state, computer.id);
+      const clients = [
+        { id: 'default', label: 'Default client', scopes: [...CLIENT_CREDENTIAL_SCOPES], createdAt: computer.createdAt },
+        ...(secret.clients ?? []).map(({ token: _token, ...client }) => client),
+      ].map((client) => ({ ...client, lastUsedAt: lastUsed.get(client.id) }));
+      if (flag(args, 'json')) operationOutput('log', JSON.stringify({ computer: computer.name, clients }, null, 2));
+      else for (const client of clients) operationOutput('log', `${client.id}\t${client.label}\t${client.scopes.join(',')}\t${client.lastUsedAt ?? 'never used'}`);
+      return;
+    }
+    if (action === 'show') {
+      const tokenValue = clientId === 'default'
+        ? secret.token
+        : secret.clients?.find(({ id }) => id === ClientCredentialIdSchema.parse(clientId))?.token;
+      if (!tokenValue) throw new Error(`Client credential ${clientId} was not found for ${computer.name}.`);
+      operationOutput('log', tokenValue);
+      return;
+    }
+    if (action === 'create') {
+      const id = ClientCredentialIdSchema.parse(required(args.positionals[2], 'client credential ID'));
+      if (id === 'default') throw new Error('Client credential ID default is reserved.');
+      if ((secret.clients ?? []).some((client) => client.id === id)) throw new Error(`Client credential ${id} already exists for ${computer.name}.`);
+      const tokenValue = newSecret().token;
+      secret.clients = [...(secret.clients ?? []), {
+        id,
+        label: stringOption(args, 'label') ?? id,
+        scopes: parseClientScopes(stringOption(args, 'scopes')),
+        token: tokenValue,
+        createdAt: new Date().toISOString(),
+      }];
+      await executeStateTransaction(paths, createStateTransaction('client-credential', state, { runtime: { verifyTokenIds: [computer.id] } }));
+      operationOutput('log', tokenValue);
+      return;
+    }
+    if (action === 'revoke') {
+      const id = ClientCredentialIdSchema.parse(required(args.positionals[2], 'client credential ID'));
+      if (id === 'default') throw new Error('The compatibility credential cannot be selectively revoked; rotate it instead.');
+      if (!flag(args, 'yes')) throw new Error('Revoking a client credential requires --yes.');
+      const retained = (secret.clients ?? []).filter((client) => client.id !== id);
+      if (retained.length === (secret.clients ?? []).length) throw new Error(`Client credential ${id} was not found for ${computer.name}.`);
+      secret.clients = retained;
+      await executeStateTransaction(paths, createStateTransaction('client-credential', state, { runtime: { verifyTokenIds: [computer.id] } }));
+      operationOutput('log', `Revoked client credential ${id} for ${computer.name}; other client credentials remain valid.`);
+      return;
+    }
+    if (action !== 'rotate') throw new Error('Token action must be list, create, show, rotate, or revoke.');
+    const tokenValue = newSecret().token;
+    if (clientId === 'default') secret.token = tokenValue;
+    else {
+      const id = ClientCredentialIdSchema.parse(clientId);
+      const client = secret.clients?.find((candidate) => candidate.id === id);
+      if (!client) throw new Error(`Client credential ${id} was not found for ${computer.name}.`);
+      client.token = tokenValue;
+    }
+    await executeStateTransaction(paths, createStateTransaction(clientId === 'default' ? 'token-rotate' : 'client-credential', state, {
       runtime: { verifyTokenIds: [computer.id] },
     }));
-    operationOutput('log', state.secrets.computers[computer.id]!.token);
+    operationOutput('log', tokenValue);
   });
+}
+
+function parseClientScopes(value: string | undefined): ClientCredentialScope[] {
+  if (!value) return [...CLIENT_CREDENTIAL_SCOPES];
+  const scopes = value.split(',').map((scope) => ClientCredentialScopeSchema.parse(scope.trim()));
+  if (!scopes.length || new Set(scopes).size !== scopes.length) throw new Error('--scopes must contain unique comma-separated scope names.');
+  return CLIENT_CREDENTIAL_SCOPES.filter((scope) => scopes.includes(scope));
+}
+
+async function clientCredentialLastUsed(state: LoadedState, computerId: string): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  try {
+    const contents = await readFile(join(state.paths.audits, `${computerId}.control.jsonl`), 'utf8');
+    for (const line of contents.split('\n')) {
+      if (!line) continue;
+      try {
+        const event = JSON.parse(line) as { at?: unknown; clientCredentialId?: unknown };
+        if (typeof event.at === 'string' && typeof event.clientCredentialId === 'string') result.set(event.clientCredentialId, event.at);
+      } catch { /* malformed audit records are reported by audit verify, not token listing */ }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  return result;
+}
+
+async function manageDashboardClientCredential(
+  state: LoadedState,
+  computer: ComputerConfig,
+  action: 'create' | 'rotate' | 'revoke',
+  input: Record<string, unknown>,
+): Promise<void> {
+  const secret = state.secrets.computers[computer.id]!;
+  const id = ClientCredentialIdSchema.parse(input.id);
+  if (id === 'default') throw new Error('The default compatibility credential is managed separately.');
+  const existing = secret.clients?.find((client) => client.id === id);
+  if (action === 'create') {
+    if (existing) throw new Error(`Client credential ${id} already exists.`);
+    const scopes = Array.isArray(input.scopes) ? input.scopes.map((scope) => ClientCredentialScopeSchema.parse(scope)) : [];
+    secret.clients = [...(secret.clients ?? []), {
+      id,
+      label: String(input.label),
+      scopes,
+      token: String(input.token),
+      createdAt: new Date().toISOString(),
+    }];
+  } else if (action === 'rotate') {
+    if (!existing) throw new Error(`Client credential ${id} was not found.`);
+    existing.token = String(input.token);
+  } else {
+    if (!existing) throw new Error(`Client credential ${id} was not found.`);
+    secret.clients = secret.clients!.filter((client) => client.id !== id);
+  }
+  state.secrets = SecretsSchema.parse(state.secrets);
+  await executeStateTransaction(state.paths, createStateTransaction('client-credential', state, {
+    runtime: { verifyTokenIds: [computer.id] },
+  }));
 }
 
 async function image(args: ParsedArgs): Promise<void> {
@@ -1198,6 +1418,7 @@ async function applyManifest(path: string, dryRun: boolean, prune: boolean): Pro
     const localExposure = state.config.gateway.exposure;
     const targetGateway = {
       ...structuredClone(manifest.gateway),
+      viewerReconnectGraceSeconds: state.config.gateway.viewerReconnectGraceSeconds,
       ...(localExposure ? { exposure: structuredClone(localExposure) } : {}),
     };
     if (reconciliation.gatewayChanged && state.config.gateway.port !== manifest.gateway.port) {
@@ -1240,7 +1461,8 @@ async function applyManifest(path: string, dryRun: boolean, prune: boolean): Pro
 }
 
 async function prepareStateBeforeCommand(command: string | undefined, args: ParsedArgs): Promise<void> {
-  if (!command || ['help', 'version', 'image', 'doctor', 'dashboard', 'recover'].includes(command)) return;
+  if (!command || ['help', 'version', 'image', 'doctor', 'dashboard', 'recover'].includes(command)
+    || (command === 'installation' && args.positionals[0] === 'inspect')) return;
   const paths = statePaths();
   const initialFormat = await inspectStateFormat(paths);
   if (command !== 'setup' && ['legacy', 'migration-pending'].includes(initialFormat.status)) throw new Error('State migration requires explicit qubicl setup or qubicl dashboard enable; this command did not change state.');
@@ -1251,9 +1473,12 @@ async function prepareStateBeforeCommand(command: string | undefined, args: Pars
   const readOnlyLifecycle = ['list', 'inspect', 'logs', 'connect', 'export', 'view', 'mcp'].includes(command)
     || (command === 'config' && args.positionals[0] !== 'set')
     || (command === 'backup' && ['list', 'verify'].includes(args.positionals[0] ?? ''))
-    || (command === 'network' && args.positionals[0] === 'show')
-    || (command === 'token' && args.positionals[0] === 'show')
-    || (command === 'secret' && args.positionals[0] === 'list')
+    || (command === 'network' && ['show', 'explain'].includes(args.positionals[0] ?? ''))
+    || (command === 'tasks' && args.positionals[0] === 'show')
+    || (command === 'storage' && args.positionals[0] === 'show')
+    || command === 'update'
+    || (command === 'token' && ['show', 'list'].includes(args.positionals[0] ?? ''))
+    || (command === 'secret' && ['list', 'explain'].includes(args.positionals[0] ?? ''))
     || command === 'status'
     || command === 'cleanup'
     || (command === 'upgrade' && flag(args, 'all'))
@@ -1291,7 +1516,7 @@ async function prepareStateBeforeCommand(command: string | undefined, args: Pars
   ]);
   const includeRuntime = requiresRuntime.has(command)
     || (command === 'config' && args.positionals[0] === 'set')
-    || (command === 'token' && args.positionals[0] === 'rotate');
+    || (command === 'token' && ['create', 'revoke', 'rotate'].includes(args.positionals[0] ?? ''));
   // Upgrade deliberately replaces an obsolete runtime and therefore must be
   // able to run before the general legacy-runtime migration path.
   const migrateRuntime = command !== 'upgrade' && (includeRuntime || ['list', 'status', 'inspect', 'logs', 'view', 'mcp'].includes(command));
@@ -1333,13 +1558,6 @@ async function prepareStateBeforeCommand(command: string | undefined, args: Pars
     }
     if (includeRuntime && await readPendingTransaction(paths)) {
       await recoverPendingTransaction(paths, { includeRuntime: true });
-    }
-    if ((!legacyRuntimePending || migrateRuntime)
-      && isPrimaryRuntimeRoot(state.paths.root)
-      && state.config.computers.some((computer) => computer.runtimeName !== computer.name)
-      && !(await readPendingTransaction(paths))) {
-      for (const computer of state.config.computers) computer.runtimeName = computer.name;
-      await executeStateTransaction(paths, createStateTransaction('config', state), { includeRuntime: false });
     }
   });
 }
@@ -1851,17 +2069,19 @@ const invocationRules: Record<string, InvocationRule> = {
   version: { minPositionals: 0, maxPositionals: 0 },
   dashboard: { minPositionals: 0, maxPositionals: 3, options: ['yes', 'offline', 'foreground', 'port', 'asset-port', 'bind', 'hostname', 'cert', 'key', 'allow-networks', 'json'] },
   setup: { minPositionals: 0, maxPositionals: 0, options: ['preset', 'image', 'cpus', 'memory', 'gateway-port', 'create', 'no-create', 'no-start', 'offline', 'allow-unsupported-resources', 'verbose', 'no-clear', 'yes', 'json'] },
-  config: { minPositionals: 1, maxPositionals: 1, options: ['gateway-port', 'default-preset', 'default-image', 'default-cpus', 'default-memory', 'update-notifications'] },
+  config: { minPositionals: 1, maxPositionals: 1, options: ['gateway-port', 'default-preset', 'default-image', 'default-cpus', 'default-memory', 'viewer-reconnect-grace', 'update-notifications'] },
   gateway: { minPositionals: 1, maxPositionals: 1, options: ['bind', 'port', 'hostname', 'cert', 'key', 'allow-networks', 'trusted-origins', 'preview-domain', 'client-ca', 'all-interfaces', 'allow-all-clients', 'yes', 'json'] },
   up: { minPositionals: 0, maxPositionals: 0 },
   down: { minPositionals: 0, maxPositionals: 0 },
   create: { minPositionals: 0, maxPositionals: 1, options: ['preset', 'image', 'cpus', 'memory', 'skills', 'tools', 'no-start', 'offline', 'yes', 'json'] },
   upgrade: { minPositionals: 0, maxPositionals: 1, options: ['preset', 'image', 'offline', 'all', 'yes'] },
+  update: { minPositionals: 0, maxPositionals: 1, options: ['offline', 'json'] },
+  installation: { minPositionals: 1, maxPositionals: 2, options: ['output', 'target-root', 'passphrase-file', 'json'] },
   list: { minPositionals: 0, maxPositionals: 0, options: ['json'] },
   status: { minPositionals: 0, maxPositionals: 1 },
   inspect: { minPositionals: 1, maxPositionals: 1 },
   logs: { minPositionals: 0, maxPositionals: 1 },
-  recover: { minPositionals: 0, maxPositionals: 0, options: ['yes'] },
+  recover: { minPositionals: 0, maxPositionals: 1, options: ['yes', 'json'] },
   doctor: { minPositionals: 0, maxPositionals: 0, options: ['json'] },
   repair: { minPositionals: 2, maxPositionals: 2, options: ['yes'] },
   start: { minPositionals: 1, maxPositionals: 1 },
@@ -1869,8 +2089,10 @@ const invocationRules: Record<string, InvocationRule> = {
   restart: { minPositionals: 1, maxPositionals: 1 },
   control: { minPositionals: 2, maxPositionals: 2 },
   browser: { minPositionals: 3, maxPositionals: 3, options: ['yes'] },
-  network: { minPositionals: 2, maxPositionals: 3, options: ['allow-domains', 'deny-domains', 'duration'] },
-  secret: { minPositionals: 2, maxPositionals: 3, options: ['base-url', 'path-prefix', 'methods', 'header', 'provider', 'provider-ref', 'duration'] },
+  tasks: { minPositionals: 2, maxPositionals: 2, options: ['max-concurrent', 'max-lifetime', 'max-output', 'retention', 'yes'] },
+  storage: { minPositionals: 2, maxPositionals: 2, options: ['home-warning', 'backup-warning', 'json'] },
+  network: { minPositionals: 2, maxPositionals: 3, options: ['allow-domains', 'deny-domains', 'allow-cidrs', 'allow-tcp-ports', 'duration'] },
+  secret: { minPositionals: 2, maxPositionals: 3, options: ['template', 'base-url', 'path-prefix', 'methods', 'header', 'provider', 'provider-ref', 'duration'] },
   ssh: { minPositionals: 2, maxPositionals: 2, options: ['port'] },
   backup: { minPositionals: 1, maxPositionals: 3, options: ['encrypt', 'passphrase-file', 'quiesce', 'stopped', 'keep', 'yes'] },
   checkpoint: { minPositionals: 1, maxPositionals: 1, options: ['encrypt', 'passphrase-file'] },
@@ -1886,9 +2108,9 @@ const invocationRules: Record<string, InvocationRule> = {
   restore: { minPositionals: 1, maxPositionals: 1 },
   purge: { minPositionals: 1, maxPositionals: 1, options: ['yes'] },
   view: { minPositionals: 1, maxPositionals: 1, options: ['no-open', 'access'] },
-  connect: { minPositionals: 1, maxPositionals: 1, options: ['client', 'client-host', 'transport', 'profile', 'result-mode', 'access'] },
+  connect: { minPositionals: 1, maxPositionals: 1, options: ['client', 'client-host', 'transport', 'profile', 'result-mode', 'access', 'credential'] },
   mcp: { minPositionals: 1, maxPositionals: 1, options: ['profile', 'result-mode'] },
-  token: { minPositionals: 2, maxPositionals: 2 },
+  token: { minPositionals: 2, maxPositionals: 3, options: ['label', 'scopes', 'yes', 'json'] },
   image: { minPositionals: 1, maxPositionals: 3 },
   export: { minPositionals: 0, maxPositionals: 0, options: ['output'] },
   apply: { minPositionals: 1, maxPositionals: 1, options: ['dry-run', 'prune'] },
@@ -1919,7 +2141,8 @@ Usage: qubicl <command> [arguments]
         [--allow-unsupported-resources] [--verbose] [--no-clear] [--yes] [--json]
   config show                            Print gateway and computer defaults as JSON
   config set [--gateway-port n] [--default-preset id | --default-image ref]
-             [--default-cpus n] [--default-memory 4g] [--update-notifications on|off]
+             [--default-cpus n] [--default-memory 4g] [--viewer-reconnect-grace seconds]
+             [--update-notifications on|off]
                                          Update managed settings and private local preferences
   gateway expose --bind ADDRESS --port PORT --hostname HOST
                  --cert FILE --key FILE --allow-networks CIDR[,CIDR...]
@@ -1938,21 +2161,37 @@ Usage: qubicl <command> [arguments]
   upgrade <name> [--preset id | --image ref] [--offline]
                                          Recreate one computer on the latest compatible image; preserve ID, token, settings, home, and runtime state
   upgrade --all [--offline] [--yes]      Preview exact gateway/default/curated targets, then confirm a deterministic roll-forward upgrade
+  update check [--offline] [--json]      Compare this CLI/catalog with an optional explicit registry lookup
+  installation export --output FILE --passphrase-file FILE
+  installation inspect FILE --passphrase-file FILE [--target-root DIR]
+  installation import FILE --target-root DIR --passphrase-file FILE
+                                         Move or recover a stopped installation without overwriting its source
   list [--json] | status [name] | inspect <name>
                                          Inspect runtime state
-  recover [--yes]                       Resume only validated recorded recovery
+  recover status [--json]               Show exact pending journals and safe next actions
+  recover [resume] [--yes]              Resume only validated recorded recovery
   logs [name] | doctor [--json]          Diagnose Qubicl with repair guidance
   repair ownership <name> [--yes]        Explicitly repair an imported or moved durable home
   start|stop|restart <name>              Manage one computer
   control release <name>                 Release an abandoned human-control session
   browser profile wipe <name> [--yes]    Permanently clear only the durable Chromium profile
+  tasks show <name>                      Show retained-work lifecycles and limits
+  tasks set <name> [--max-concurrent n] [--max-lifetime seconds]
+        [--max-output bytes] [--retention seconds]
+  tasks stop-all <name> [--yes]          Stop every managed task, service, session, and terminal
+  storage show <name> [--json]           Account for home, cache, logs, tasks, and backups
+  storage set <name> [--home-warning 20g] [--backup-warning 50g]
+                                         Set honest warning thresholds without a restart
   network show <name>                    Show its enforced egress profile
+  network explain <name> <URL|host:port> Explain the enforced route without making a request
   network set <name> developer|web-only|offline|custom
               [--allow-domains a,b] [--deny-domains x,y]
+              [--allow-cidrs 10.0.0.0/24] [--allow-tcp-ports 3000,5432]
   network approve|revoke <name> <domain> [--duration seconds]
                                          Recreate runtime boundaries with explicit egress policy
-  secret list <name> | secret remove <name> <id>
-  secret add <name> <id> --base-url https://... [--path-prefix /api]
+  secret list <name> | secret explain|remove <name> <id>
+  secret add <name> <id> [--template openai|anthropic|github] [--base-url https://...]
+         [--path-prefix /api]
          [--methods GET,POST] [--header Authorization]
          [--provider direct|environment|file|secret-tool|macos-keychain] [--provider-ref value]
                                          Configure host-resolved scoped credential brokering
@@ -1998,12 +2237,16 @@ Usage: qubicl <command> [arguments]
   connect <name> --client <client> [--client-host local|windows]
                  [--transport stdio|http|openapi]
                  [--access local|remote]
+                 [--credential id]
                  [--profile full|files|browser-semantic|browser-visual|desktop]
                  [--result-mode text|structured|compatible]
                                          Print setup instructions without editing client configuration
   mcp <name> [--profile ...] [--result-mode ...]
                                          Serve a lease-transparent MCP stdio bridge
-  token show|rotate <name>               Manage bearer tokens
+  token list <name> [--json]             List named client credentials and last use
+  token create <name> <id> [--label TEXT] [--scopes observe,files,tasks,interactive,publish]
+  token show|rotate <name> [id]          Show or rotate one client credential
+  token revoke <name> <id> --yes         Revoke one named client without disrupting others
   image build <tag> <directory>          Build a custom computer image
   export [--output qubicl.yaml]          Export a secret-free manifest
   apply <file> [--dry-run] [--prune]     Reconcile a manifest`;
@@ -2059,15 +2302,16 @@ export async function executeHostManagementRequest(root: string, request: Manage
       case 'skill.import': return skillsCommand(args([name, 'import', text('url')], { ref: text('commit'), yes: true }));
       case 'skill.update': return skillsCommand(args([name, 'update', text('id'), text('url')], { ref: text('commit'), yes: true }));
       case 'skill.reset': case 'skill.remove': case 'skill.restore': return skillsCommand(args([name, request.operation.slice(6), text('id')], { yes: true }));
-      case 'network.set': return networkCommand(args(['set', name, text('profile')], { 'allow-domains': Array.isArray(input.allowDomains) ? input.allowDomains.join(',') : '', 'deny-domains': Array.isArray(input.denyDomains) ? input.denyDomains.join(',') : '' }));
+      case 'network.set': return networkCommand(args(['set', name, text('profile')], { 'allow-domains': Array.isArray(input.allowDomains) ? input.allowDomains.join(',') : '', 'deny-domains': Array.isArray(input.denyDomains) ? input.denyDomains.join(',') : '', 'allow-cidrs': Array.isArray(input.allowCidrs) ? input.allowCidrs.join(',') : '', 'allow-tcp-ports': Array.isArray(input.allowTcpPorts) ? input.allowTcpPorts.join(',') : '' }));
       case 'network.approve': return networkCommand(args(['approve', name, text('domain')], { duration: input.duration as number | undefined }));
       case 'network.revoke': return networkCommand(args(['revoke', name, text('domain')]));
       case 'credential.add': case 'credential.replace': case 'credential.remove': return manageBrokerCredential(state!, requireManagementComputer(computer), request.operation.slice(11) as 'add' | 'replace' | 'remove', input);
+      case 'client.create': case 'client.rotate': case 'client.revoke': return manageDashboardClientCredential(state!, requireManagementComputer(computer), request.operation.slice(7) as 'create' | 'rotate' | 'revoke', input);
       case 'token.rotate': return token(args(['rotate', name]));
       case 'checkpoint.create': return checkpointCommand(args([name], input.consistency === 'stopped' ? { stopped: true } : { quiesce: true }));
-      case 'backup.create': return backupCommand(args(['create', name], { ...(input.consistency === 'stopped' ? { stopped: true } : { quiesce: true }) }));
-      case 'backup.verify': return backupCommand(args(['verify', target]));
-      case 'backup.restore': return backupCommand(args(['restore', target, text('name')]));
+      case 'backup.create': return withDashboardBackupPassphrase(state!, input, async (passphraseFile) => backupCommand(args(['create', name], { ...(input.consistency === 'stopped' ? { stopped: true } : { quiesce: true }), ...(input.encrypted === 'true' ? { encrypt: true, 'passphrase-file': passphraseFile } : {}) })));
+      case 'backup.verify': return withDashboardBackupPassphrase(state!, input, async (passphraseFile) => backupCommand(args(['verify', target], passphraseFile ? { 'passphrase-file': passphraseFile } : {})));
+      case 'backup.restore': return withDashboardBackupPassphrase(state!, input, async (passphraseFile) => backupCommand(args(['restore', target, text('name')], passphraseFile ? { 'passphrase-file': passphraseFile } : {})));
       case 'backup.prune': return backupCommand(args(['prune', computer!.id], { keep: input.keep as number, yes: true }));
       case 'computer.clone': return cloneCommand(args([name, text('name')], { 'no-start': true }));
       case 'computer.resources': {
@@ -2078,9 +2322,9 @@ export async function executeHostManagementRequest(root: string, request: Manage
         const { commitPolicyChange } = await import('./network-policy.js');
         return commitPolicyChange(state!, current);
       }
-      case 'process.stop': case 'preview.revoke': {
+      case 'process.stop': case 'preview.revoke': case 'preview.share': case 'preview.unshare': {
         const { HostManagementBackend } = await import('./dashboard/application.js');
-        const suffix = request.operation === 'process.stop' ? '/processes/stop' : '/previews/revoke';
+        const suffix = request.operation === 'process.stop' ? '/processes/stop' : `/previews/${request.operation.slice('preview.'.length)}`;
         await new HostManagementBackend(root).operator(state!, requireManagementComputer(computer).id, suffix, 'POST', input); return;
       }
       case 'recovery.resume': {
@@ -2102,6 +2346,18 @@ export async function executeHostManagementRequest(root: string, request: Manage
       }
     }
   });
+}
+
+async function withDashboardBackupPassphrase<T>(state: LoadedState, input: Record<string, unknown>, action: (path: string | undefined) => Promise<T>): Promise<T> {
+  const value = typeof input.passphrase === 'string' && input.passphrase ? input.passphrase : undefined;
+  if (!value) return action(undefined);
+  const path = join(state.paths.runtime, `.dashboard-backup-passphrase-${randomUUID()}`);
+  await atomicWrite(path, `${value}\n`, 0o600);
+  try { return await action(path); }
+  finally {
+    input.passphrase = '';
+    await durableRemove(path).catch(() => undefined);
+  }
 }
 
 function requireManagementComputer(value: ComputerConfig | undefined): ComputerConfig { if (!value) throw new Error('Computer was not found.'); return value; }

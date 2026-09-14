@@ -2,6 +2,11 @@
 
 `qubicl connect` prints validated setup instructions. It never runs them, edits a client configuration, or restarts a client.
 
+The [0.6 design](decisions/0002-v0.6-capabilities-and-constraints.md)
+separates retained background tasks from interactive ownership. The
+[constraint register](constraints.md) records the boundaries that remain and
+the reason for each one.
+
 ## Token-free local adapters
 
 These adapters invoke `qubicl mcp <computer>` and contain no bearer token:
@@ -24,7 +29,13 @@ For Codex, Qubicl prints this command but does not run it:
 codex mcp add qubicl-computer-name -- qubicl mcp computer-name
 ```
 
-The stdio process owns and refreshes one fenced lease for the connection. Its tool catalog omits lease lifecycle tools and every lease argument, while disconnect still releases control and terminates ordinary connection-owned managed processes. Direct HTTP MCP/OpenAPI remain explicit proof-bearing compatibility surfaces because their request lifecycle is not assumed to represent one model session.
+The stdio process owns and refreshes one fenced interactive lease for the
+connection. Its tool catalog omits lease lifecycle tools and every lease
+argument. Disconnect releases that interactive ownership and stops
+lease-scoped session processes and terminals; retained tasks and services keep
+running until their explicit limit or stop action. Direct HTTP MCP/OpenAPI
+remain explicit proof-bearing compatibility surfaces because their request
+lifecycle is not assumed to represent one model session.
 
 Select a smaller static stdio catalog when a task does not need the full computer:
 
@@ -77,10 +88,24 @@ qubicl connect computer-name --client generic --transport openapi
 The `http` and `openapi` shortcuts select those transports directly. Their headers contain this placeholder, never a literal credential:
 
 ```text
-<token from: qubicl token show computer-name>
+<token from: qubicl token show computer-name CREDENTIAL_ID>
 ```
 
-Run the token command separately only when a local HTTP/OpenAPI client needs it. Treat that output as a password: do not commit it, paste it into an issue, or expose it in shell history or screenshots.
+Create a named credential with only the scopes the integration needs, then
+select it while generating the configuration:
+
+```sh
+qubicl token create computer-name codex-http --label "Codex HTTP" \
+  --scopes observe,files,tasks,interactive,publish
+qubicl connect computer-name --client generic --transport http \
+  --credential codex-http
+qubicl token show computer-name codex-http
+```
+
+The bearer is shown only by the separate token command. Treat that output as a
+password: do not commit it, paste it into an issue, or expose it in screenshots.
+`token list`, `rotate`, and `revoke` act on one named client without disrupting
+the others, and list output reports last use without revealing the bearer.
 
 When the operator has explicitly configured the optional TLS listener, select
 the remote endpoint instead of silently changing existing adapters:
@@ -110,10 +135,18 @@ The output maps to **Admin Panel → Settings → Integrations → Open Terminal
 - URL: the printed `url`
 - OpenAPI path: the printed `path`
 - authentication: Bearer
-- key: replace the printed placeholder with the output of `qubicl token show computer-name`
+- key: replace the printed placeholder with the output of `qubicl token show computer-name CREDENTIAL_ID`
 - enabled: on
 
-Open WebUI should verify the server as **Terminal**. Its native file browser can list, read, view, upload, create, move, delete, and download a bounded multi-path ZIP within that computer's durable `/home`. The compatibility API can start, list, attach to, page output from, send bounded input to, and stop retained non-PTY processes. The compatibility OpenAPI also presents the computer's normal tools while owning a fenced Qubicl lease transparently, so a model is not asked to manufacture or renew lease proofs. Human viewer takeover still preempts that lease, fences compatibility processes, and makes calls fail closed until human control is released and a fresh lease is obtained.
+Open WebUI should verify the server as **Terminal**. Its native file browser can
+list, read, view, upload, create, move, delete, and download a bounded multi-path
+ZIP within that computer's durable `/home`. The compatibility API can start,
+list, attach to, page output from, send bounded input to, and stop retained
+processes. The projected model tools also include bounded reconnectable PTY
+tasks. The compatibility OpenAPI owns an interactive Qubicl lease transparently,
+so a model is not asked to manufacture or renew proofs. Human takeover fences
+new GUI input and session-scoped work; retained tasks and services remain
+observable and continue within their configured limits.
 
 A connection uses one shared computer: chats and users share its durable home,
 compatibility lease, and process inventory. `X-Session-Id` tracks each chat's
@@ -188,23 +221,29 @@ Open Terminal serves both desktop and browser screenshot operations as native `i
 
 The default generated URL uses Docker Desktop's `host.docker.internal` route so the Open WebUI backend can reach the host-loopback Qubicl gateway without joining a Qubicl-managed network. If Open WebUI runs directly on the host rather than in Docker, replace that hostname with `127.0.0.1`. A deliberately remote Open WebUI deployment can instead use the separately configured TLS origin; include its exact browser origin in `--trusted-origins` and keep the per-computer token restricted to the intended connection. Open WebUI stores the separately retrieved token in its admin settings; restrict the connection's Open WebUI access grants accordingly.
 
-Live app previews require explicit port publication. The Open WebUI HTTP proxy
-supports apps whose assets and redirects are relative to the proxied page, or
-whose generated URLs include the full browser-visible proxy base path. The
-upstream app receives the suffix after `/proxy/{port}`. Qubicl does not rewrite
-HTML, JavaScript, root-relative URLs, or `Location` headers. Configure the app's
-public base URL accordingly. Operator authorization and cookies are stripped,
-and app `Set-Cookie` headers are suppressed; cookie-based app sessions are not
-supported through this proxy.
+Live app previews require explicit port publication. The Qubicl preview URL
+uses a publication-specific origin, forwards ordinary root paths and redirects,
+and keeps application cookies scoped to that publication. Qubicl authentication
+cookies and operator headers never reach the app. Owner access remains available
+while the listener exists; `share_preview` creates a separate expiring remote
+credential that can be revoked without closing owner access.
 
-The Open Terminal proxy does not provide a WebSocket upgrade route. For apps
-using WebSockets, use the isolated local or remote preview URL returned by
-`publish_port`, with its authenticated handoff and an app configured for that
-preview path. This route supports WebSocket upgrades while keeping operator
-credentials out of the app. It has the same URL and app-cookie limitations;
-isolation alone does not make arbitrary root-based apps compatible.
+The Open Terminal compatibility proxy does not provide a WebSocket upgrade
+route. For apps using WebSockets, use the isolated local or remote preview URL
+returned by `publish_port`. Explicit unpublish, share revocation, policy loss,
+and expiry close the corresponding established streams and upgraded sockets.
 
-Compatibility intentionally reports `terminal: false` and `notebooks: false`, while advertising its existing `/system` guidance endpoint. It provides bounded non-PTY process management and ZIP download, not an interactive terminal emulator or notebooks. Process count, lifetime, command/input, queued stdin, retained records, output pages, per-process output, and aggregate output are capped; record or byte exhaustion marks paged output as truncated, and expired/deleted records fence surviving members before removal. ZIP input stays below `/home/qubicl`, rejects links and special files, and applies path, entry, ancestry-metadata, file, aggregate-byte, output, creation-time, and transfer-time limits. At most two ZIP creations/downloads can reserve output space on one computer at once. Open WebUI's `/ports` and `/proxy/{port}/...` routes expose only live ports that were explicitly published through Qubicl; an arbitrary listener never becomes reachable merely because it exists. Existing MCP, OpenAPI, viewer, and human-control routes remain unchanged.
+Compatibility reports `terminal: false` for Open WebUI's native terminal-emulator
+feature and `notebooks: false`, while advertising its `/system` guidance endpoint.
+Qubicl's model tool catalog separately provides bounded interactive terminal
+tasks with explicit rows/columns, input, resize, reconnect, signal, close, output,
+lifetime, and aggregate retention limits. Compatibility process and ZIP limits
+remain enforced; record or byte exhaustion reports truncation instead of silently
+discarding active work. ZIP input stays below `/home/qubicl`, rejects links and
+special files, and applies path, entry, ancestry-metadata, file, aggregate-byte,
+output, creation-time, and transfer-time limits. At most two ZIP creations or
+downloads reserve output space at once. Only ports explicitly published through
+Qubicl appear in Open WebUI.
 
 ## Requirements
 
@@ -269,7 +308,10 @@ interruption. An Open WebUI/Open Terminal connection still shares one fenced
 lease and one assigned computer; chat folders are organizational directories,
 not security isolation or automatically provisioned computers.
 
-The v0.5 release gate requires real acceptance for Codex, Claude Code, Claude
+The 0.6 release-impact document identifies affected client adapters and
+protocols; missing required coverage is never treated as a pass. The complete
+0.6 source change affects the shared contract and therefore still requires real
+acceptance for Codex, Claude Code, Claude
 Desktop, Cursor, VS Code, OpenCode, OpenClaw, Hermes and Open WebUI, together with
 all four protocol profiles, including for an initial release. No adapter or
 physical-client acceptance is inferred from dashboard mock tests.

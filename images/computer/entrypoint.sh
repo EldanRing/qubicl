@@ -58,6 +58,26 @@ fi
 # leaving all user-created contents and their modes untouched.
 chmod 0700 /home/qubicl
 
+run_guest_hook() {
+  local hook="$1" marker="$2" command workspace
+  [[ -v QUBICL_DEVCONTAINER_GUEST_JSON ]] || return 0
+  command="$(QUBICL_GUEST_HOOK="$hook" node -e 'const value=JSON.parse(process.env.QUBICL_DEVCONTAINER_GUEST_JSON); const command=value.hooks?.[process.env.QUBICL_GUEST_HOOK]; if(typeof command==="string") process.stdout.write(command)')"
+  [[ -n "$command" ]] || return 0
+  if [[ -n "$marker" ]] && [[ -e "$marker" ]]; then return 0; fi
+  workspace="$(node -e 'const value=JSON.parse(process.env.QUBICL_DEVCONTAINER_GUEST_JSON); process.stdout.write(value.workspaceFolder??"/home/qubicl")')"
+  runuser -u qubicl -- env -i HOME=/home/qubicl USER=qubicl LOGNAME=qubicl SHELL=/bin/bash PATH=/home/qubicl/.local/bin:/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 QUBICL_GUEST_WORKSPACE="$workspace" QUBICL_GUEST_COMMAND="$command" bash -lc 'cd -- "$QUBICL_GUEST_WORKSPACE" && exec bash -lc "$QUBICL_GUEST_COMMAND"'
+  if [[ -n "$marker" ]]; then runuser -u qubicl -- touch "$marker"; fi
+}
+
+guest_marker_root=/home/qubicl/.local/state/qubicl/devcontainer
+if [[ -v QUBICL_DEVCONTAINER_GUEST_JSON ]]; then
+  runuser -u qubicl -- install -d -m 0700 "$guest_marker_root"
+  run_guest_hook onCreateCommand "$guest_marker_root/on-create-complete"
+  run_guest_hook updateContentCommand "$guest_marker_root/update-content-complete"
+  run_guest_hook postCreateCommand "$guest_marker_root/post-create-complete"
+  run_guest_hook postStartCommand ""
+fi
+
 baked_profile="${QUBICL_IMAGE_STARTUP_PROFILE:?image startup profile is missing}"
 requested_profile="${QUBICL_STARTUP_PROFILE:-$baked_profile}"
 if [[ "$requested_profile" != "$baked_profile" ]]; then
@@ -242,6 +262,7 @@ start_internal_session() {
     QUBICL_HOST_GID="$target_gid"
     QUBICL_COMPATIBILITY="${QUBICL_COMPATIBILITY:?}"
     QUBICL_BROWSER_EXECUTABLE="${QUBICL_BROWSER_EXECUTABLE:-/usr/local/bin/qubicl-chromium}"
+    QUBICL_BROWSER_MAX_TABS="${QUBICL_BROWSER_MAX_TABS:-24}"
     QUBICL_POINTER_URL="${QUBICL_POINTER_URL:?}"
     DISPLAY="${DISPLAY:-:0}"
   )
@@ -267,13 +288,22 @@ start_internal_web() {
 start_ssh() {
   install -d -m 0755 /run/sshd
   install -d -m 0700 -o qubicl -g qubicl /run/qubicl-ssh
+  ssh_host_key_root=/home/qubicl/.local/share/qubicl/ssh-host-keys
+  install -d -m 0700 -o qubicl -g qubicl /home/qubicl/.local /home/qubicl/.local/share /home/qubicl/.local/share/qubicl
+  install -d -m 0700 -o root -g root "$ssh_host_key_root"
+  if [[ ! -s "$ssh_host_key_root/ssh_host_ed25519_key" || ! -s "$ssh_host_key_root/ssh_host_ed25519_key.pub" ]]; then
+    rm -f "$ssh_host_key_root/ssh_host_ed25519_key" "$ssh_host_key_root/ssh_host_ed25519_key.pub"
+    ssh-keygen -q -t ed25519 -N '' -f "$ssh_host_key_root/ssh_host_ed25519_key"
+  fi
+  chown root:root "$ssh_host_key_root/ssh_host_ed25519_key" "$ssh_host_key_root/ssh_host_ed25519_key.pub"
+  chmod 0600 "$ssh_host_key_root/ssh_host_ed25519_key"
+  chmod 0644 "$ssh_host_key_root/ssh_host_ed25519_key.pub"
   # The inherited system account is password-locked, which also blocks
   # public-key SSH. Password and interactive authentication remain disabled.
   passwd -d qubicl >/dev/null
   printf '%s\n' "${QUBICL_SSH_PUBLIC_KEY:?}" >/run/qubicl-ssh/authorized_keys
   chmod 0600 /run/qubicl-ssh/authorized_keys
   chown qubicl:qubicl /run/qubicl-ssh/authorized_keys
-  ssh-keygen -A >/dev/null
   ssh_network_settings=()
   if [[ -v QUBICL_PROXY_URL ]]; then
     ssh_network_settings+=("SetEnv HTTP_PROXY=$QUBICL_PROXY_URL HTTPS_PROXY=$QUBICL_PROXY_URL http_proxy=$QUBICL_PROXY_URL https_proxy=$QUBICL_PROXY_URL")
@@ -281,6 +311,7 @@ start_ssh() {
   /usr/sbin/sshd -D -e \
     -o Port=2222 \
     -o ListenAddress=0.0.0.0 \
+    -o HostKey="$ssh_host_key_root/ssh_host_ed25519_key" \
     -o PasswordAuthentication=no \
     -o KbdInteractiveAuthentication=no \
     -o PermitRootLogin=no \
@@ -391,7 +422,7 @@ case "$baked_profile" in
     start_display
     start_as_user env DISPLAY="$DISPLAY" dbus-run-session -- openbox-session
     start_viewer
-    start_as_user env DISPLAY="$DISPLAY" chromium \
+    start_as_user env DISPLAY="$DISPLAY" /usr/local/bin/qubicl-chromium \
       --no-first-run \
       --no-default-browser-check \
       --remote-debugging-address=127.0.0.1 \

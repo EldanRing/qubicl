@@ -482,7 +482,7 @@ export async function releaseComputerHumanControl(state: LoadedState, computer: 
   if (!secret) throw new Error(`Missing secret material for ${computer.name}.`);
   const response = await fetch(
     `http://127.0.0.1:${state.config.gateway.port}/computers/${computer.id}/operator/human-control/release`,
-    { method: 'POST', headers: { authorization: `Bearer ${secret.token}` }, signal: AbortSignal.timeout(5000), redirect: 'error' },
+    { method: 'POST', headers: { 'x-qubicl-operator-key': secret.internalKey }, signal: AbortSignal.timeout(5000), redirect: 'error' },
   ).catch((error: unknown) => {
     throw new Error(`Could not reach the Qubicl gateway to release human control: ${errorMessage(error)}`);
   });

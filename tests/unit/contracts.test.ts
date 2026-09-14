@@ -58,6 +58,9 @@ test('process and desktop tool contracts expose the additive safety controls and
   assert.match(QUBICL_MODEL_INSTRUCTIONS, /verify application effects/);
   assert.match(toolDefinitions.control_computer.description, /confirm an X11 target/);
   assert.match(toolDefinitions.exec_command.description, /Combined output/);
+  assert.deepEqual((jsonSchemaForTool('exec_command') as { properties: { lifecycle: { enum: string[] } } }).properties.lifecycle.enum, ['task', 'session', 'service']);
+  assert.equal(toolDefinitions.read_file.lease, false);
+  assert.equal(toolDefinitions.browser_snapshot.lease, false);
 
   const applicationSchema = jsonSchemaForTool('open_desktop_application') as {
     properties: Record<string, unknown>;
@@ -68,7 +71,7 @@ test('process and desktop tool contracts expose the additive safety controls and
   for (const unsafeInput of ['command', 'executable', 'args', 'arguments', 'cwd', 'environment', 'env', 'url']) {
     assert.equal(Object.hasOwn(applicationSchema.properties, unsafeInput), false);
   }
-  assert.match(toolDefinitions.open_desktop_application.description, /No executable, shell, arbitrary arguments/);
+  assert.match(toolDefinitions.open_desktop_application.description, /installed system desktop executable/);
 
   const lease = { id: 'a'.repeat(32), generation: 1, epoch: 'b'.repeat(16) };
   assert.equal(toolDefinitions.control_computer.input.safeParse({
@@ -106,6 +109,14 @@ test('browser capability matches the Terminal1 semantic and screenshot-grounded 
     'browser_new_tab',
     'browser_close_tab',
     'browser_reset',
+    'browser_upload',
+    'browser_downloads',
+    'browser_cancel_download',
+    'browser_dialogs',
+    'browser_respond_dialog',
+    'browser_permissions',
+    'browser_diagnostics',
+    'browser_set_viewport',
     'browser_click_at',
     'browser_double_click_at',
     'browser_hover_at',
@@ -118,8 +129,8 @@ test('browser capability matches the Terminal1 semantic and screenshot-grounded 
   const browserTools = enabledToolNames(PRESET_DEFINITIONS.browser.capabilities).filter((name) => name.startsWith('browser_'));
   assert.deepEqual(browserTools, expected);
   const coordinate = jsonSchemaForTool('browser_click_at') as { properties: { x: { maximum: number }; y: { maximum: number } } };
-  assert.equal(coordinate.properties.x.maximum, 1439);
-  assert.equal(coordinate.properties.y.maximum, 899);
+  assert.equal(coordinate.properties.x.maximum, 8191);
+  assert.equal(coordinate.properties.y.maximum, 8191);
   const computer = jsonSchemaForTool('browser_computer') as { properties: { actions: { maxItems: number } } };
   assert.equal(computer.properties.actions.maxItems, 20);
   assert.match(QUBICL_MODEL_INSTRUCTIONS, /untrusted data/);
@@ -146,6 +157,8 @@ test('model-facing schemas retain date-time semantics and Zod defaults without l
   assert.deepEqual('value' in validated ? validated.value : undefined, {
     lease: { id: 'a'.repeat(32), generation: 1, epoch: 'b'.repeat(16) },
     command: 'true',
+    label: 'Task',
+    lifecycle: 'task',
     cwd: '/home/qubicl',
     yieldTimeMs: 10_000,
     maxOutputBytes: 24_000,
@@ -247,9 +260,9 @@ test('MCP result modes never repeat a full payload unless compatibility is expli
   assert.match((compatible.content[0] as { text: string }).text, /x{100}/);
 });
 
-test('lease-transparent workstation catalog stays within its golden budget and profiles remain static subsets', async () => {
+test('lease-transparent workstation catalog stays within its reviewed 0.6 budget and profiles remain static subsets', async () => {
   const workstation = enabledToolNames(PRESET_DEFINITIONS.workstation.capabilities);
-  assert.ok(compactToolDefinitionBytes(workstation, { leaseTransparent: true }) < 26_000);
+  assert.ok(compactToolDefinitionBytes(workstation, { leaseTransparent: true }) < 38_000);
   const transparent = toolNamesForProfile(workstation, 'full', true);
   assert.equal(transparent.includes('acquire_lease'), false);
   assert.equal(transparent.includes('renew_lease'), false);

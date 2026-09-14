@@ -57,6 +57,10 @@ test('management rejects arbitrary commands, host paths, and unpinned skill impo
   assert.throws(() => validateManagementRequest({ operation: 'backup.restore', target: '../../outside' }));
   assert.throws(() => validateManagementRequest({ operation: 'skill.import', input: { url: 'file:///home/user', commit: 'main' } }));
   assert.throws(() => validateManagementRequest({ operation: 'computer.create', input: { name: 'safe', mount: '/host' } }));
+  assert.throws(() => validateManagementRequest({ operation: 'backup.create', target: 'example', input: { consistency: 'stopped', encrypted: 'true' } }), /passphrase/u);
+  assert.throws(() => validateManagementRequest({ operation: 'backup.create', target: 'example', input: { consistency: 'stopped', passphrase: 'long-enough-passphrase' } }), /Select encryption/u);
+  assert.doesNotThrow(() => validateManagementRequest({ operation: 'backup.create', target: 'example', input: { consistency: 'stopped', encrypted: 'true', passphrase: 'long-enough-passphrase' } }));
+  assert.doesNotThrow(() => validateManagementRequest({ operation: 'backup.verify', target: 'example', input: { passphrase: 'operation-only' } }));
 });
 
 test('plans are session-bound, detect drift, and never run rejected work', async () => {
@@ -198,22 +202,21 @@ test('isolated preview handoff uses its local or remote preview origin and rejec
   const computerId = '123e4567-e89b-42d3-a456-426614174000';
   const previewId = 'abcdefghijklmnop';
   const ticket = 't'.repeat(43);
-  const path = `/computers/${computerId}/previews/${previewId}/?ticket=${ticket}`;
+  const path = `/?ticket=${ticket}`;
   assert.equal(
     managementPreviewUrl({ previewBase: `http://preview-${computerId}.localhost:3211/computers/${computerId}/previews` }, computerId, previewId, path),
-    `http://preview-${computerId}.localhost:3211${path}`,
+    `http://${previewId}--preview-${computerId}.localhost:3211${path}`,
   );
   assert.equal(
     managementPreviewUrl({ previewBase: `https://preview-${computerId}.preview.example.test/computers/${computerId}/previews` }, computerId, previewId, path),
-    `https://preview-${computerId}.preview.example.test${path}`,
+    `https://${previewId}--preview-${computerId}.preview.example.test${path}`,
   );
   assert.throws(() => managementPreviewUrl({}, computerId, previewId, path), /isolated remote preview domain/);
   for (const hostile of [
-    `https://attacker.example/${computerId}/previews/${previewId}/?ticket=${ticket}`,
-    `//attacker.example/computers/${computerId}/previews/${previewId}/?ticket=${ticket}`,
-    `/computers/${computerId}/previews/${previewId}/../../view?ticket=${ticket}`,
-    `/computers/${computerId}/previews/${previewId}/?ticket=${ticket}&redirect=https://attacker.example`,
-    `/computers/${computerId}/previews/${previewId}/?ticket=${ticket}#attacker`,
+    `https://attacker.example/?ticket=${ticket}`,
+    `//attacker.example/?ticket=${ticket}`,
+    `/?ticket=${ticket}&redirect=https://attacker.example`,
+    `/?ticket=${ticket}#attacker`,
   ]) assert.throws(() => managementPreviewUrl({ previewBase: `https://preview-${computerId}.preview.example.test/computers/${computerId}/previews` }, computerId, previewId, hostile), /invalid/);
 });
 
@@ -226,7 +229,7 @@ test('management preview action hands a loopback operator ticket to the isolated
   await saveState(state);
   const previewId = 'abcdefghijklmnop';
   const ticket = 't'.repeat(43);
-  const path = `/computers/${computer.id}/previews/${previewId}/?ticket=${ticket}`;
+  const path = `/?ticket=${ticket}`;
   const originalFetch = globalThis.fetch;
   try {
     globalThis.fetch = (async (input, init) => {
@@ -236,7 +239,7 @@ test('management preview action hands a loopback operator ticket to the isolated
       return new Response(JSON.stringify({ path }), { status: 200, headers: { 'content-type': 'application/json' } });
     }) as typeof fetch;
     const result = await new ManagementApplication(root).action(`/computers/${computer.id}/previews/${previewId}/open`, { access: 'local' }, 'owner') as { url: string };
-    assert.equal(result.url, `http://preview-${computer.id}.localhost:${state.config.gateway.port}${path}`);
+    assert.equal(result.url, `http://${previewId}--preview-${computer.id}.localhost:${state.config.gateway.port}${path}`);
   } finally {
     globalThis.fetch = originalFetch;
     await rm(root, { recursive: true, force: true });
@@ -256,7 +259,8 @@ test('acceptance receipts survive helper restart without replaying completed or 
     await writeFile(join(root, 'dashboard', 'operations', `${interrupted}.json`), JSON.stringify({ schemaVersion: 1, job: { id: interrupted, operation: 'computer.stop', target: 'example', status: 'running', createdAt: now, updatedAt: now, message: 'Operation accepted.' }, acceptance: { keyHash: createHash('sha256').update('owner:test-key-00000002').digest('hex'), planId: interruptedPlan } }), { mode: 0o600 });
     const resumed = new ManagementApplication(root, backend); await resumed.initialize();
     assert.deepEqual(await resumed.execute(plan.id, { idempotencyKey: 'test-key-00000001' }, 'owner', true), accepted);
-    assert.equal((await resumed.operation(interrupted)).status, 'failed');
+    assert.equal((await resumed.operation(interrupted)).status, 'outcome-unknown');
+    assert.match((await resumed.operation(interrupted)).message, /stopped before recording the outcome/iu);
     assert.equal(runs, 1);
   } finally { await close(); }
 });

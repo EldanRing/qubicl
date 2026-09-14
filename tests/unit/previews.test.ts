@@ -28,17 +28,17 @@ test('preview publication adds a remote URL without replacing existing local and
   const local = new URL(published.url);
   const remote = new URL(published.remoteUrl);
   const browser = new URL(published.browserUrl);
-  assert.equal(local.origin, new URL(localBase).origin);
-  assert.equal(remote.origin, new URL(remoteBase).origin);
+  assert.equal(local.origin, `http://${published.id}--preview-example.localhost:3211`);
+  assert.equal(remote.origin, `https://${published.id}--preview-example.remote.test`);
   assert.equal(browser.origin, new URL(internalBase).origin);
-  assert.equal(remote.searchParams.get('token'), local.searchParams.get('token'));
+  assert.notEqual(remote.searchParams.get('token'), local.searchParams.get('token'));
   assert.equal(browser.searchParams.get('token'), local.searchParams.get('token'));
-  assert.match(local.pathname, new RegExp(`/${published.id}/$`, 'u'));
-  assert.match(remote.pathname, new RegExp(`/${published.id}/$`, 'u'));
+  assert.equal(local.pathname, '/');
+  assert.equal(remote.pathname, '/');
 
   assert.deepEqual(manager.list().map(({ url, remoteUrl }) => ({ url, remoteUrl })), [{
-    url: `${localBase}/${published.id}/`,
-    remoteUrl: `${remoteBase}/${published.id}/`,
+    url: `http://${published.id}--preview-example.localhost:3211/`,
+    remoteUrl: `https://${published.id}--preview-example.remote.test/`,
   }]);
 
   const localOnly = new PreviewManager(
@@ -48,6 +48,33 @@ test('preview publication adds a remote URL without replacing existing local and
     internalBase,
   );
   assert.equal('remoteUrl' in await localOnly.publish(3000, 300), false);
+});
+
+test('owner previews follow the listener while remote shares rotate and revoke independently', async () => {
+  let listening = true;
+  const manager = new PreviewManager(
+    { listPorts: async () => listening ? [{ port: 3000, address: 'loopback', protocol: 'tcp' }] : [] },
+    '127.0.0.1',
+    localBase,
+    internalBase,
+    remoteBase,
+  );
+  const owner = await manager.publish(3000) as { id: string; url: string; remoteSharingAvailable: boolean };
+  assert.equal(owner.remoteSharingAvailable, true);
+  assert.equal('remoteUrl' in owner, false);
+  assert.equal(manager.list()[0]?.lifetime, 'while-listening');
+
+  const first = manager.share(owner.id, 300);
+  const second = manager.share(owner.id, 300);
+  assert.notEqual(new URL(first.remoteUrl).searchParams.get('token'), new URL(second.remoteUrl).searchParams.get('token'));
+  assert.equal(manager.list()[0]?.shareExpiresAt, second.expiresAt);
+  assert.equal(manager.revokeShare(owner.id), true);
+  assert.equal(manager.list()[0]?.shareExpiresAt, undefined);
+  assert.equal(manager.list()[0]?.id, owner.id);
+
+  listening = false;
+  await new Promise((resolve) => setTimeout(resolve, 2_100));
+  assert.deepEqual(manager.list(), []);
 });
 
 test('preview publication reads expose, rotate, and revoke state dynamically', async () => {
@@ -70,13 +97,13 @@ test('preview publication reads expose, rotate, and revoke state dynamically', a
     assert.equal('remoteUrl' in initial, false);
 
     await writeAccess(remoteBase);
-    assert.equal(manager.list()[0]?.remoteUrl, `${remoteBase}/${initial.id}/`);
+    assert.equal(manager.list()[0]?.remoteUrl, `https://${initial.id}--preview-example.remote.test/`);
     const exposed = await manager.publish(3000, 300);
-    assert.match(exposed.remoteUrl as string, new RegExp(`^${remoteBase}/`, 'u'));
+    assert.equal(new URL(exposed.remoteUrl as string).hostname, `${exposed.id as string}--preview-example.remote.test`);
 
     const rotatedBase = 'https://preview-example.rotated.test/computers/example/previews';
     await writeAccess(rotatedBase);
-    assert.equal(manager.list()[0]?.remoteUrl, `${rotatedBase}/${initial.id}/`);
+    assert.equal(manager.list()[0]?.remoteUrl, `https://${initial.id}--preview-example.rotated.test/`);
 
     await writeAccess();
     assert.equal('remoteUrl' in manager.list()[0]!, false);

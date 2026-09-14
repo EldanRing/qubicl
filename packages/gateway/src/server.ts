@@ -24,6 +24,7 @@ import { Transform, type Duplex } from 'node:stream';
 import { createSecureContext, type TLSSocket } from 'node:tls';
 import {
   GATEWAY_PROTOCOL_VERSION,
+  ALL_CLIENT_CREDENTIAL_SCOPES,
   GatewayExposureRuntimeSchema,
   VIEWER_AUTHENTICATION_HEADER_V1,
   certificateCoversGatewayHostname,
@@ -32,8 +33,11 @@ import {
   gatewayExposureRuntimeId,
   gatewayPreviewHostname,
   previewHostname,
+  routeAcceptsTokenHash,
   tokenMatches,
+  type ClientCredentialScope,
   type GatewayExposureRuntime,
+  type RuntimeClientCredential,
   type RuntimeRoute,
 } from '@qubicl/core';
 import { RouteStore } from './routes.js';
@@ -59,6 +63,11 @@ const EXTERNAL_AUTH_FAILURES_PER_MINUTE = 30;
 const EXTERNAL_TICKETS_PER_MINUTE = 12;
 const EXTERNAL_UPGRADE_IDLE_TIMEOUT_MS = 30 * 60 * 1_000;
 const EXTERNAL_UPGRADE_LIFETIME_MS = 12 * 60 * 60 * 1_000;
+const PROXY_CONNECT_TIMEOUT_MS = 10_000;
+const PROXY_IDLE_TIMEOUT_MS = 30_000;
+const PROXY_OVERALL_TIMEOUT_MS = 5 * 60_000;
+const MAX_PROXY_REQUESTS_PER_COMPUTER = 32;
+const LOCAL_MAX_BODY_BYTES = 32 * 1024 * 1024;
 const MAX_RATE_BUCKETS = 4_096;
 const MAX_TICKETS = 4_096;
 const MAX_SESSIONS = 4_096;
@@ -69,6 +78,17 @@ const MAX_CERTIFICATE_BYTES = 1024 * 1024;
 const MAX_PRIVATE_KEY_BYTES = 256 * 1024;
 const MAX_CLIENT_CA_BYTES = 1024 * 1024;
 const PREVIEW_CERTIFICATE_PROBE_ID = '00000000-0000-4000-8000-000000000001';
+
+function routeClientCredentials(route: RuntimeRoute): RuntimeClientCredential[] {
+  if (route.clientCredentials.some(({ tokenHash }) => tokenHash === route.tokenHash)) return route.clientCredentials;
+  return [{
+    id: 'default',
+    label: 'Default client',
+    tokenHash: route.tokenHash,
+    scopes: [...ALL_CLIENT_CREDENTIAL_SCOPES],
+    createdAt: new Date(0).toISOString(),
+  }, ...route.clientCredentials];
+}
 
 export type GatewayExternalFailureCode =
   | 'environment_invalid'
@@ -129,11 +149,12 @@ export class Gateway {
   private readonly tickets = new Map<string, TimedValue>();
   private readonly sessions = new Map<string, ViewSession>();
   private readonly viewerSockets = new Map<string, Set<ViewerSocket>>();
-  private readonly abandonedControlTimers = new Map<string, NodeJS.Timeout>();
+  private readonly abandonedControlTimers = new Map<string, { timer: NodeJS.Timeout; releasesAt: number }>();
   private readonly gatewayEpoch = randomBytes(18).toString('base64url');
   private readonly epochSynchronizations = new Map<string, EpochSynchronization>();
   private readonly epochRequests = new Set<ClientRequest>();
   private readonly rateBuckets = new Map<string, RateBucket>();
+  private readonly activeProxyRequests = new Map<string, number>();
   private readonly externalSurface: ExternalSurface | undefined;
   private heartbeatTimer: NodeJS.Timeout | undefined;
   private externalReady = false;
@@ -230,7 +251,7 @@ export class Gateway {
     for (const request of this.epochRequests) request.destroy();
     this.epochRequests.clear();
     this.epochSynchronizations.clear();
-    for (const timer of this.abandonedControlTimers.values()) clearTimeout(timer);
+    for (const { timer } of this.abandonedControlTimers.values()) clearTimeout(timer);
     this.abandonedControlTimers.clear();
     this.routes.close();
     for (const key of this.viewerSockets.keys()) this.closeViewerSockets(key, false);
@@ -263,6 +284,20 @@ export class Gateway {
         sendJson(response, 413, { error: { code: 'payload_too_large', message: `External request bodies are limited to ${EXTERNAL_MAX_BODY_BYTES} bytes.` } });
         return;
       }
+    }
+    const publicationOrigin = publicationPreviewRequest(request, surface);
+    if (publicationOrigin) {
+      const route = this.routes.get(publicationOrigin.computerId);
+      if (!route) {
+        sendJson(response, 404, { error: { code: 'computer_not_found', message: 'Computer not found.' } });
+        return;
+      }
+      if (request.headers.origin !== undefined && !hasExactRequestOrigin(request, surface)) {
+        sendJson(response, 403, { error: { code: 'origin_boundary', message: 'Preview application requests must remain on their publication origin.' } });
+        return;
+      }
+      this.proxy(request, response, route, `/_qubicl/previews/${publicationOrigin.publicationId}${url.pathname}${url.search}`, false, undefined, surface);
+      return;
     }
     if (url.pathname === '/health') {
       if (surface.kind === 'external') {
@@ -328,7 +363,9 @@ export class Gateway {
       return;
     }
     if (request.method === 'POST' && suffix === '/view-ticket') {
-      if (!this.requireBearer(request, response, route, surface)) return;
+      const client = this.requireBearer(request, response, route, surface);
+      if (!client) return;
+      if (!this.requireClientScope(response, client, 'interactive', 'Opening the interactive viewer')) return;
       this.pruneExpired();
       if (surface.kind === 'external'
         && !this.consumeExternalRate(request, `ticket:${id}`, EXTERNAL_TICKETS_PER_MINUTE)) {
@@ -340,14 +377,14 @@ export class Gateway {
         return;
       }
       const ticket = randomBytes(32).toString('base64url');
-      this.tickets.set(ticket, { id, expiresAt: Date.now() + 60_000, tokenHash: route.tokenHash, controlling: false });
+      this.tickets.set(ticket, { id, expiresAt: Date.now() + 60_000, tokenHash: client.tokenHash, controlling: false });
       sendJson(response, 200, { url: `/computers/${id}/view?ticket=${encodeURIComponent(ticket)}`, expiresInSeconds: 60 });
       return;
     }
     if (request.method === 'GET' && suffix === '/view') {
       const ticket = url.searchParams.get('ticket');
       const found = ticket ? this.tickets.get(ticket) : undefined;
-      if (!ticket || !found || found.id !== id || found.tokenHash !== route.tokenHash || found.expiresAt <= Date.now()) {
+      if (!ticket || !found || found.id !== id || !routeAcceptsTokenHash(route, found.tokenHash) || found.expiresAt <= Date.now()) {
         sendJson(response, 401, { error: { code: 'invalid_view_ticket', message: 'The view ticket is invalid or expired.' } });
         return;
       }
@@ -357,7 +394,7 @@ export class Gateway {
         return;
       }
       const session = randomBytes(32).toString('base64url');
-      this.sessions.set(session, { key: session, id, expiresAt: Date.now() + 12 * 60 * 60 * 1000, tokenHash: route.tokenHash, controlling: false });
+      this.sessions.set(session, { key: session, id, expiresAt: Date.now() + 12 * 60 * 60 * 1000, tokenHash: found.tokenHash, controlling: false });
       const cookieName = viewerSessionCookieName(surface, id);
       response.writeHead(302, {
         location: `/computers/${id}/view/`,
@@ -371,7 +408,7 @@ export class Gateway {
     if (suffix === '/view/' && request.method === 'GET') {
       if (!this.requireViewSession(request, response, route, surface)) return;
       const nonce = randomBytes(18).toString('base64url');
-      sendHtml(response, viewerHtml(id, route.name, nonce), nonce);
+      sendHtml(response, viewerHtml(id, route.name, nonce, this.abandonedControlGraceMs), nonce);
       return;
     }
     if (suffix === '/view/actions' && request.method === 'GET') {
@@ -383,6 +420,17 @@ export class Gateway {
       if (!this.requireViewSession(request, response, route, surface)) return;
       const targetPath = suffix.slice('/view'.length) + url.search;
       this.proxy(request, response, route, targetPath, true, undefined, surface);
+      return;
+    }
+    if (suffix === '/human-control/status' && request.method === 'GET') {
+      const session = this.requireViewSession(request, response, route, surface);
+      if (!session) return;
+      const pending = this.abandonedControlTimers.get(session.key);
+      sendJson(response, 200, {
+        controlling: session.controlling,
+        reconnectDeadline: pending ? new Date(pending.releasesAt).toISOString() : null,
+        reconnectGraceSeconds: this.abandonedControlGraceMs / 1000,
+      });
       return;
     }
     if ((suffix === '/human-control/take' || suffix === '/human-control/release') && request.method === 'POST') {
@@ -426,6 +474,8 @@ export class Gateway {
         'GET /operator/management/previews': '/_qubicl/operator/management/previews',
         'POST /operator/management/processes/stop': '/_qubicl/operator/management/processes/stop',
         'POST /operator/management/previews/revoke': '/_qubicl/operator/management/previews/revoke',
+        'POST /operator/management/previews/share': '/_qubicl/operator/management/previews/share',
+        'POST /operator/management/previews/unshare': '/_qubicl/operator/management/previews/unshare',
         'POST /operator/management/previews/open': '/_qubicl/operator/management/previews/open',
       };
       const target = routes[`${request.method} ${suffix}`];
@@ -436,17 +486,19 @@ export class Gateway {
       this.proxy(request, response, route, target, false, undefined, surface);
       return;
     }
-    if (!this.requireBearer(request, response, route, surface)) return;
     if (request.method === 'POST' && suffix === '/operator/human-control/release') {
+      if (!this.requireOperator(request, response, route)) return;
       this.proxy(request, response, route, '/_qubicl/human/release', false, () => this.setControllingSession(id, undefined), surface);
       return;
     }
+    const client = this.requireBearer(request, response, route, surface);
+    if (!client) return;
     if (suffix === '/mcp'
       || suffix === '/openapi.json'
       || suffix.startsWith('/v1/tools/')
       || suffix === '/open-terminal'
       || suffix.startsWith('/open-terminal/')) {
-      this.proxy(request, response, route, suffix + url.search, false, undefined, surface);
+      this.proxy(request, response, route, suffix + url.search, false, undefined, surface, client);
       return;
     }
     sendJson(response, 404, { error: { code: 'not_found', message: 'Route not found.' } });
@@ -494,20 +546,40 @@ export class Gateway {
     }
   }
 
-  private requireBearer(request: IncomingMessage, response: ServerResponse, route: RuntimeRoute, surface: RequestSurface): boolean {
+  private requireBearer(request: IncomingMessage, response: ServerResponse, route: RuntimeRoute, surface: RequestSurface): RuntimeClientCredential | undefined {
     const authorization = request.headers.authorization;
     const match = authorization?.match(/^Bearer\s+(.+)$/i);
-    if (!match || !tokenMatches(match[1]!, route.tokenHash)) {
+    const credential = match
+      ? routeClientCredentials(route).find(({ tokenHash }) => tokenMatches(match[1]!, tokenHash))
+      : undefined;
+    if (!credential) {
       if (surface.kind === 'external'
         && !this.consumeExternalRate(request, `auth-failure:${route.id}`, EXTERNAL_AUTH_FAILURES_PER_MINUTE)) {
         sendRateLimited(response);
-        return false;
+        return undefined;
       }
       response.setHeader('www-authenticate', 'Bearer');
       sendJson(response, 401, { error: { code: 'unauthorized', message: 'A valid computer bearer token is required.' } });
-      return false;
+      return undefined;
     }
-    return true;
+    return credential;
+  }
+
+  private requireClientScope(
+    response: ServerResponse,
+    credential: RuntimeClientCredential,
+    scope: ClientCredentialScope,
+    action: string,
+  ): boolean {
+    if (credential.scopes.includes(scope)) return true;
+    sendJson(response, 403, {
+      error: {
+        code: 'client_scope_denied',
+        message: `${action} requires the ${scope} client scope. Credential ${credential.label} does not have it; use a differently scoped credential or ask the computer owner to update the connection.`,
+        details: { category: 'client-credential', requiredScope: scope, credentialId: credential.id, remedy: 'use-or-create-scoped-client' },
+      },
+    });
+    return false;
   }
 
   private requireOperator(request: IncomingMessage, response: ServerResponse, route: RuntimeRoute): boolean {
@@ -526,7 +598,7 @@ export class Gateway {
     const cookieName = viewerSessionCookieName(surface, route.id);
     const session = requestCookie(request, cookieName);
     const found = session ? this.sessions.get(session) : undefined;
-    if (!found || found.id !== route.id || found.tokenHash !== route.tokenHash || found.expiresAt <= Date.now()) {
+    if (!found || found.id !== route.id || !routeAcceptsTokenHash(route, found.tokenHash) || found.expiresAt <= Date.now()) {
       sendJson(response, 401, { error: { code: 'view_session_required', message: 'Open a fresh view URL with qubicl view.' } });
       return undefined;
     }
@@ -538,13 +610,13 @@ export class Gateway {
     const now = Date.now();
     for (const [key, value] of this.tickets) {
       const route = this.routes.get(value.id);
-      if (value.expiresAt <= now || !route || route.tokenHash !== value.tokenHash) this.tickets.delete(key);
+      if (value.expiresAt <= now || !route || !routeAcceptsTokenHash(route, value.tokenHash)) this.tickets.delete(key);
     }
     for (const [key, value] of this.sessions) {
       const route = this.routes.get(value.id);
-      if (value.expiresAt <= now || !route || route.tokenHash !== value.tokenHash) {
+      if (value.expiresAt <= now || !route || !routeAcceptsTokenHash(route, value.tokenHash)) {
         this.closeViewerSockets(key, false);
-        if (value.controlling && route && route.tokenHash === value.tokenHash) {
+        if (value.controlling && route && routeAcceptsTokenHash(route, value.tokenHash)) {
           if (!this.abandonedControlTimers.has(key)) this.armAbandonedControlRelease(value);
         } else {
           this.clearAbandonedControlRelease(key);
@@ -568,20 +640,48 @@ export class Gateway {
     view = false,
     onSuccess?: () => void,
     surface: RequestSurface = LOCAL_SURFACE,
+    client?: RuntimeClientCredential,
   ): void {
     if (view && route.viewPort === undefined) {
       sendJson(outgoing, 404, { error: { code: 'capability_unsupported', message: 'This computer does not provide a viewer.' } });
       return;
     }
+    const active = this.activeProxyRequests.get(route.id) ?? 0;
+    if (active >= MAX_PROXY_REQUESTS_PER_COMPUTER) {
+      sendJson(outgoing, 429, { error: { code: 'computer_busy', message: `Computer ${route.id} already has ${MAX_PROXY_REQUESTS_PER_COMPUTER} active gateway requests.` } });
+      return;
+    }
+    this.activeProxyRequests.set(route.id, active + 1);
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      const remaining = (this.activeProxyRequests.get(route.id) ?? 1) - 1;
+      if (remaining > 0) this.activeProxyRequests.set(route.id, remaining);
+      else this.activeProxyRequests.delete(route.id);
+    };
     const previewProxy = path.startsWith('/_qubicl/previews/');
     const headers = sanitizedProxyHeaders(incoming.headers, previewProxy);
+    if (previewProxy && typeof incoming.headers.authorization === 'string') {
+      headers['x-qubicl-preview-authorization'] = incoming.headers.authorization;
+    }
+    if (previewProxy && typeof incoming.headers.host === 'string') {
+      headers['x-qubicl-preview-host'] = incoming.headers.host;
+      headers['x-qubicl-preview-proto'] = surface.kind === 'external' ? 'https' : 'http';
+    }
     if (!view) {
       headers['x-qubicl-internal-key'] = route.internalKey;
       headers['x-qubicl-gateway-epoch'] = this.gatewayEpoch;
       headers['x-qubicl-access-surface'] = surface.kind;
+      if (client) {
+        headers['x-qubicl-client-id'] = client.id;
+        headers['x-qubicl-client-label'] = client.label;
+        headers['x-qubicl-client-scopes'] = client.scopes.join(',');
+      }
     } else if (route.viewerAuthentication === VIEWER_AUTHENTICATION_HEADER_V1) {
       headers[VIEWER_KEY_HEADER] = deriveInternalServiceKey(route.internalKey, 'viewer');
     }
+    let dispatched = false;
     const proxied = httpRequest({
       hostname: view ? (route.viewHost ?? route.host) : route.host,
       port: view ? route.viewPort! : route.controlPort,
@@ -594,6 +694,8 @@ export class Gateway {
       // transition.
       agent: false,
     }, (backend) => {
+      dispatched = true;
+      backend.setTimeout(PROXY_IDLE_TIMEOUT_MS, () => backend.destroy(new Error('Computer response idle timeout.')));
       if ((backend.statusCode ?? 500) >= 200 && (backend.statusCode ?? 500) < 300) onSuccess?.();
       const responseHeaders = sanitizedResponseHeaders(backend.headers);
       const previewCookies = previewProxy ? backend.headers['set-cookie'] : undefined;
@@ -619,26 +721,43 @@ export class Gateway {
       }
       outgoing.writeHead(backend.statusCode ?? 502, responseHeaders);
       backend.pipe(outgoing);
+      backend.once('close', release);
     });
+    const connectTimer = setTimeout(() => {
+      if (!dispatched) proxied.destroy(new Error('Computer request connect timeout.'));
+    }, PROXY_CONNECT_TIMEOUT_MS);
+    connectTimer.unref();
+    const overallTimer = setTimeout(() => proxied.destroy(new Error('Computer request overall timeout.')), PROXY_OVERALL_TIMEOUT_MS);
+    overallTimer.unref();
+    proxied.setTimeout(PROXY_IDLE_TIMEOUT_MS, () => proxied.destroy(new Error('Computer request idle timeout.')));
+    proxied.once('socket', (socket) => {
+      if (socket.connecting) socket.once('connect', () => clearTimeout(connectTimer));
+      else clearTimeout(connectTimer);
+    });
+    proxied.once('finish', () => { dispatched = true; });
+    proxied.once('response', () => clearTimeout(connectTimer));
+    proxied.once('close', () => { clearTimeout(connectTimer); clearTimeout(overallTimer); release(); });
     let payloadExceeded = false;
     proxied.on('error', (error) => {
       if (payloadExceeded) return;
-      if (!outgoing.headersSent) sendJson(outgoing, 502, { error: { code: 'computer_unavailable', message: error.message } });
+      if (!outgoing.headersSent) sendJson(outgoing, /timeout/iu.test(error.message) ? 504 : 502, {
+        error: {
+          code: dispatched ? 'outcome_unknown_after_dispatch' : (/timeout/iu.test(error.message) ? 'cancelled_before_dispatch' : 'computer_unavailable'),
+          message: error.message,
+        },
+      });
       else outgoing.destroy(error);
     });
     outgoing.once('close', () => {
       if (!outgoing.writableEnded) proxied.destroy();
     });
-    if (surface.kind === 'local') {
-      incoming.pipe(proxied);
-      return;
-    }
-    const limiter = boundedRequestBody(EXTERNAL_MAX_BODY_BYTES);
+    const bodyLimit = surface.kind === 'external' ? EXTERNAL_MAX_BODY_BYTES : LOCAL_MAX_BODY_BYTES;
+    const limiter = boundedRequestBody(bodyLimit);
     limiter.once('error', () => {
       payloadExceeded = true;
       proxied.destroy();
       if (!outgoing.headersSent) {
-        sendJson(outgoing, 413, { error: { code: 'payload_too_large', message: `External request bodies are limited to ${EXTERNAL_MAX_BODY_BYTES} bytes.` } });
+        sendJson(outgoing, 413, { error: { code: 'payload_too_large', message: `Gateway request bodies are limited to ${bodyLimit} bytes on this access surface.` } });
       } else {
         outgoing.destroy();
       }
@@ -659,6 +778,37 @@ export class Gateway {
       boundExternalUpgradeSocket(socket);
     }
     const preview = url.pathname.match(/^\/computers\/([a-f0-9-]+)(\/previews\/.*)$/u);
+    const publicationOrigin = publicationPreviewRequest(request, surface);
+    if (publicationOrigin) {
+      const route = this.routes.get(publicationOrigin.computerId);
+      if (!route) return rejectUpgrade(socket, 404, 'Not Found');
+      if (request.headers.origin !== undefined && !hasExactRequestOrigin(request, surface)) return rejectUpgrade(socket, 403, 'Forbidden');
+      const backend = connect(route.controlPort, route.host);
+      backend.once('connect', () => {
+        const lines = [`${request.method ?? 'GET'} /_qubicl/previews/${publicationOrigin.publicationId}${url.pathname}${url.search} HTTP/${request.httpVersion}`];
+        lines.push(...sanitizedUpgradeHeaderLines(request, true));
+        lines.push(
+          `Host: ${route.host}:${route.controlPort}`,
+          'Connection: Upgrade',
+          'Upgrade: websocket',
+          `X-Qubicl-Internal-Key: ${route.internalKey}`,
+          `X-Qubicl-Gateway-Epoch: ${this.gatewayEpoch}`,
+          `X-Qubicl-Access-Surface: ${surface.kind}`,
+          ...(typeof request.headers.host === 'string' ? [`X-Qubicl-Preview-Host: ${request.headers.host}`] : []),
+          `X-Qubicl-Preview-Proto: ${surface.kind === 'external' ? 'https' : 'http'}`,
+          ...(typeof request.headers.authorization === 'string' ? [`X-Qubicl-Preview-Authorization: ${request.headers.authorization}`] : []),
+          '',
+          '',
+        );
+        backend.write(lines.join('\r\n'));
+        if (head.length) backend.write(head);
+        socket.pipe(backend).pipe(socket);
+      });
+      backend.on('error', () => socket.destroy());
+      socket.on('error', () => backend.destroy());
+      socket.on('close', () => backend.destroy());
+      return;
+    }
     if (preview) {
       const route = this.routes.get(preview[1]!);
       if (!route) return rejectUpgrade(socket, 404, 'Not Found');
@@ -675,6 +825,10 @@ export class Gateway {
           'Upgrade: websocket',
           `X-Qubicl-Internal-Key: ${route.internalKey}`,
           `X-Qubicl-Gateway-Epoch: ${this.gatewayEpoch}`,
+          `X-Qubicl-Access-Surface: ${surface.kind}`,
+          ...(typeof request.headers.host === 'string' ? [`X-Qubicl-Preview-Host: ${request.headers.host}`] : []),
+          `X-Qubicl-Preview-Proto: ${surface.kind === 'external' ? 'https' : 'http'}`,
+          ...(typeof request.headers.authorization === 'string' ? [`X-Qubicl-Preview-Authorization: ${request.headers.authorization}`] : []),
           '',
           '',
         );
@@ -725,7 +879,7 @@ export class Gateway {
     this.pruneExpired();
     const session = requestCookie(request, viewerSessionCookieName(surface, route.id));
     const found = session ? this.sessions.get(session) : undefined;
-    if (!found || found.id !== route.id || found.tokenHash !== route.tokenHash || found.expiresAt <= Date.now()) return undefined;
+    if (!found || found.id !== route.id || !routeAcceptsTokenHash(route, found.tokenHash) || found.expiresAt <= Date.now()) return undefined;
     found.expiresAt = Date.now() + 12 * 60 * 60 * 1000;
     return found;
   }
@@ -761,12 +915,12 @@ export class Gateway {
     this.clearAbandonedControlRelease(session.key);
     const timer = setTimeout(() => void this.releaseAbandonedControl(session.key), this.abandonedControlGraceMs);
     timer.unref();
-    this.abandonedControlTimers.set(session.key, timer);
+    this.abandonedControlTimers.set(session.key, { timer, releasesAt: Date.now() + this.abandonedControlGraceMs });
   }
 
   private clearAbandonedControlRelease(key: string): void {
-    const timer = this.abandonedControlTimers.get(key);
-    if (timer) clearTimeout(timer);
+    const pending = this.abandonedControlTimers.get(key);
+    if (pending) clearTimeout(pending.timer);
     this.abandonedControlTimers.delete(key);
   }
 
@@ -776,7 +930,7 @@ export class Gateway {
     const session = this.sessions.get(key);
     if (!session?.controlling || this.hasControllingViewerSocket(key)) return;
     const route = this.routes.get(session.id);
-    if (!route || route.tokenHash !== session.tokenHash) {
+    if (!route || !routeAcceptsTokenHash(route, session.tokenHash)) {
       this.setControllingSession(session.id, undefined);
       return;
     }
@@ -1099,6 +1253,16 @@ function hasExactPreviewOrigin(request: IncomingMessage, id: string, surface: Re
   }
 }
 
+function hasExactRequestOrigin(request: IncomingMessage, surface: RequestSurface): boolean {
+  const host = request.headers.host;
+  const origin = request.headers.origin;
+  if (typeof host !== 'string' || typeof origin !== 'string') return false;
+  const expected = `${surface.kind === 'local' ? 'http' : 'https'}://${host}`;
+  if (origin !== expected) return false;
+  try { return new URL(origin).origin === expected; }
+  catch { return false; }
+}
+
 function requestHost(request: IncomingMessage): string | undefined {
   const value = request.headers.host;
   if (typeof value !== 'string') return undefined;
@@ -1111,6 +1275,21 @@ function isPreviewRequestHost(request: IncomingMessage, id: string, surface: Req
   if (surface.kind === 'local') return actual === previewHostname(id);
   return surface.runtime.previewDomain !== undefined
     && actual === gatewayPreviewHostname(id, surface.runtime.previewDomain);
+}
+
+function publicationPreviewRequest(request: IncomingMessage, surface: RequestSurface): { publicationId: string; computerId: string } | undefined {
+  const actual = requestHost(request)?.toLowerCase();
+  if (!actual) return undefined;
+  return publicationPreviewIdentity(actual, surface.kind === 'local' ? 'localhost' : surface.runtime.previewDomain);
+}
+
+function publicationPreviewIdentity(actual: string, previewDomain: string | undefined): { publicationId: string; computerId: string } | undefined {
+  const suffix = previewDomain ? `.${previewDomain}` : undefined;
+  if (!suffix || !actual.endsWith(suffix)) return undefined;
+  const label = actual.slice(0, -suffix.length);
+  const match = /^([a-f0-9]{16})--preview-([a-f0-9-]{36})$/u.exec(label);
+  if (!match) return undefined;
+  return { publicationId: match[1]!, computerId: match[2]! };
 }
 
 function browserOrigin(value: string | string[], surface: RequestSurface): string | undefined {
@@ -1134,9 +1313,12 @@ function validExternalRequestAuthority(
   url: URL,
   runtime: GatewayExposureRuntime,
 ): boolean {
+  const publication = publicationPreviewIdentity(requestHost(request)?.toLowerCase() ?? '', runtime.previewDomain);
   const preview = url.pathname.match(/^\/computers\/([a-f0-9-]+)\/previews(?:\/|$)/u);
   if (preview && !/^[a-f0-9-]{36}$/u.test(preview[1]!)) return false;
-  const expectedHostname = preview
+  const expectedHostname = publication
+    ? requestHost(request)
+    : preview
     ? runtime.previewDomain === undefined
       ? undefined
       : gatewayPreviewHostname(preview[1]!, runtime.previewDomain)
@@ -1166,7 +1348,7 @@ function allowedExternalServerName(servername: string, runtime: GatewayExposureR
   const normalized = servername.toLowerCase();
   if (normalized === runtime.hostname) return true;
   if (!runtime.previewDomain) return false;
-  return new RegExp(`^preview-[a-f0-9-]{36}\\.${escapeRegex(runtime.previewDomain)}$`, 'u').test(normalized);
+  return new RegExp(`^(?:[a-f0-9]{16}--)?preview-[a-f0-9-]{36}\\.${escapeRegex(runtime.previewDomain)}$`, 'u').test(normalized);
 }
 
 function externalBodyTooLarge(request: IncomingMessage): boolean {
@@ -1436,7 +1618,7 @@ export function mapViewerPointerToCanvas(
   };
 }
 
-function viewerHtml(id: string, name: string, nonce: string): string {
+function viewerHtml(id: string, name: string, nonce: string, reconnectGraceMs: number): string {
   const vncPath = encodeURIComponent(`/computers/${id}/view/websockify`);
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1444,7 +1626,7 @@ function viewerHtml(id: string, name: string, nonce: string): string {
 <style nonce="${nonce}">
 html,body{height:100%;margin:0;background:#111;color:#eee;font:14px system-ui}body{display:grid;grid-template-rows:auto 1fr}header{display:flex;align-items:center;gap:.75rem;padding:.55rem .8rem;background:#1d1d1d;flex-wrap:wrap}button{padding:.4rem .7rem}#state{opacity:.85}#policy,#profile-durability{flex-basis:100%;font-size:.85rem;opacity:.7}#stage{position:relative;min-height:0;overflow:hidden}iframe,#agent-layer{position:absolute;inset:0;width:100%;height:100%;border:0}#agent-layer{z-index:2;pointer-events:none}.agent-pointer{opacity:0}.agent-pointer.visible{opacity:1}.agent-ring{fill:none;stroke:#b8e34a;stroke-width:4;opacity:0;vector-effect:non-scaling-stroke;transform-box:fill-box;transform-origin:center}.agent-pointer.pulse .agent-ring{animation:agent-ring 620ms ease-out}.agent-ring-second{opacity:0}.agent-pointer.double_click.pulse .agent-ring-second{animation:agent-ring-second 620ms ease-out}.agent-pointer.right_click .agent-ring{stroke-dasharray:4 3}.agent-cursor{fill:#b8e34a;stroke:#17200a;stroke-width:2;paint-order:stroke;vector-effect:non-scaling-stroke;filter:drop-shadow(0 1px 2px #000)}@keyframes agent-ring{0%{transform:scale(.35);opacity:1}100%{transform:scale(1.45);opacity:0}}@keyframes agent-ring-second{10%{transform:scale(.35);opacity:1}100%{transform:scale(1.9);opacity:0}}@media(prefers-reduced-motion:reduce){.agent-pointer.pulse .agent-ring,.agent-pointer.double_click.pulse .agent-ring-second{animation:none}}
 </style></head>
-<body><header><strong>${escapeHtml(name)}</strong><button id="take">Take control</button><button id="release">Release control</button><button id="agent-toggle" type="button" aria-pressed="true">Agent pointer: on</button><span id="state">Observer mode</span><span id="policy">Take control stops agent commands. Desktop-session applications and the managed browser stay open. Closing this viewer releases control after 10 seconds.</span><span id="profile-durability">Chromium profile data is durable and survives restarts and upgrades.</span></header>
+<body><header><strong>${escapeHtml(name)}</strong><button id="take">Take control</button><button id="release">Release control</button><button id="agent-toggle" type="button" aria-pressed="true">Agent pointer: on</button><span id="state">Observer mode</span><span id="policy">Take control fences agent interactive input. Background tasks, services, desktop applications, and the managed browser stay open. A disconnected controlling viewer has ${reconnectGraceMs / 1000} seconds to reconnect.</span><span id="profile-durability">Chromium profile data is durable and survives restarts and upgrades.</span></header>
 <main id="stage"><iframe id="desktop" src="/computers/${id}/view/vnc.html?autoconnect=true&resize=scale&view_only=true&path=${vncPath}" allow="clipboard-read; clipboard-write"></iframe><svg id="agent-layer" aria-hidden="true"><g id="agent-pointer" class="agent-pointer"><circle class="agent-ring" cx="0" cy="0" r="15"></circle><circle class="agent-ring agent-ring-second" cx="0" cy="0" r="15"></circle><path class="agent-cursor" d="M0 0 28 17 17 21 12 34Z"></path></g></svg></main>
 <script nonce="${nonce}">
 const mapViewerPointerToCanvas=(${mapViewerPointerToCanvas.toString()});
@@ -1454,7 +1636,8 @@ try{pointerEnabled=localStorage.getItem('qubicl-agent-pointer')!=='off'}catch{}
 function updateToggle(){toggle.textContent='Agent pointer: '+(pointerEnabled?'on':'off');toggle.setAttribute('aria-pressed',String(pointerEnabled));if(pointerEnabled)renderPointer(false);else pointer.setAttribute('class','agent-pointer')}
 function setViewOnly(value){const url=new URL(desktop.src);url.searchParams.set('view_only',String(value));desktop.src=url}
 function counted(value,singular,plural){return value+' '+(value===1?singular:plural)}
-async function control(action){const taking=action==='take';if(taking)state.textContent='Taking control — fencing agent tools…';const response=await fetch('../human-control/'+action,{method:'POST'});const value=await response.json();if(!response.ok)throw new Error(value.error?.message||response.statusText);if(taking)hidePointer();setViewOnly(!taking);state.textContent=taking?'Human control active — agent tools fenced; '+counted(value.preservedDesktopApplications||0,'desktop application','desktop applications')+' and '+counted(value.preservedBrowserSessions||0,'managed browser','managed browsers')+' preserved; '+counted(value.terminatedManagedProcesses||0,'managed command','managed commands')+' stopped.':'Observer mode — agent access requires a fresh lease.'}
+async function control(action){const taking=action==='take';if(taking)state.textContent='Taking control — fencing agent interactive input…';const response=await fetch('../human-control/'+action,{method:'POST'});const value=await response.json();if(!response.ok)throw new Error(value.error?.message||response.statusText);if(taking)hidePointer();setViewOnly(!taking);state.textContent=taking?'Human control active — agent input fenced; '+counted(value.preservedDesktopApplications||0,'desktop application','desktop applications')+' and '+counted(value.preservedBrowserSessions||0,'managed browser','managed browsers')+' preserved; '+counted(value.terminatedManagedProcesses||0,'session command','session commands')+' stopped. Background tasks and services remain available.':'Observer mode — agent interactive access requires a fresh lease.'}
+async function pollControlStatus(){while(polling){try{const response=await fetch('../human-control/status',{cache:'no-store'});if(response.ok){const value=await response.json();if(value.controlling&&value.reconnectDeadline){const remaining=Math.max(0,Math.ceil((Date.parse(value.reconnectDeadline)-Date.now())/1000));state.textContent='Viewer connection interrupted — reconnecting; human control releases in '+remaining+'s.'}}}catch{}await new Promise(resolve=>setTimeout(resolve,1000))}}
 function validState(value){return value&&Number.isFinite(value.x)&&Number.isFinite(value.y)&&typeof value.kind==='string'}
 function framebufferRect(){const stageRect=stage.getBoundingClientRect(),frameRect=desktop.getBoundingClientRect();try{const canvas=desktop.contentDocument&&desktop.contentDocument.querySelector('#noVNC_canvas');if(canvas){const rect=canvas.getBoundingClientRect();if(rect.width>0&&rect.height>0)return{left:frameRect.left-stageRect.left+rect.left,top:frameRect.top-stageRect.top+rect.top,width:rect.width,height:rect.height}}}catch{}const scale=Math.min(frameRect.width/display.width,frameRect.height/display.height),width=display.width*scale,height=display.height*scale;return{left:frameRect.left-stageRect.left+(frameRect.width-width)/2,top:frameRect.top-stageRect.top+(frameRect.height-height)/2,width,height}}
 function renderPointer(pulse){if(!pointerEnabled||!validState(currentPointer)){pointer.setAttribute('class','agent-pointer');return}const point=mapViewerPointerToCanvas(currentPointer,display,framebufferRect());if(!point){pointer.setAttribute('class','agent-pointer');return}pointer.setAttribute('transform','translate('+point.x+' '+point.y+')');pointer.setAttribute('class','agent-pointer visible '+currentPointer.kind);if(pulse){pointer.getBoundingClientRect();pointer.classList.add('pulse')}}
@@ -1464,7 +1647,7 @@ async function poll(){while(polling){try{const response=await fetch('actions?aft
 async function initializePointer(){try{const response=await fetch('actions?after=9007199254740991',{cache:'no-store'});if(response.ok)applyPayload(await response.json(),true)}catch{}void poll()}
 function refreshPointerLayout(){renderPointer(false)}
 desktop.addEventListener('load',()=>{refreshPointerLayout();setTimeout(refreshPointerLayout,250);setTimeout(refreshPointerLayout,1000)});new ResizeObserver(refreshPointerLayout).observe(stage);window.addEventListener('resize',refreshPointerLayout);
-toggle.onclick=()=>{pointerEnabled=!pointerEnabled;try{localStorage.setItem('qubicl-agent-pointer',pointerEnabled?'on':'off')}catch{}updateToggle()};document.querySelector('#take').onclick=()=>control('take').catch(e=>state.textContent=e.message);document.querySelector('#release').onclick=()=>control('release').catch(e=>state.textContent=e.message);window.addEventListener('pagehide',()=>{polling=false});updateToggle();void initializePointer();
+toggle.onclick=()=>{pointerEnabled=!pointerEnabled;try{localStorage.setItem('qubicl-agent-pointer',pointerEnabled?'on':'off')}catch{}updateToggle()};document.querySelector('#take').onclick=()=>control('take').catch(e=>state.textContent=e.message);document.querySelector('#release').onclick=()=>control('release').catch(e=>state.textContent=e.message);window.addEventListener('pagehide',()=>{polling=false});updateToggle();void initializePointer();void pollControlStatus();
 </script></body></html>`;
 }
 

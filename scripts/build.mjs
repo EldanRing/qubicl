@@ -99,6 +99,7 @@ await Promise.all([
   cp(new URL('../images/computer/Dockerfile', import.meta.url), new URL('computer/Dockerfile', assets)),
   cp(new URL('../images/computer/entrypoint.sh', import.meta.url), new URL('computer/entrypoint.sh', assets)),
   cp(new URL('../images/computer/chromium-wrapper.sh', import.meta.url), new URL('computer/chromium-wrapper.sh', assets)),
+  cp(new URL('../images/computer/pty-helper.py', import.meta.url), new URL('computer/pty-helper.py', assets)),
   cp(new URL('../images/computer/qubicl_viewer_auth.py', import.meta.url), new URL('computer/qubicl_viewer_auth.py', assets)),
   cp(new URL('../images/computer/x11vnc-relay.sh', import.meta.url), new URL('computer/x11vnc-relay.sh', assets)),
   cp(new URL('../images/computer/libreoffice-registrymodifications.xcu', import.meta.url), new URL('computer/libreoffice-registrymodifications.xcu', assets)),
@@ -172,6 +173,7 @@ await Promise.all([
 ]);
 await chmod(new URL('computer/entrypoint.sh', assets), 0o755);
 await chmod(new URL('computer/chromium-wrapper.sh', assets), 0o755);
+await chmod(new URL('computer/pty-helper.py', assets), 0o755);
 
 async function command(program, args, cwd) {
   await new Promise((resolve, reject) => {

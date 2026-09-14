@@ -1,7 +1,12 @@
 # Local management dashboard
 
-The dashboard is a v0.5 capability. Source and focused checks alone do not
+The dashboard is part of Qubicl 0.6. Source and focused checks alone do not
 constitute physical Linux, macOS, iPhone, or release acceptance evidence.
+
+The [0.6 design](decisions/0002-v0.6-capabilities-and-constraints.md)
+adds same-tab refresh continuity, risk-based reauthentication, encrypted backup
+operations, named client credentials, and retained-task inspection. The
+supported host footprint is unchanged.
 
 ## Enable and sign in
 
@@ -29,22 +34,25 @@ Before core setup, enable creates only protected dashboard state and a
 provisional installation identity. Web setup adopts that identity, reviews
 preset/resources/image acquisition, and optionally creates the first computer.
 Closing a setup preview leaves core state uninitialized. Existing installations
-require an explicitly approved, backed-up migration to state format 4.
+require an explicitly approved, backed-up migration to state format 5.
 
 ## Management
 
-The interface provides status, controller attribution, computer creation and
+The interface provides status, controller and client attribution, computer creation and
 lifecycle, resources and embedded-catalog updates, recoverable deletion and
-restore, tools and skills, network policy, scoped credentials, home backups,
+restore, tools and skills, network policy, scoped credentials, named client
+credentials, process/task inspection, encrypted home backups,
 diagnostics, operations, settings, and browser sessions. Computer process views
 contain managed identifiers and lifecycle metadata; commands, working
 directories, terminal output, and file contents are not exposed. Published
 previews and desktop viewers open in separate tabs with bounded access tickets.
 
 Mutations use a five-minute plan bound to the authenticated session and the
-current state/runtime. Review effects and warnings; disruptive operations
+current state/runtime. Routine saves apply directly. Destructive, interrupting,
+or authority-expanding actions receive a review plan; disruptive operations
 require interruption confirmation. Security-sensitive changes require password
-reauthentication. A changed runtime or journal invalidates the plan. One
+reauthentication only after the bounded reauthentication grace. A changed
+runtime or journal invalidates the plan. One
 installation mutation runs at a time. Browser disconnects do not cancel accepted
 work; reconnect to Operations to inspect its durable receipt. The helper never
 blindly replays an interrupted request.
@@ -73,13 +81,17 @@ new client connection instructions. Git skill imports require a credential-free
 HTTPS URL and an exact 40-character commit. Local paths, archive uploads,
 general shell commands, and public publication are outside the management API.
 
-Backups are manual, unencrypted durable-home archives. They may contain browser
-cookies, logged-in sessions, credentials and personal data. Quiesced capture
+Backups are manual durable-home archives. They may contain browser cookies,
+logged-in sessions, credentials and personal data. The dashboard can create,
+verify, and restore passphrase-encrypted backups; the passphrase exists only in
+memory for the accepted operation and is omitted from receipts and history.
+Unencrypted choices state their exposure. Quiesced capture
 temporarily pauses verified runtime containers; stopped capture requires an
 already stopped computer. Restore creates a new computer. Retention previews
 identify exact archives for the immutable source computer, and pruning is
-permanent. Encrypted backup operations remain CLI-only. There is no scheduled
-backup or complete-installation export product.
+permanent. There is no scheduled backup. Full-installation export/import is a
+stopped, mandatory-encryption host CLI workflow because it includes
+administrator and computer secrets.
 
 ## Private remote administration
 
@@ -115,10 +127,11 @@ qubicl dashboard sessions revoke-all # Revoke all administrator browser sessions
 qubicl dashboard password reset      # Local terminal password replacement
 ```
 
-Local HTTP authentication uses an explicit token held only in browser memory,
-never a cookie, URL, or browser storage. Reloading the page requires signing in
-again. This prevents another service on a loopback port from receiving an
-ambient administrator cookie. Remote HTTPS uses HttpOnly Secure cookies.
+Local HTTP authentication uses an explicit token held in same-tab
+`sessionStorage`, never a cookie or URL. A same-tab refresh keeps the session;
+closing the tab or signing out clears it. This prevents another service on a
+loopback port from receiving an ambient administrator cookie. Remote HTTPS uses
+HttpOnly Secure cookies.
 Sessions expire after 30 minutes without user activity or 12 hours absolutely.
 Polling and event streaming do not extend the idle timeout. Browser session
 lists are specific to the administrator listener being used. Password reset
@@ -144,12 +157,13 @@ the configured dashboard image before using it. Source development requires a
 locally built dashboard image; releases use the exact embedded catalog and
 never perform online host-version checks or host self-updates.
 
-For complete host loss, restore a protected offline copy of the state directory
-and durable homes, reinstall a compatible CLI, and review identity/image/state
-consistency before starting resources. Preserve configuration, secrets,
-dashboard authentication/TLS state, migration evidence, and unfinished journals;
-do not restore only a Compose file. Home backup restore alone does not recreate
-all host settings or client credentials. See [persistence](persistence.md).
+For complete host loss, use the host CLI's encrypted `installation export`,
+`inspect`, and `import` workflow. Import uses a new target and installation ID,
+retains computer identities, credentials, homes, browser profiles, and SSH
+identity, removes imported dashboard remote exposure, disables the dashboard,
+and starts nothing. Review the generated import report before enabling services.
+Home backup restore alone does not recreate host settings or client credentials.
+See [persistence](persistence.md).
 
 ## Interface and development
 

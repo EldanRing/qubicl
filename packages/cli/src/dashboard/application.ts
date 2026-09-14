@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, readFile, readdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { IMAGE_CATALOG, NAME_PATTERN, validateCpu, validateMemory, NetworkPolicySchema, SecretsSchema, PRESET_DEFINITIONS, QUBICL_BUILD, toolsForCapabilities } from '@qubicl/core';
+import { CLIENT_CREDENTIAL_SCOPES, ClientCredentialIdSchema, ClientCredentialScopeSchema, IMAGE_CATALOG, NAME_PATTERN, validateCpu, validateMemory, NetworkPolicySchema, SecretsSchema, PRESET_DEFINITIONS, QUBICL_BUILD, toolsForCapabilities } from '@qubicl/core';
 import { atomicWrite, auditState, loadState, statePaths, withStateLock, type LoadedState } from '../state.js';
 import { inspectStateFormat } from '../migrations.js';
 import { managedComputerRuntimeObservation, managedGatewayRuntimeObservation, validateDocker } from '../docker.js';
@@ -28,12 +28,12 @@ export interface ManagementTiming {
   clearTimeout(timer: ManagementTimer): void;
 }
 export interface ManagementBackend {
-  fingerprint(): Promise<string>;
+  fingerprint(request?: ManagementRequest): Promise<string>;
   query(resource: string, params: URLSearchParams): Promise<unknown>;
   preview(request: ManagementRequest): Promise<Pick<ManagementPlan, 'effects' | 'warnings' | 'requiresInterruption'>>;
   run(request: ManagementRequest): Promise<unknown>;
 }
-const sensitive = /^(credential\.|token\.|network\.|tools\.|skills\.|skill\.|dashboard\.revoke|gateway\.revoke|recovery\.resume|backup\.prune)/u;
+const sensitive = /^(credential\.|client\.|token\.|network\.|tools\.|skills\.|skill\.|preview\.share|dashboard\.revoke|gateway\.revoke|recovery\.resume|backup\.(create|verify|restore|prune))/u;
 const disruptive = /^(computer\.(stop|restart|rename|delete|resources|upgrade|clone)|computers\.stop|upgrade\.all|network\.|gateway\.(restart|revoke)|credential\.|token\.|backup\.create|checkpoint\.|process\.stop)/u;
 const defaultManagementTiming: ManagementTiming = {
   now: Date.now,
@@ -47,14 +47,15 @@ const inputFields: Record<string, readonly string[]> = {
   setup: ['preset', 'cpus', 'memory', 'gatewayPort', 'createName'],
   'computer.create': ['name', 'preset', 'cpus', 'memory'], 'computer.rename': ['name'],
   'computer.resources': ['cpus', 'memory'], 'computer.upgrade': ['preset'],
-  'process.stop': ['processId'], 'preview.revoke': ['previewId'],
+  'process.stop': ['processId'], 'preview.revoke': ['previewId'], 'preview.share': ['previewId', 'duration'], 'preview.unshare': ['previewId'],
   'tools.set': ['ids'], 'skills.set': ['ids'], 'skill.import': ['url', 'commit'],
   'skill.update': ['id', 'url', 'commit'], 'skill.reset': ['id'], 'skill.remove': ['id'], 'skill.restore': ['id'],
-  'network.set': ['profile', 'allowDomains', 'denyDomains'], 'network.approve': ['domain', 'duration'], 'network.revoke': ['domain'],
+  'network.set': ['profile', 'allowDomains', 'denyDomains', 'allowCidrs', 'allowTcpPorts'], 'network.approve': ['domain', 'duration'], 'network.revoke': ['domain'],
   'credential.add': ['id', 'baseUrl', 'pathPrefix', 'methods', 'header', 'value'],
   'credential.replace': ['id', 'baseUrl', 'pathPrefix', 'methods', 'header', 'value'], 'credential.remove': ['id'],
-  'backup.create': ['consistency'], 'checkpoint.create': ['consistency'],
-  'backup.restore': ['name'], 'backup.prune': ['keep'], 'computer.clone': ['name'],
+  'client.create': ['id', 'label', 'scopes', 'token'], 'client.rotate': ['id', 'token'], 'client.revoke': ['id'],
+  'backup.create': ['consistency', 'encrypted', 'passphrase'], 'checkpoint.create': ['consistency'],
+  'backup.verify': ['passphrase'], 'backup.restore': ['name', 'passphrase'], 'backup.prune': ['keep'], 'computer.clone': ['name'],
 };
 export function validateManagementRequest(value: unknown): ManagementRequest {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ManagementError('invalid_request', 'Expected an operation object.');
@@ -75,19 +76,20 @@ export function validateManagementRequest(value: unknown): ManagementRequest {
   if (Buffer.byteLength(JSON.stringify(input)) > 32768) throw new ManagementError('input_too_large', 'Operation input exceeds its limit.');
   for (const [key, entry] of Object.entries(fields)) {
     if (typeof entry === 'number' && !Number.isFinite(entry)) throw new ManagementError('invalid_input', 'Numeric values must be finite.');
-    if (typeof entry !== 'string' && typeof entry !== 'number' && !(Array.isArray(entry) && entry.every((item) => typeof item === 'string'))) {
+    if (typeof entry !== 'string' && typeof entry !== 'number' && !(Array.isArray(entry) && entry.every((item) => typeof item === 'string' || typeof item === 'number'))) {
       throw new ManagementError('invalid_input', `Invalid ${key} value.`);
     }
   }
   const operation = record.operation;
-  const needsTarget = /^(computer\.(?!create)|control\.|process\.|preview\.|tools\.|skills\.|skill\.|network\.|credential\.|token\.|backup\.|checkpoint\.)/u.test(operation);
+  const needsTarget = /^(computer\.(?!create)|control\.|process\.|preview\.|tools\.|skills\.|skill\.|network\.|credential\.|client\.|token\.|backup\.|checkpoint\.)/u.test(operation);
   if (needsTarget !== Boolean(record.target)) throw new ManagementError('invalid_target', needsTarget ? 'Select an immutable target.' : 'This operation does not accept a target.');
   const requiredFields: Record<string, string[]> = {
     setup: ['preset'], 'computer.create': ['name', 'preset'], 'computer.rename': ['name'],
     'computer.clone': ['name'], 'backup.restore': ['name'], 'backup.prune': ['keep'],
-    'process.stop': ['processId'], 'preview.revoke': ['previewId'], 'tools.set': ['ids'], 'skills.set': ['ids'],
+    'process.stop': ['processId'], 'preview.revoke': ['previewId'], 'preview.share': ['previewId', 'duration'], 'preview.unshare': ['previewId'], 'tools.set': ['ids'], 'skills.set': ['ids'],
     'network.set': ['profile'], 'network.approve': ['domain', 'duration'], 'network.revoke': ['domain'],
     'credential.add': ['id', 'baseUrl', 'value'], 'credential.replace': ['id', 'baseUrl', 'value'], 'credential.remove': ['id'],
+    'client.create': ['id', 'label', 'scopes', 'token'], 'client.rotate': ['id', 'token'], 'client.revoke': ['id'],
     'skill.update': ['id'], 'skill.reset': ['id'], 'skill.remove': ['id'], 'skill.restore': ['id'],
     'backup.create': ['consistency'], 'checkpoint.create': ['consistency'],
   };
@@ -98,11 +100,30 @@ export function validateManagementRequest(value: unknown): ManagementRequest {
   if (fields.memory !== undefined && (typeof fields.memory !== 'string' || !/^[0-9]+(?:\.[0-9]+)?[kmg]$/iu.test(fields.memory))) throw new ManagementError('invalid_resources', 'Specify memory such as 4g.');
   if (fields.gatewayPort !== undefined && (typeof fields.gatewayPort !== 'number' || !Number.isInteger(fields.gatewayPort) || fields.gatewayPort < 1024 || fields.gatewayPort > 65535)) throw new ManagementError('invalid_port', 'Choose an unprivileged gateway port.');
   if (operation === 'computer.resources' && fields.cpus === undefined && fields.memory === undefined) throw new ManagementError('invalid_resources', 'Choose a CPU or memory change.');
-  for (const key of ['ids', 'allowDomains', 'denyDomains', 'methods']) if (fields[key] !== undefined && (!Array.isArray(fields[key]) || fields[key].length > 256 || fields[key].some((value) => typeof value !== 'string' || !value || value.length > 256))) throw new ManagementError('invalid_input', `Invalid ${key} list.`);
+  for (const key of ['ids', 'allowDomains', 'denyDomains', 'allowCidrs', 'methods', 'scopes']) if (fields[key] !== undefined && (!Array.isArray(fields[key]) || fields[key].length > 256 || fields[key].some((value) => typeof value !== 'string' || !value || value.length > 256))) throw new ManagementError('invalid_input', `Invalid ${key} list.`);
+  if (operation.startsWith('client.')) {
+    if (fields.id === 'default') throw new ManagementError('invalid_client', 'The default compatibility credential is managed by token rotation.');
+    if (!ClientCredentialIdSchema.safeParse(fields.id).success) throw new ManagementError('invalid_client', 'Use a lowercase client ID containing letters, digits, and hyphens.');
+    if (fields.label !== undefined && (typeof fields.label !== 'string' || fields.label.trim().length < 1 || fields.label.length > 120)) throw new ManagementError('invalid_client', 'Client label must contain 1–120 characters.');
+    if (fields.scopes !== undefined) {
+      const scopes = (fields.scopes as unknown[]).map((scope) => {
+        const parsed = ClientCredentialScopeSchema.safeParse(scope);
+        if (!parsed.success) throw new ManagementError('invalid_client', 'Select only supported client scopes.');
+        return parsed.data;
+      });
+      if (!scopes.length || new Set(scopes).size !== scopes.length) throw new ManagementError('invalid_client', 'Select one or more unique client scopes.');
+    }
+    if (fields.token !== undefined && (typeof fields.token !== 'string' || !/^qubicl_[A-Za-z0-9_-]{43}$/u.test(fields.token))) throw new ManagementError('invalid_client', 'Client token was not generated by this dashboard.');
+  }
+  if (fields.allowTcpPorts !== undefined && (!Array.isArray(fields.allowTcpPorts) || fields.allowTcpPorts.length > 128 || fields.allowTcpPorts.some((value) => typeof value !== 'number' || !Number.isInteger(value)))) throw new ManagementError('invalid_input', 'Invalid allowTcpPorts list.');
   if (fields.profile !== undefined && !['developer', 'web-only', 'offline', 'custom'].includes(String(fields.profile))) throw new ManagementError('invalid_profile', 'Select a supported network profile.');
-  if (fields.duration !== undefined && (typeof fields.duration !== 'number' || !Number.isInteger(fields.duration) || fields.duration < 60 || fields.duration > 86400)) throw new ManagementError('invalid_duration', 'Approval duration must be 60–86400 seconds.');
+  if (fields.duration !== undefined && (typeof fields.duration !== 'number' || !Number.isInteger(fields.duration) || fields.duration < 60 || fields.duration > 86400)) throw new ManagementError('invalid_duration', 'Duration must be 60–86400 seconds.');
   if (fields.keep !== undefined && (typeof fields.keep !== 'number' || !Number.isInteger(fields.keep) || fields.keep < 1 || fields.keep > 1000)) throw new ManagementError('invalid_retention', 'Retain between one and 1000 backups.');
   if (fields.consistency !== undefined && !['quiesced', 'stopped'].includes(String(fields.consistency))) throw new ManagementError('invalid_consistency', 'Choose a quiesced or stopped backup.');
+  if (operation === 'backup.create' && fields.encrypted !== undefined && fields.encrypted !== 'true') throw new ManagementError('invalid_encryption', 'Encrypted must be explicitly selected.');
+  if (operation.startsWith('backup.') && fields.passphrase !== undefined && (typeof fields.passphrase !== 'string' || fields.passphrase.length > 16_384 || /[\r\n\0]/u.test(fields.passphrase))) throw new ManagementError('invalid_passphrase', 'Backup passphrase must be one line no longer than 16384 characters.');
+  if (operation === 'backup.create' && fields.encrypted === 'true' && (typeof fields.passphrase !== 'string' || fields.passphrase.length < 12)) throw new ManagementError('invalid_passphrase', 'Encrypted backups require a passphrase of at least 12 characters.');
+  if (operation === 'backup.create' && fields.encrypted !== 'true' && fields.passphrase !== undefined) throw new ManagementError('invalid_passphrase', 'Select encryption before supplying a backup passphrase.');
   if (operation.startsWith('credential.') && operation !== 'credential.remove') {
     let url: URL;
     try { url = new URL(String(fields.baseUrl)); } catch { throw new ManagementError('invalid_scope', 'Use an HTTPS credential scope.'); }
@@ -154,13 +175,13 @@ export class ManagementApplication {
       } finally { await handle.close(); }
       if (stored.schemaVersion !== 1 || !stored.job || !stored.acceptance || !/^[a-f0-9]{64}$/u.test(stored.acceptance.keyHash) || !/^[a-f0-9-]{36}$/u.test(stored.acceptance.planId)) throw new ManagementError('invalid_history', 'Invalid acceptance receipt.');
       const value = stored.job;
-      if (!['running', 'succeeded', 'failed', 'recovery-required'].includes(value.status) || typeof value.message !== 'string' || typeof value.createdAt !== 'string' || typeof value.updatedAt !== 'string' || Object.keys(value).some((key) => !['id', 'operation', 'target', 'status', 'createdAt', 'updatedAt', 'message'].includes(key))) throw new ManagementError('invalid_history', 'Invalid operation status.');
+      if (!['running', 'succeeded', 'failed', 'recovery-required', 'outcome-unknown'].includes(value.status) || typeof value.message !== 'string' || typeof value.createdAt !== 'string' || typeof value.updatedAt !== 'string' || Object.keys(value).some((key) => !['id', 'operation', 'target', 'status', 'createdAt', 'updatedAt', 'message'].includes(key))) throw new ManagementError('invalid_history', 'Invalid operation status.');
       this.receipts.set(value.id, stored.acceptance);
       this.executions.set(stored.acceptance.keyHash, { planId: stored.acceptance.planId, operationId: value.id });
       if (value.id !== name.slice(0, -5) || !(MANAGEMENT_OPERATIONS as readonly string[]).includes(value.operation)) throw new ManagementError('invalid_history', 'Invalid operation record.');
       if (value.status === 'running') {
         const pending = await pendingManagementRecovery(this.root).catch(() => true);
-        value.status = pending ? 'recovery-required' : 'failed'; value.message = pending ? 'Interrupted operation requires recorded recovery; it will not be replayed blindly.' : 'Interrupted operation outcome is unconfirmed. Review current state before preparing a new request.';
+        value.status = pending ? 'recovery-required' : 'outcome-unknown'; value.message = pending ? 'Interrupted operation requires recorded recovery; it will not be replayed blindly.' : 'The host helper stopped before recording the outcome. Review current state before preparing a new request.';
         value.updatedAt = new Date().toISOString(); await this.persist(value);
       }
       this.jobs.set(value.id, value);
@@ -172,17 +193,17 @@ export class ManagementApplication {
     if (resource.replace(/^\//u, '') === 'snapshot' && result && typeof result === 'object') return { ...result, operations: this.recentJobs(20) };
     return result;
   }
-  async plan(body: unknown, sessionId: string): Promise<ManagementPlan> {
+  async plan(body: unknown, sessionId: string, reauthenticated = false): Promise<ManagementPlan> {
     this.expirePlans();
     if (this.plans.size >= 100) throw new ManagementError('plan_limit', 'Too many pending plans.', 429);
     const request = validateManagementRequest(body);
-    const fingerprint = await this.backend.fingerprint();
+    const fingerprint = await this.backend.fingerprint(request);
     const preview = await this.backend.preview(request);
     const plan: ManagementPlan = {
       id: randomUUID(), operation: request.operation, ...(request.target ? { target: request.target } : {}),
       expiresAt: new Date(this.timing.now() + 300000).toISOString(), ...preview,
       preserved: ['Durable homes and unrelated computers are preserved.', 'Credentials are never returned to the browser.'],
-      requiresReauthentication: sensitive.test(request.operation),
+      requiresReauthentication: sensitive.test(request.operation) && !reauthenticated,
     };
     this.plans.set(plan.id, { public: plan, request, sessionId, fingerprint, evaluating: false });
     this.schedulePlanExpiry();
@@ -202,7 +223,7 @@ export class ManagementApplication {
       if (plan && plan.sessionId === sessionId) this.discardPlan(planId);
       throw new ManagementError('plan_expired', 'Prepare a fresh plan.', 409);
     }
-    if (plan.public.requiresReauthentication && !reauthenticated) throw new ManagementError('reauthentication_required', 'Re-enter the administrator password before this change.', 403);
+    if (sensitive.test(plan.request.operation) && !reauthenticated) throw new ManagementError('reauthentication_required', 'Re-enter the administrator password before this change.', 403);
     if (plan.public.requiresInterruption && input.confirmInterruption !== true) throw new ManagementError('interruption_confirmation_required', 'Confirm interruption of active work.', 409);
     if (this.busy) throw new ManagementError('operation_busy', 'Another management operation is running.', 409);
     this.busy = true;
@@ -226,9 +247,9 @@ export class ManagementApplication {
         this.discardPlan(planId);
         throw new ManagementError('plan_expired', 'Prepare a fresh plan.', 409);
       }
-      if (await this.backend.fingerprint() !== plan.fingerprint) {
+      if (await this.backend.fingerprint(plan.request) !== plan.fingerprint) {
         this.discardPlan(planId);
-        throw new ManagementError('stale_plan', 'State or runtime changed; review a fresh plan.', 409);
+        throw new ManagementError('stale_plan', 'A dependency of this exact operation changed; review the refreshed plan.', 409);
       }
       if (Date.parse(plan.public.expiresAt) <= this.timing.now()) {
         this.discardPlan(planId);
@@ -263,6 +284,13 @@ export class ManagementApplication {
       reject(error);
     }).finally(() => { this.busy = false; });
     return accepted;
+  }
+  cancel(planId: string, sessionId: string): { cancelled: true } {
+    const plan = this.plans.get(planId);
+    if (!plan || plan.sessionId !== sessionId) throw new ManagementError('plan_not_found', 'Plan was not found.', 404);
+    if (plan.evaluating) throw new ManagementError('plan_in_progress', 'This plan is already being accepted.', 409);
+    this.discardPlan(planId);
+    return { cancelled: true };
   }
   async operation(id: string): Promise<ManagementJob> {
     const job = this.jobs.get(id);
@@ -304,7 +332,7 @@ export class ManagementApplication {
     return [...this.jobs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id)).slice(0, limit);
   }
   private async trimHistory(): Promise<void> {
-    const completed = [...this.jobs.values()].filter(({ status }) => status === 'succeeded' || status === 'failed').sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const completed = [...this.jobs.values()].filter(({ status }) => ['succeeded', 'failed', 'outcome-unknown'].includes(status)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     for (const job of completed.slice(0, Math.max(0, completed.length - 500))) {
       await unlink(join(this.root, 'dashboard', 'operations', `${job.id}.json`));
       const receipt = this.receipts.get(job.id); if (receipt) this.executions.delete(receipt.keyHash);
@@ -359,12 +387,13 @@ export function managementPreviewUrl(endpoint: Pick<GatewayEndpointSet, 'preview
   if (base.username || base.password || base.search || base.hash || base.pathname !== expectedBasePath) {
     throw new ManagementError('preview_unavailable', 'Preview ticket was invalid.', 502);
   }
+  base.hostname = `${previewId}--${base.hostname}`;
+  base.pathname = '/';
   let url: URL;
   try { url = new URL(path, base); }
   catch { throw new ManagementError('preview_unavailable', 'Preview ticket was invalid.', 502); }
-  const prefix = `${expectedBasePath}${previewId}/`;
   const tickets = url.searchParams.getAll('ticket');
-  if (url.origin !== base.origin || url.username || url.password || url.hash || !url.pathname.startsWith(prefix)
+  if (url.origin !== base.origin || url.username || url.password || url.hash || !url.pathname.startsWith('/') || url.pathname.startsWith('//')
     || tickets.length !== 1 || !/^[a-zA-Z0-9_-]{32,128}$/u.test(tickets[0]!)
     || [...url.searchParams.keys()].some((key) => key !== 'ticket')) {
     throw new ManagementError('preview_unavailable', 'Preview ticket was invalid.', 502);
@@ -379,22 +408,43 @@ function scrubManagementRequest(request: ManagementRequest): void {
 export class HostManagementBackend implements ManagementBackend {
   private snapshotCache: { expires: number; value: Promise<unknown> } | undefined;
   constructor(private readonly root: string) {}
-  async fingerprint(): Promise<string> {
+  async fingerprint(request?: ManagementRequest): Promise<string> {
     const paths = statePaths(this.root);
-    const sources = await Promise.all([paths.config, paths.secrets, paths.journal, paths.migration, paths.runtimeMigration, join(paths.runtime, 'backup-create.json'), join(paths.runtime, 'upgrade-all.json'), join(paths.runtime, 'computer-lifecycle.json')].map(async (path) => {
+    const sources = await Promise.all([paths.journal, paths.migration, paths.runtimeMigration, join(paths.runtime, 'backup-create.json'), join(paths.runtime, 'upgrade-all.json'), join(paths.runtime, 'computer-lifecycle.json')].map(async (path) => {
       try { return await readFile(path, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error; }
     }));
     const format = await inspectStateFormat(paths);
     const state = format.status === 'current' ? await loadState(paths) : undefined;
-    sources.push(JSON.stringify(await readDashboardConfiguration(this.root)));
-    if (state) sources.push(JSON.stringify(await dashboardBackups(this.root)), JSON.stringify(await dashboardTrash(this.root)));
+    sources.push(JSON.stringify({ format: format.status, installationId: state?.config.installationId }));
+    if (state && request) {
+      const target = state.config.computers.find(({ id }) => id === request.target);
+      const fleetOperation = ['computers.stop', 'upgrade.all'].includes(request.operation);
+      const createsName = ['computer.create', 'backup.restore', 'computer.clone'].includes(request.operation);
+      sources.push(JSON.stringify(fleetOperation ? state.config.computers : target ?? null));
+      if (target) sources.push(JSON.stringify(state.secrets.computers[target.id] ?? null));
+      if (createsName) sources.push(JSON.stringify(state.config.computers.map(({ id, name }) => ({ id, name }))));
+      if (request.operation === 'computer.restore') sources.push(JSON.stringify((await dashboardTrash(this.root)).find(({ id }) => id === request.target) ?? null));
+      if (request.operation.startsWith('backup.')) {
+        const backups = await dashboardBackups(this.root);
+        sources.push(JSON.stringify(request.operation === 'backup.prune'
+          ? backups.filter(({ sourceId }) => sourceId === target?.id)
+          : backups.find(({ id }) => id === request.target) ?? null));
+      }
+    } else if (state) {
+      sources.push(JSON.stringify(state.config), JSON.stringify(state.secrets));
+    }
+    if (!request || /^(dashboard\.|gateway\.|setup|upgrade\.all|recovery\.resume)/u.test(request.operation)) {
+      sources.push(JSON.stringify(await readDashboardConfiguration(this.root)));
+      if (state) sources.push(JSON.stringify(state.config.gateway));
+    }
     if (state) {
       try {
-        const runtime = await mapBounded(state.config.computers, 4, (computer) => managedComputerRuntimeObservation(state, computer));
-        const gateway = await managedGatewayRuntimeObservation(state);
-        sources.push(JSON.stringify(runtime), JSON.stringify(gateway));
+        const observedComputers = !request || ['computers.stop', 'upgrade.all'].includes(request.operation)
+          ? state.config.computers
+          : state.config.computers.filter(({ id }) => id === request.target);
+        if (observedComputers.length) sources.push(JSON.stringify(await mapBounded(observedComputers, 4, (computer) => managedComputerRuntimeObservation(state, computer))));
+        if (!request || /^(gateway\.|setup|upgrade\.all|recovery\.resume)/u.test(request.operation)) sources.push(JSON.stringify(await managedGatewayRuntimeObservation(state)));
       } catch { sources.push('runtime-observation-unavailable'); }
-
     }
     return createHash('sha256').update(JSON.stringify(sources)).digest('hex');
   }
@@ -417,15 +467,16 @@ export class HostManagementBackend implements ManagementBackend {
       const host = await validateDocker().then(() => ({ available: true })).catch(() => ({ available: false, message: 'Docker is unavailable. Start it on the host, then refresh.' }));
       const computers: ManagementComputer[] = state ? await mapBounded(state.config.computers, 4, async (computer) => {
         const runtime = host.available ? await managedComputerRuntimeObservation(state!, computer).catch(() => ({ status: 'unknown' })) : { status: 'unknown' };
-        const status = runtime.status === 'running' ? await this.operator(state!, computer.id, '/status', 'GET').catch(() => undefined) as { controller?: unknown; managedProcesses?: number; activePreviews?: number } | undefined : undefined;
-        return { id: computer.id, name: computer.name, preset: computer.preset, status: runtime.status, ...('health' in runtime && typeof runtime.health === 'string' ? { health: runtime.health } : {}), ...(status ? { controller: status.controller, resources: { managedProcesses: status.managedProcesses, activePreviews: status.activePreviews } } : {}), cpus: computer.cpus, memory: computer.memory, image: computer.image, capabilities: computer.capabilities, tools: computer.toolPolicy ?? toolsForCapabilities(computer.capabilities), skills: computer.skillPolicy?.enabledCatalogSkills ?? [], network: computer.network ?? { profile: 'developer' } };
+        const status = runtime.status === 'running' ? await this.operator(state!, computer.id, '/status', 'GET').catch(() => undefined) as { controller?: unknown; managedProcesses?: number; activePreviews?: number; browser?: unknown } | undefined : undefined;
+        return { id: computer.id, name: computer.name, preset: computer.preset, status: runtime.status, ...('health' in runtime && typeof runtime.health === 'string' ? { health: runtime.health } : {}), ...(status ? { controller: status.controller, resources: { managedProcesses: status.managedProcesses, activePreviews: status.activePreviews }, browser: status.browser } : {}), cpus: computer.cpus, memory: computer.memory, image: computer.image, capabilities: computer.capabilities, tools: computer.toolPolicy ?? toolsForCapabilities(computer.capabilities), skills: computer.skillPolicy?.enabledCatalogSkills ?? [], network: computer.network ?? { profile: 'developer' }, clients: await dashboardClientCredentials(state!, computer.id, computer.createdAt) };
       }) : [];
       const snapshot: ManagementSnapshot = {
         protocolVersion: 1, initialized: Boolean(state), migrationRequired: ['legacy', 'migration-pending'].includes(format.status),
         recoveryRequired: format.status === 'invalid' || await pendingManagementRecovery(this.root), docker: host,
         gateway: { status: state && host.available ? (await managedGatewayRuntimeObservation(state).catch(() => ({ status: 'unknown' }))).status : 'unknown' },
         computers, trash: state ? await dashboardTrash(this.root) : [], operations: [], release: QUBICL_BUILD.version,
-        presets: Object.entries(PRESET_DEFINITIONS).map(([id, preset]) => ({ id, cpus: preset.cpus, memory: preset.memory, capabilities: [...preset.capabilities] })),
+        defaultPreset: state ? state.config.defaults.compatibility : 'workstation',
+        presets: Object.entries(PRESET_DEFINITIONS).map(([id, preset]) => ({ id, purpose: preset.purpose, description: preset.description, cpus: preset.cpus, memory: preset.memory, capabilities: [...preset.capabilities] })),
       };
       return snapshot;
     }
@@ -441,14 +492,15 @@ export class HostManagementBackend implements ManagementBackend {
     if (resource === 'diagnostics') return { checks: (await auditState(state)).map((check) => ({ ...check, detail: check.ok ? check.detail.replaceAll(this.root, '[Qubicl state]') : 'This check needs attention. Run qubicl doctor on the host for detailed repair guidance.' })) };
     if (resource === 'settings') {
       const dashboard = await readDashboardConfiguration(this.root);
-      return { service: { release: QUBICL_BUILD.version, catalog: IMAGE_CATALOG.releaseVersion, enabled: dashboard?.enabled ?? false, desiredRunning: dashboard?.desiredRunning ?? false, localOrigin: dashboard ? `http://qubicl-admin.localhost:${dashboard.localPort}` : null }, remote: { administration: dashboard?.remote ? `https://${dashboard.remote.hostname}:${dashboard.remote.port}` : 'disabled', certificateExpiresAt: dashboard?.remote?.expiresAt ?? null, gateway: state.config.gateway.exposure ? `https://${state.config.gateway.exposure.hostname}:${state.config.gateway.exposure.port}` : 'disabled' }, encryptedBackups: 'cli-only' };
+      return { service: { release: QUBICL_BUILD.version, catalog: IMAGE_CATALOG.releaseVersion, enabled: dashboard?.enabled ?? false, desiredRunning: dashboard?.desiredRunning ?? false, localOrigin: dashboard ? `http://qubicl-admin.localhost:${dashboard.localPort}` : null }, remote: { administration: dashboard?.remote ? `https://${dashboard.remote.hostname}:${dashboard.remote.port}` : 'disabled', certificateExpiresAt: dashboard?.remote?.expiresAt ?? null, gateway: state.config.gateway.exposure ? `https://${state.config.gateway.exposure.hostname}:${state.config.gateway.exposure.port}` : 'disabled' }, viewerReconnectGraceSeconds: state.config.gateway.viewerReconnectGraceSeconds, encryptedBackups: 'create, verify, and restore available with an operation-only passphrase' };
     }
     if (resource === 'backups') return { items: await dashboardBackups(this.root) };
-    const match = /^computers\/([a-zA-Z0-9-]+)(?:\/(tools|skills|processes|previews|credentials))?$/u.exec(resource);
+    const match = /^computers\/([a-zA-Z0-9-]+)(?:\/(tools|skills|processes|previews|credentials|clients))?$/u.exec(resource);
     const computer = match && state.config.computers.find(({ id }) => id === match[1]);
     if (!computer) throw new ManagementError('not_found', 'Management resource was not found.', 404);
     if (match![2] === 'credentials') return { items: (state.secrets.computers[computer.id]?.brokerCredentials ?? []).map(({ id, baseUrl, pathPrefix, methods, header, expiresAt }) => ({ id, baseUrl: publicCredentialScope(baseUrl), pathPrefix, methods, header, ...(expiresAt ? { expiresAt } : {}) })) };
-    if (match![2] === 'tools') return { items: toolsForCapabilities(computer.capabilities).map((id) => ({ id, enabled: (computer.toolPolicy ?? toolsForCapabilities(computer.capabilities)).includes(id), locked: ['get_computer_status', 'acquire_lease', 'renew_lease', 'release_lease'].includes(id) })) };
+    if (match![2] === 'clients') return { items: await dashboardClientCredentials(state, computer.id, computer.createdAt) };
+    if (match![2] === 'tools') return { items: toolsForCapabilities(computer.capabilities).map((id) => ({ id, enabled: (computer.toolPolicy ?? toolsForCapabilities(computer.capabilities)).includes(id) || id === 'explain_capability', locked: ['get_computer_status', 'explain_capability', 'acquire_lease', 'renew_lease', 'release_lease'].includes(id) })) };
     if (match![2] === 'skills') return { items: (await listInstalledSkills(join(paths.computers, computer.id, 'home'), computer.skillPolicy?.enabledCatalogSkills ?? [])).map(({ id, name, description, kind, enabled, drift, resetAvailable }) => ({ id, name, description, kind, enabled, drift, resetAvailable })) };
     if (match![2] === 'processes' || match![2] === 'previews') return this.operator(state, computer.id, `/${match![2]}`, 'GET');
     return (await this.query('snapshot', _params) as ManagementSnapshot).computers.find(({ id }) => id === computer.id);
@@ -467,8 +519,8 @@ export class HostManagementBackend implements ManagementBackend {
       if (input.memory !== undefined) validateMemory(String(input.memory), host.memoryBytes);
     }
     if (request.operation === 'network.set') {
-      NetworkPolicySchema.parse({ profile: input.profile, allowDomains: input.allowDomains ?? [], denyDomains: input.denyDomains ?? [], temporaryApprovals: [] });
-      if (input.profile === 'custom' && !(input.allowDomains as string[] | undefined)?.length) throw new ManagementError('invalid_network', 'Custom network policy requires allowed domains.');
+      NetworkPolicySchema.parse({ profile: input.profile, allowDomains: input.allowDomains ?? [], denyDomains: input.denyDomains ?? [], allowCidrs: input.allowCidrs ?? [], allowTcpPorts: input.allowTcpPorts ?? [], temporaryApprovals: [] });
+      if (input.profile === 'custom' && !(input.allowDomains as string[] | undefined)?.length && !(input.allowCidrs as string[] | undefined)?.length) throw new ManagementError('invalid_network', 'Custom network policy requires allowed domains or CIDRs.');
     }
     if (state?.config.computers.some(({ name, id }) => name === input.name && id !== computer?.id)) throw new ManagementError('duplicate_name', 'This computer name is already in use.', 409);
     const effects: string[] = []; const warnings: string[] = [];
@@ -507,7 +559,9 @@ export class HostManagementBackend implements ManagementBackend {
         'dashboard.revoke': 'Close remote administration and revoke its browser sessions.',
         'control.release': 'Release current human control so agents may acquire control again.',
         'process.stop': `Stop the managed process with exact identifier ${input.processId}; output and command content are not retrieved.`,
-        'preview.revoke': `Revoke publication ${input.previewId} and its access URL.`,
+        'preview.revoke': `Revoke publication ${input.previewId}, including local owner access and any remote share.`,
+        'preview.share': `Create a new remote share for publication ${input.previewId} lasting ${input.duration} seconds; replace any earlier share for this publication.`,
+        'preview.unshare': `Revoke the remote share for publication ${input.previewId}; keep the local owner publication available.`,
         'tools.set': `Set enabled tools to ${(input.ids as string[] | undefined)?.join(', ') || 'required control tools only'}.`,
         'skills.set': `Set enabled skills to ${(input.ids as string[] | undefined)?.join(', ') || 'none'}.`,
         'skill.import': `Import and validate ${input.url} at commit ${input.commit}.`,
@@ -515,14 +569,17 @@ export class HostManagementBackend implements ManagementBackend {
         'skill.reset': `Reset the editable working copy of ${input.id} to its approved source.`,
         'skill.remove': `Disable and move ${input.id} into recoverable skill trash.`,
         'skill.restore': `Restore the approved source of ${input.id} from skill trash.`,
-        'network.set': `Set network profile to ${input.profile}; allow ${(input.allowDomains as string[] | undefined)?.join(', ') || 'no extra domains'}; deny ${(input.denyDomains as string[] | undefined)?.join(', ') || 'no extra domains'}.`,
+        'network.set': `Set network profile to ${input.profile}; allow domains ${(input.allowDomains as string[] | undefined)?.join(', ') || 'none'}, CIDRs ${(input.allowCidrs as string[] | undefined)?.join(', ') || 'none'}, TCP ports ${(input.allowTcpPorts as number[] | undefined)?.join(', ') || 'default web ports'}; deny ${(input.denyDomains as string[] | undefined)?.join(', ') || 'no extra domains'}.`,
         'network.approve': `Allow ${input.domain} for ${input.duration} seconds.`,
         'network.revoke': `Revoke the temporary approval for ${input.domain}.`,
         'credential.add': `Add scoped credential ${input.id} for ${input.baseUrl}${input.pathPrefix ?? '/'}; permitted methods ${(input.methods as string[] | undefined)?.join(', ') ?? 'GET'}.`,
         'credential.replace': `Replace scoped credential ${input.id} and its permitted destination/methods.`,
         'credential.remove': `Remove scoped credential ${input.id}.`,
+        'client.create': `Create client credential ${input.id} (${input.label}) with scopes ${(input.scopes as string[]).join(', ')}. The bearer is delivered once to this browser after success.`,
+        'client.rotate': `Rotate only client credential ${input.id}; other clients remain connected.`,
+        'client.revoke': `Revoke only client credential ${input.id}; other clients remain connected.`,
         'token.rotate': 'Replace this computer’s client token; reconnect clients with newly generated configuration from the host CLI.',
-        'backup.create': `Create an unencrypted ${input.consistency} backup of this durable home.`,
+        'backup.create': `Create a ${input.encrypted === 'true' ? 'passphrase-encrypted' : 'private unencrypted'} ${input.consistency} backup of this durable home.`,
         'checkpoint.create': `Create an unencrypted ${input.consistency} checkpoint of this durable home.`,
         'backup.verify': 'Verify the selected backup archive digest and safe extraction structure.',
         'backup.restore': `Verify and restore this backup into a new computer named ${input.name}; preserve the source backup.`,
@@ -532,20 +589,21 @@ export class HostManagementBackend implements ManagementBackend {
       effects.push(`${computer ? `${computer.name}: ` : ''}${descriptions[request.operation] ?? request.operation}`);
     }
     if (request.operation === 'computer.restore') {
-      const trash = (await dashboardTrash(this.root)).find(({ id }) => id === request.target);
+      const trash = (await dashboardTrash(this.root)).find(({ id, status }) => id === request.target && status === 'available');
       if (!trash) throw new ManagementError('not_found', 'Trashed computer was not found.', 404);
       effects.push(`Restore ${trash.name} (${trash.id}).`);
     }
     if (['backup.restore', 'backup.verify', 'backup.prune'].includes(request.operation)) {
       const backups = await dashboardBackups(this.root);
       if (request.operation === 'backup.prune') {
-        const pruned = backups.filter(({ sourceId }) => sourceId === computer!.id).slice(Number(input.keep));
+        const pruned = backups.filter(({ sourceId, status }) => status === 'available' && sourceId === computer!.id).slice(Number(input.keep));
         effects.push(pruned.length ? `Remove exactly: ${pruned.map(({ id }) => id).join(', ')}.` : 'No archives will be removed.');
       } else {
-        const backup = backups.find(({ id }) => id === request.target);
+        const backup = backups.find(({ id, status }) => id === request.target && status === 'available');
         if (!backup) throw new ManagementError('not_found', 'Backup was not found.', 404);
-        if (backup.encrypted) throw new ManagementError('cli_required', 'Encrypted backup operations require the local CLI.', 409);
-        effects.push(`Archive ${backup.id}, created ${backup.createdAt}, SHA-256 ${backup.sha256}.`);
+        if (backup.encrypted && typeof input.passphrase !== 'string') throw new ManagementError('invalid_passphrase', 'This encrypted backup requires its passphrase.', 400);
+        if (!backup.encrypted && input.passphrase !== undefined) throw new ManagementError('invalid_passphrase', 'This backup is not encrypted; do not supply a passphrase.', 400);
+        effects.push(`Archive ${backup.id}, created ${backup.createdAt}, ${backup.encrypted ? 'passphrase-encrypted, ' : ''}SHA-256 ${backup.sha256}.`);
       }
     }
     if (request.operation === 'tools.set' && (input.ids as string[]).some((id) => !toolsForCapabilities(computer!.capabilities).includes(id as never))) throw new ManagementError('invalid_tools', 'Selected tools exceed this computer’s capabilities.');
@@ -558,9 +616,32 @@ export class HostManagementBackend implements ManagementBackend {
       }
       if (exists === (request.operation === 'credential.add')) throw new ManagementError('credential_conflict', exists ? 'Credential already exists; use replace.' : 'Credential was not found.', 409);
     }
+    if (request.operation.startsWith('client.')) {
+      const clients = state!.secrets.computers[computer!.id]?.clients ?? [];
+      const exists = clients.some(({ id }) => id === input.id);
+      if (request.operation === 'client.create' ? exists : !exists) {
+        throw new ManagementError('client_conflict', exists ? 'Client credential already exists; rotate or revoke it.' : 'Client credential was not found.', 409);
+      }
+      if (request.operation !== 'client.revoke') {
+        const candidate = structuredClone(state!.secrets);
+        const secret = candidate.computers[computer!.id]!;
+        const credential = {
+          id: input.id,
+          label: request.operation === 'client.create' ? input.label : clients.find(({ id }) => id === input.id)!.label,
+          scopes: request.operation === 'client.create' ? input.scopes : clients.find(({ id }) => id === input.id)!.scopes,
+          token: input.token,
+          createdAt: request.operation === 'client.create' ? new Date().toISOString() : clients.find(({ id }) => id === input.id)!.createdAt,
+        };
+        secret.clients = request.operation === 'client.create'
+          ? [...clients, credential as never]
+          : clients.map((client) => client.id === input.id ? credential as never : client);
+        SecretsSchema.parse(candidate);
+      }
+    }
     const runtime = computer && state ? await managedComputerRuntimeObservation(state, computer) : undefined;
     if (runtime && !['complete', 'absent'].includes(runtime.group)) throw new ManagementError('runtime_ambiguous', 'Repair the partial or inconsistent runtime before changing it.', 409);
-    if (request.operation === 'backup.create' || request.operation === 'checkpoint.create' || request.operation === 'computer.clone') warnings.push('Backups may contain browser profiles, cookies, credentials and personal data; storage is unencrypted.');
+    if ((request.operation === 'backup.create' && input.encrypted !== 'true') || request.operation === 'checkpoint.create' || request.operation === 'computer.clone') warnings.push('This archive may contain browser profiles, cookies, credentials and personal data; its stored bytes are not encrypted.');
+    if (request.operation === 'backup.create' && input.encrypted === 'true') warnings.push('Losing the passphrase makes this backup unrecoverable. The passphrase is held only for this operation and is not written to dashboard history.');
     if (request.operation === 'backup.prune') warnings.push('Pruned backup archives cannot be restored from Qubicl trash.');
     if (disruptive.test(request.operation)) warnings.push('Active work and client connections may be interrupted. Container replacement discards changes outside the durable home.');
     return { effects, warnings, requiresInterruption: managementInterruptionRequired(request.operation, runtime?.status) };
@@ -607,4 +688,25 @@ export async function pendingManagementRecovery(root: string): Promise<boolean> 
 
 function publicCredentialScope(value: string): string {
   try { const url = new URL(value); return `${url.origin}${url.pathname}`; } catch { return '[invalid scope]'; }
+}
+
+async function dashboardClientCredentials(state: LoadedState, computerId: string, createdAt: string): Promise<Array<{ id: string; label: string; scopes: string[]; createdAt: string; lastUsedAt?: string }>> {
+  const lastUsed = new Map<string, string>();
+  try {
+    const contents = await readFile(join(state.paths.audits, `${computerId}.control.jsonl`), 'utf8');
+    for (const line of contents.split('\n')) {
+      if (!line) continue;
+      try {
+        const event = JSON.parse(line) as { at?: unknown; clientCredentialId?: unknown };
+        if (typeof event.at === 'string' && typeof event.clientCredentialId === 'string') lastUsed.set(event.clientCredentialId, event.at);
+      } catch { /* the audit diagnostics own malformed-record reporting */ }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  const secret = state.secrets.computers[computerId]!;
+  return [
+    { id: 'default', label: 'Default client', scopes: [...CLIENT_CREDENTIAL_SCOPES], createdAt },
+    ...(secret.clients ?? []).map(({ token: _token, ...client }) => client),
+  ].map((client) => ({ ...client, ...(lastUsed.get(client.id) ? { lastUsedAt: lastUsed.get(client.id)! } : {}) }));
 }

@@ -17,7 +17,7 @@ One successful run does not silently promote a best-effort row. Changing a
 public support claim requires reviewing and versioning the matrix as well as
 retaining the corresponding release evidence.
 
-| Host shape | Support | Validation | Evidence baseline | Current boundary |
+| Host shape | CLI support | Historical validation | Evidence baseline | Execution boundary |
 | --- | --- | --- | --- | --- |
 | Linux x64 | Supported | Directly tested | v0.1.0 | Native Linux CLI with a local Linux Docker Engine or Docker Desktop |
 | Linux ARM64 | Best-effort | Not directly tested | — | Native Linux CLI; ARM64 images and archive are produced, but no physical-host claim is made |
@@ -29,12 +29,12 @@ retaining the corresponding release evidence.
 | Native Windows CLI | Unsupported | Not directly tested | — | Qubicl publishes no native Windows archive |
 | WSL 1 | Unsupported | Not directly tested | — | Setup and doctor fail closed |
 
-The directly tested labels record historical v0.1.0 baselines. For the v0.5
-initial release, current-candidate general platform evidence is Linux x64 only.
-Separate dashboard-specific evidence covers native Linux x64, Apple Silicon
-macOS, and physical iPhone Safari. Those narrower rows do not revalidate general
-macOS or any Windows/WSL behavior for the v0.5 candidate; those current-candidate
-platform rows remain requirements of the `supported` profile.
+The directly tested labels record historical v0.1.0 baselines. They do not
+establish current 0.6 behavior. The 0.6 release-impact document selects the
+platform and dashboard rows affected by the exact source range; signed
+acceptance must identify current runs or applicable evidence reused with exact
+input, artifact, tool, platform, and freshness identity. Missing required
+coverage cannot pass.
 
 Native Windows and WSL 1 are unsupported. Qubicl computers are Linux
 containers on every host; macOS and Windows support does not mean native
@@ -107,16 +107,14 @@ and safe diagnostic sharing are covered in [Troubleshooting](troubleshooting.md)
 
 ## Dashboard qualification
 
-The new management helper is restricted to native Linux x64 and Apple Silicon
+The management helper currently supports native Linux x64 and Apple Silicon
 macOS. Existing WSL CLI workflows remain available; dashboard service installation
 on WSL, native Windows and Intel macOS is deferred. Linux uses `systemd --user`
 with a foreground fallback; macOS uses a user LaunchAgent. Neither starts Docker
-or claims pre-login availability. Current-candidate native Linux/macOS
-service/TLS/reboot and physical iPhone Safari dashboard acceptance must be
-retained for v0.5. This is dashboard-specific evidence; it does not claim a
-general v0.5 macOS platform run. Focused source tests and a responsive
-mock-browser run do not establish those results. The v0.5 acceptance validator
-requires the exact native architecture, service identity, TLS identity and
-successful reboot checks; the phone row must identify a physical iPhone running
-Safari. These requirements also apply to the initial release tier. See
-[the evidence contract](development.md#dashboard-development-and-v05-acceptance).
+or claims pre-login availability. The acceptance validator requires every
+dashboard row selected by the exact release-impact document. Native rows must
+record the exact architecture, service identity, and TLS identity. These are
+dashboard-specific checks and do not establish a general macOS platform run.
+Focused source tests and a responsive mock-browser run do not establish the
+physical-host or phone results. See
+[the evidence contract](development.md#dashboard-development-and-acceptance).

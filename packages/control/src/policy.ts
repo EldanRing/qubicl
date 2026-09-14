@@ -9,7 +9,7 @@ interface PolicyDocument {
   skillRegistrySha256: string;
 }
 
-const LOCKED_TOOLS: ToolName[] = ['get_computer_status', 'acquire_lease', 'renew_lease', 'release_lease'];
+const LOCKED_TOOLS: ToolName[] = ['get_computer_status', 'explain_capability', 'acquire_lease', 'renew_lease', 'release_lease'];
 
 export class RuntimePolicy {
   private tools: ToolName[];

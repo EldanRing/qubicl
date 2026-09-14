@@ -32,6 +32,7 @@ export interface ConnectionSnippetOptions {
   resultMode?: string;
   clientHost?: string;
   stdioLauncher?: { command: string; argsPrefix: string[] };
+  credentialId?: string;
 }
 
 export interface ConnectionSnippet {
@@ -57,10 +58,12 @@ export function connectionSnippet(options: ConnectionSnippetOptions): Connection
   const requestedTransport = parseTransport(options.transport);
   const adapterTransport = client === 'http' ? 'http' : ['openapi', 'open-webui'].includes(client) ? 'openapi' : 'stdio';
   const transport = requestedTransport ?? adapterTransport;
+  const tokenCommand = `qubicl token show ${options.computerName}${options.credentialId && options.credentialId !== 'default' ? ` ${options.credentialId}` : ''}`;
   const clientHost = parseClientHost(options.clientHost);
   if ((options.profile || options.resultMode) && transport !== 'stdio') {
     throw new Error('--profile and --result-mode are available only for stdio connections.');
   }
+  if (options.credentialId && transport === 'stdio') throw new Error('--credential applies to bearer-authenticated HTTP and OpenAPI connections; local stdio uses host authority.');
   if (client !== 'generic' && requestedTransport && requestedTransport !== adapterTransport) {
     throw new Error(`Client ${client} uses ${adapterTransport}; --transport is only needed with --client generic.`);
   }
@@ -149,7 +152,7 @@ export function connectionSnippet(options: ConnectionSnippetOptions): Connection
         url: baseUrl,
         path: '/openapi.json',
         auth_type: 'bearer',
-        key: `<token from: qubicl token show ${options.computerName}>`,
+        key: `<token from: ${tokenCommand}>`,
         config: { chat_uploads: 'filesystem' },
         enabled: true,
       }),
@@ -168,7 +171,7 @@ export function connectionSnippet(options: ConnectionSnippetOptions): Connection
     return withActivationHint(snippet, windowsHint);
   }
 
-  const token = `<token from: qubicl token show ${options.computerName}>`;
+  const token = `<token from: ${tokenCommand}>`;
   const authorization = `Bearer ${token}`;
   const value = transport === 'http'
     ? { type: 'http', url: options.endpoints.mcp, headers: { Authorization: authorization } }

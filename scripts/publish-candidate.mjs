@@ -11,6 +11,7 @@ import { requiresClientConformance } from './client-conformance.mjs';
 import { OCI_EFFICIENCY_REPORT_NAME } from './oci-efficiency.mjs';
 import { verifyCandidateSignature } from './sign-candidate.mjs';
 import { verifyAcceptanceBundle } from './acceptance-evidence.mjs';
+import { requiresReleaseImpact } from './release-impact.mjs';
 
 const exec = promisify(execFile);
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -19,6 +20,7 @@ export function buildPublishPlan(candidate, catalog, candidateDirectory, release
   assert(['initial', 'supported'].includes(candidate.releaseTier), 'Only initial or supported candidates may be published.');
   assert(candidate.modes?.images === true && candidate.modes?.scans === true && candidate.modes?.exactArtifactAcceptance === true, 'Publishing requires a complete scanned exact-artifact candidate.');
   assert(candidate.modes?.binaryOnly === false, 'Publishing requires the npm artifact from a complete candidate.');
+  if (requiresReleaseImpact(candidate.version)) assert(candidate.releaseImpact?.name === 'release-impact.json', 'Qubicl 0.6 and later publication requires validated release-impact evidence.');
   const acceptanceRequired = candidate.releaseTier === 'supported' || requiresClientConformance(candidate.version);
   assert(!acceptanceRequired || releaseEvidence, 'Supported releases and v0.2 or later publication require a signed release set and signed acceptance evidence.');
   if (releaseEvidence?.set?.document?.releaseTier !== undefined || requiresClientConformance(candidate.version)) {
@@ -71,6 +73,7 @@ export function buildPublishPlan(candidate, catalog, candidateDirectory, release
       'candidate.json',
       'SHA256SUMS',
       'image-catalog.json',
+      ...(candidate.releaseImpact ? [candidate.releaseImpact.name] : []),
       'qubicl-npm.spdx.json',
       'trivy-summary.json',
       ...(requiresClientConformance(candidate.version) ? [OCI_EFFICIENCY_REPORT_NAME] : []),

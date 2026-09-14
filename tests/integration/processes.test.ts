@@ -39,6 +39,97 @@ test('managed process safety bounds reject zero and fractional configuration', (
   assert.throws(() => new ProcessManager({ maxProcesses: 1.5 }), /maxProcesses/);
 });
 
+test('retained task records survive executor restart and running records become interrupted without replay', async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'qubicl-retained-task-records-'));
+  try {
+    await writeFile(join(outputDirectory, 'task-records.jsonl'), `${JSON.stringify({
+      version: 1,
+      id: 'Abcdefghijklmno1',
+      label: 'long build',
+      lifecycle: 'task',
+      status: 'running',
+      startedAt: '2026-09-14T00:00:00.000Z',
+      owner: 'computer',
+      ownerGeneration: 7,
+      outputPath: join(outputDirectory, 'Abcdefghijklmno1.log'),
+    })}\n`, { mode: 0o600 });
+    const manager = new ProcessManager({ outputDirectory, persistTaskRecords: true });
+    assert.deepEqual(manager.listForAgent(), [{
+      id: 'Abcdefghijklmno1',
+      label: 'long build',
+      lifecycle: 'task',
+      status: 'interrupted',
+      startedAt: '2026-09-14T00:00:00.000Z',
+      finishedAt: manager.listForAgent()[0]!.finishedAt,
+      owner: 'computer',
+      ownerGeneration: 7,
+    }]);
+    assert.ok(manager.listForAgent()[0]!.finishedAt);
+    assert.equal((await readFile(join(outputDirectory, 'task-records.jsonl'), 'utf8')).trim().split('\n').length, 2);
+    assert.equal(manager.count(), 0);
+  } finally {
+    await rm(outputDirectory, { recursive: true, force: true });
+  }
+});
+
+test('completed task output can be paged, saved under home, and reattached after manager restart', async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'qubicl-retained-task-output-'));
+  try {
+    const first = new ProcessManager({ outputDirectory, home: outputDirectory, persistTaskRecords: true, outputTtlMs: 60_000 });
+    const result = await first.exec('printf 0123456789', outputDirectory, 1_000, 4, owner, undefined, 'combined', 'task', 'build');
+    assert.equal(result.running, false);
+    assert.equal(result.output, '6789');
+    const firstPage = first.readOutput(result.processId, 2, 4, undefined, 'utf8');
+    assert.deepEqual({ data: firstPage.data, offset: firstPage.offset, nextOffset: firstPage.nextOffset, size: firstPage.size }, { data: '2345', offset: 2, nextOffset: 6, size: 10 });
+    const saved = await first.saveOutput(result.processId, join(outputDirectory, 'saved.log'), 100);
+    assert.equal(await readFile(saved.path, 'utf8'), '0123456789');
+
+    const restarted = new ProcessManager({ outputDirectory, home: outputDirectory, persistTaskRecords: true, outputTtlMs: 60_000 });
+    assert.equal(restarted.readOutput(result.processId, 0, 100, undefined, 'utf8').data, '0123456789');
+  } finally {
+    await rm(outputDirectory, { recursive: true, force: true });
+  }
+});
+
+test('explicit services restart from private declarations until stopped', async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'qubicl-durable-service-'));
+  const serviceDirectory = join(outputDirectory, 'services');
+  const marker = join(outputDirectory, 'service-started');
+  const id = 'ServiceAbcdefg12';
+  try {
+    await mkdir(serviceDirectory, { mode: 0o700 });
+    await writeFile(join(serviceDirectory, `${id}.json`), `${JSON.stringify({
+      version: 1,
+      id,
+      label: 'preview server',
+      command: `printf started > ${JSON.stringify(marker)}; sleep 30`,
+      cwd: outputDirectory,
+      maxOutputBytes: 10_000,
+      outputMode: 'combined',
+      ownerGeneration: 3,
+    })}\n`, { mode: 0o600 });
+    const manager = new ProcessManager({ outputDirectory, home: outputDirectory, persistTaskRecords: true });
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+      try { if ((await readFile(marker, 'utf8')) === 'started') break; } catch { /* service is starting */ }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(await readFile(marker, 'utf8'), 'started');
+    assert.deepEqual(manager.listForAgent().map(({ id: processId, lifecycle, status, owner: processOwner }) => ({ processId, lifecycle, status, processOwner })), [{
+      processId: id,
+      lifecycle: 'service',
+      status: 'running',
+      processOwner: 'computer',
+    }]);
+    await manager.stopForManagement(id);
+    await assert.rejects(readFile(join(serviceDirectory, `${id}.json`)), /ENOENT/);
+    const afterRestart = new ProcessManager({ outputDirectory, home: outputDirectory, persistTaskRecords: true });
+    assert.deepEqual(afterRestart.listForAgent(), []);
+  } finally {
+    await rm(outputDirectory, { recursive: true, force: true });
+  }
+});
+
 test('ordinary MCP commands and stdin preserve the existing payload range above compatibility limits', async () => {
   const outputDirectory = await mkdtemp(join(tmpdir(), 'qubicl-standard-process-payloads-'));
   try {
@@ -81,7 +172,7 @@ test('model commands receive a least-privilege environment without control crede
 test('lease expiry terminates its managed process groups', async () => {
   const executor = new ToolExecutor();
   const lease = executor.leases.acquire(0.05);
-  const process = await executor.processes.exec('sleep 300', '/tmp', 10, 10_000, lease);
+  const process = await executor.processes.exec('sleep 300', '/tmp', 10, 10_000, lease, undefined, 'combined', 'session');
   assert.equal(process.running, true);
   const deadline = Date.now() + 3_000;
   while (executor.processes.count() !== 0 && Date.now() < deadline) {
@@ -214,7 +305,7 @@ test('lease-required calls refresh activity without repeating lease metadata in 
   const lease = executor.leases.acquire(0.2);
   const originalExpiry = Date.parse(lease.expiresAt);
   await new Promise((resolve) => setTimeout(resolve, 25));
-  const result = await executor.call('get_file_info', { lease, path: '/tmp' }) as Record<string, unknown>;
+  const result = await executor.call('exec_command', { lease, command: 'true', cwd: '/tmp', yieldTimeMs: 1_000 }) as Record<string, unknown>;
   const refreshedExpiry = executor.leases.snapshot().expiresAt!;
   assert.ok(Date.parse(refreshedExpiry) > originalExpiry);
   assert.equal('leaseActivity' in result, false);
@@ -327,6 +418,44 @@ test('successful browser point actions publish transformed viewer events without
     { kind: 'click', x: 510, y: 420, button: 1 },
     { kind: 'move', x: 410, y: 320, button: 1 },
   ]);
+});
+
+test('queued browser actions recheck ownership before dispatch and discard late results', async () => {
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const dispatched: string[] = [];
+  const browser = {
+    count: () => 1,
+    navigate: async (url: string) => {
+      dispatched.push(url);
+      if (url.endsWith('/first')) await firstBlocked;
+      return { url, title: url };
+    },
+    shutdown: async () => undefined,
+  };
+  const executor = new ToolExecutor(undefined, { browser: browser as never });
+  const oldLease = executor.leases.acquire(60);
+  const first = executor.call('browser_navigate', { lease: oldLease, url: 'https://example.test/first' });
+  await new Promise((resolve) => setImmediate(resolve));
+  const queued = executor.call('browser_navigate', { lease: oldLease, url: 'https://example.test/queued' });
+  const rejectedFirst = assert.rejects(first, /stale/i);
+  const rejectedQueued = assert.rejects(queued, /stale/i);
+
+  await executor.takeHumanControl();
+  executor.releaseHumanControl();
+  const newLease = executor.leases.acquire(60);
+  const current = executor.call('browser_navigate', { lease: newLease, url: 'https://example.test/current' });
+  releaseFirst();
+
+  await rejectedFirst;
+  await rejectedQueued;
+  assert.deepEqual(
+    (({ url, title }) => ({ url, title }))(await current as { url: string; title: string }),
+    { url: 'https://example.test/current', title: 'https://example.test/current' },
+  );
+  assert.deepEqual(dispatched, ['https://example.test/first', 'https://example.test/current']);
+  assert.equal(executor.leases.verify(newLease).id, newLease.id);
+  await executor.shutdown();
 });
 
 test('managed process count is capped', async () => {

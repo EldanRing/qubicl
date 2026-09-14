@@ -4,8 +4,9 @@ import { homedir } from 'node:os';
 import { access, chmod, lstat, mkdir, readFile } from 'node:fs/promises';
 import YAML from 'yaml';
 import {
+  ALL_CLIENT_CREDENTIAL_SCOPES,
+  DEFAULT_TASK_POLICY,
   IMAGE_CATALOG,
-  CONTROL_PROTOCOL_VERSION,
   GATEWAY_PROTOCOL_VERSION,
   GATEWAY_EXTERNAL_CONTAINER_PORT,
   GATEWAY_EXPOSURE_PROTOCOL,
@@ -176,7 +177,7 @@ export function isPrimaryRuntimeRoot(root: string): boolean {
 }
 
 export function runtimeNamespace(installationId: string, root = statePaths().root): string {
-  if (isPrimaryRuntimeRoot(root)) return LEGACY_PROJECT_NAME;
+  void root;
   const suffix = installationId.replaceAll('-', '').toLowerCase();
   if (!/^[a-f0-9]{32}$/.test(suffix)) throw new Error(`Invalid Qubicl installation ID ${JSON.stringify(installationId)}.`);
   // Docker's embedded DNS rejects host labels longer than 63 characters.
@@ -190,7 +191,7 @@ export function projectName(installationId: string, root = statePaths().root): s
 }
 
 export function gatewayContainerName(installationId: string, root = statePaths().root): string {
-  return isPrimaryRuntimeRoot(root) ? 'gateway' : `${runtimeNamespace(installationId, root)}-gateway`;
+  return `${runtimeNamespace(installationId, root)}-gateway`;
 }
 
 export function gatewayNetworkName(installationId: string, root = statePaths().root): string {
@@ -202,7 +203,8 @@ export function serviceName(id: string): string {
 }
 
 export function computerServiceName(state: LoadedState, computer: { id: string; name: string }): string {
-  return isPrimaryRuntimeRoot(state.paths.root) ? computer.name : serviceName(computer.id);
+  void state;
+  return serviceName(computer.id);
 }
 
 export function computerExecutorServiceName(state: LoadedState, computer: { id: string; name: string }): string {
@@ -230,8 +232,7 @@ export function containerName(installationId: string, id: string, runtimeName?: 
 }
 
 export function computerContainerName(state: LoadedState, computer: { id: string; name: string; runtimeName?: string | undefined }): string {
-  const runtimeName = isPrimaryRuntimeRoot(state.paths.root) ? computer.name : computer.runtimeName;
-  return containerName(state.config.installationId, computer.id, runtimeName, state.paths.root);
+  return containerName(state.config.installationId, computer.id, computer.runtimeName, state.paths.root);
 }
 
 export function computerExecutorContainerName(state: LoadedState, computer: { id: string; name: string; runtimeName?: string | undefined }): string {
@@ -267,11 +268,12 @@ export function computerRuntimeContainerNames(state: LoadedState, computer: { id
 }
 
 export function usesUnifiedComputerRuntime(computer: { controlProtocolVersion?: number | undefined }): boolean {
-  return computer.controlProtocolVersion === CONTROL_PROTOCOL_VERSION;
+  return typeof computer.controlProtocolVersion === 'number'
+    && computer.controlProtocolVersion > LEGACY_SPLIT_CONTROL_PROTOCOL_VERSION;
 }
 
 export function readableContainerName(installationId: string, id: string, computerName: string, root = statePaths().root): string {
-  if (isPrimaryRuntimeRoot(root)) return computerName;
+  void root;
   const installation = installationId.replaceAll('-', '').toLowerCase();
   const computer = id.replaceAll('-', '').toLowerCase();
   if (!/^[a-f0-9]{32}$/.test(installation)) throw new Error(`Invalid Qubicl installation ID ${JSON.stringify(installationId)}.`);
@@ -356,7 +358,7 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
   const gatewayAuditVolumes: Array<Record<string, unknown>> = [];
   const imageContracts = await readRuntimeImageContracts(state);
   const routes: RuntimeRoutes = {
-    version: 2,
+    version: 3,
     generatedAt: new Date().toISOString(),
     routes: state.config.computers.map((computer) => {
       const secret = state.secrets.computers[computer.id];
@@ -376,8 +378,18 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
         capabilities: computer.capabilities,
         manifestSha256: computer.image.manifestSha256!,
         tokenHash: hashToken(secret.token),
+        clientCredentials: [
+          {
+            id: 'default',
+            label: 'Default client',
+            tokenHash: hashToken(secret.token),
+            scopes: [...ALL_CLIENT_CREDENTIAL_SCOPES],
+            createdAt: computer.createdAt,
+          },
+          ...(secret.clients ?? []).map(({ token, ...credential }) => ({ ...credential, tokenHash: hashToken(token) })),
+        ],
         internalKey: secret.internalKey,
-        networkPolicy: computer.network ?? { profile: 'developer', allowDomains: [], denyDomains: [], temporaryApprovals: [] },
+        networkPolicy: computer.network ?? { profile: 'developer', allowDomains: [], denyDomains: [], allowCidrs: [], allowTcpPorts: [], temporaryApprovals: [] },
       };
     }),
   };
@@ -394,6 +406,7 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
       environment: {
         QUBICL_GATEWAY_PORT: '3211',
         QUBICL_ROUTES_PATH: '/runtime/routes.json',
+        QUBICL_VIEWER_RECONNECT_GRACE_MS: `${state.config.gateway.viewerReconnectGraceSeconds * 1000}`,
         ...(state.config.gateway.exposure ? {
           QUBICL_GATEWAY_EXTERNAL_PORT: `${GATEWAY_EXTERNAL_CONTAINER_PORT}`,
           QUBICL_GATEWAY_EXPOSURE_CONFIG_PATH: `/runtime/${GATEWAY_EXPOSURE_RUNTIME_DIRECTORY}/${GATEWAY_EXPOSURE_RUNTIME_DOCUMENT}`,
@@ -467,7 +480,7 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
     const proxyKey = deriveInternalServiceKey(secret.internalKey, 'egress-proxy');
     const brokerKey = deriveInternalServiceKey(secret.internalKey, 'egress-broker');
     const webKey = deriveInternalServiceKey(secret.internalKey, 'web');
-    const networkPolicy = computer.network ?? { profile: 'developer', allowDomains: [], denyDomains: [], temporaryApprovals: [] };
+    const networkPolicy = computer.network ?? { profile: 'developer', allowDomains: [], denyDomains: [], allowCidrs: [], allowTcpPorts: [], temporaryApprovals: [] };
     const localPreviewBase = `http://${previewHostname(computer.id)}:${state.config.gateway.port}/computers/${computer.id}/previews`;
     const remotePreviewBase = gatewayEndpointSet(state.config.gateway, computer, 'remote')?.previewBase;
     const previewAccessDirectory = join(previewAccessRoot, computer.id);
@@ -495,16 +508,23 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     const policyBody = {
       version: 1 as const,
-      tools: computer.toolPolicy ?? toolsForCapabilities(computer.capabilities),
+      tools: toolsForCapabilities(computer.capabilities).filter((tool) =>
+        (computer.toolPolicy ?? toolsForCapabilities(computer.capabilities)).includes(tool)
+          || ['get_computer_status', 'explain_capability', 'acquire_lease', 'renew_lease', 'release_lease'].includes(tool)),
       catalogSkills: computer.skillPolicy?.enabledCatalogSkills ?? [],
       skillRegistrySha256,
     };
     const policyDocument = { ...policyBody, revision: createHash('sha256').update(JSON.stringify(policyBody)).digest('hex') };
     await writeMountedRuntimeFile(policyPath, `${JSON.stringify(policyDocument, null, 2)}\n`, 0o600);
-    const auditPath = unifiedRuntime
-      ? join(state.paths.audits, `${computer.id}.jsonl`)
-      : join(state.paths.computers, computer.id, 'audit.jsonl');
-    try { await access(auditPath); } catch { await atomicWrite(auditPath, '', 0o600); }
+    const controlAuditPath = unifiedRuntime
+      ? join(state.paths.audits, `${computer.id}.control.jsonl`)
+      : join(state.paths.computers, computer.id, 'audit.control.jsonl');
+    const networkAuditPath = unifiedRuntime
+      ? join(state.paths.audits, `${computer.id}.network.jsonl`)
+      : join(state.paths.computers, computer.id, 'audit.network.jsonl');
+    for (const path of [controlAuditPath, networkAuditPath]) {
+      try { await access(path); } catch { await atomicWrite(path, '', 0o600); }
+    }
     const commonEnvironment: Record<string, string> = {
       QUBICL_ID: computer.id,
       QUBICL_NAME: computer.name,
@@ -552,7 +572,9 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
           QUBICL_WEB_KEY: webKey,
           QUBICL_NETWORK_POLICY: JSON.stringify(networkPolicy),
           QUBICL_BROWSER_EXECUTABLE: '/usr/local/bin/qubicl-chromium',
+          QUBICL_BROWSER_MAX_TABS: `${computer.browser?.maxTabs ?? 24}`,
           QUBICL_INITIALIZE_HOME: '1',
+          ...(computer.devcontainer ? { QUBICL_DEVCONTAINER_GUEST_JSON: JSON.stringify(computer.devcontainer) } : {}),
           QUBICL_EXECUTOR_FENCE_UID: '0',
           ...(computer.environment ? { QUBICL_WORKLOAD_ENV_JSON: JSON.stringify(computer.environment) } : {}),
           ...(proxyUrl ? { QUBICL_PROXY_URL: proxyUrl } : {}),
@@ -562,7 +584,7 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
         },
         volumes: [
           homeVolume,
-          { type: 'bind', source: auditPath, target: '/run/qubicl/audit.jsonl' },
+          { type: 'bind', source: controlAuditPath, target: '/run/qubicl/audit.jsonl' },
           { type: 'bind', source: policyPath, target: '/run/qubicl/policy.json', read_only: true },
           { type: 'bind', source: previewAccessDirectory, target: PREVIEW_ACCESS_CONTAINER_DIRECTORY, read_only: true },
         ],
@@ -605,7 +627,7 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
       environment,
       volumes: [
         homeVolume,
-        { type: 'bind', source: auditPath, target: '/run/qubicl/audit.jsonl' },
+        { type: 'bind', source: controlAuditPath, target: '/run/qubicl/audit.jsonl' },
         { type: 'bind', source: policyPath, target: '/run/qubicl/policy.json', read_only: true },
         { type: 'bind', source: previewAccessDirectory, target: PREVIEW_ACCESS_CONTAINER_DIRECTORY, read_only: true },
       ],
@@ -642,9 +664,15 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
         ...commonEnvironment,
         QUBICL_RUNTIME_ROLE: 'executor',
         QUBICL_RUNNER_KEY: executorKey,
+        QUBICL_EXECUTOR_FENCE_UID: '0',
+        QUBICL_TASK_MAX_CONCURRENT: `${computer.tasks?.maxConcurrent ?? DEFAULT_TASK_POLICY.maxConcurrent}`,
+        QUBICL_TASK_MAX_LIFETIME_SECONDS: `${computer.tasks?.maxLifetimeSeconds ?? DEFAULT_TASK_POLICY.maxLifetimeSeconds}`,
+        QUBICL_TASK_MAX_OUTPUT_BYTES: `${computer.tasks?.maxOutputBytes ?? DEFAULT_TASK_POLICY.maxOutputBytes}`,
+        QUBICL_TASK_COMPLETED_RETENTION_SECONDS: `${computer.tasks?.completedRetentionSeconds ?? DEFAULT_TASK_POLICY.completedRetentionSeconds}`,
         ...(computer.environment ? { QUBICL_WORKLOAD_ENV_JSON: JSON.stringify(computer.environment) } : {}),
         ...(proxyUrl ? { QUBICL_PROXY_URL: proxyUrl } : {}),
         ...(!policy.viewer ? { QUBICL_INITIALIZE_HOME: '1' } : {}),
+        ...(computer.devcontainer ? { QUBICL_DEVCONTAINER_GUEST_JSON: JSON.stringify(computer.devcontainer) } : {}),
       },
       volumes: [homeVolume],
       networks: [workspaceNetworkKey],
@@ -677,7 +705,7 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
       },
       volumes: [
         { type: 'bind', source: brokerPath, target: '/run/qubicl/broker.json', read_only: true },
-        { type: 'bind', source: auditPath, target: '/run/qubicl/audit.jsonl' },
+        { type: 'bind', source: networkAuditPath, target: '/run/qubicl/audit.jsonl' },
       ],
       networks: ['gateway', networkKey, workspaceNetworkKey],
       cpus: 0.25,
@@ -736,6 +764,7 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
           QUBICL_RUNNER_KEY: sessionKey,
           QUBICL_POINTER_URL: `http://${computerServiceName(state, computer)}:3212/_qubicl/session/pointer`,
           QUBICL_BROWSER_EXECUTABLE: '/usr/local/bin/qubicl-chromium',
+          QUBICL_BROWSER_MAX_TABS: `${computer.browser?.maxTabs ?? 24}`,
           QUBICL_COMPATIBILITY: computer.compatibility,
           ...(computer.environment ? { QUBICL_WORKLOAD_ENV_JSON: JSON.stringify(computer.environment) } : {}),
           QUBICL_INITIALIZE_HOME: '1',

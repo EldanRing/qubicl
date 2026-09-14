@@ -8,6 +8,20 @@ qubicl doctor
 
 Doctor audits host/runtime versions, local Docker context, protected state, pending recovery, exact images and drift, localhost routing, optional TLS exposure state/publications, capability manifests, mounts, limits, privileges, and networks. `--json` is available for scripts.
 
+## Find what is blocking the action
+
+| Symptom | Check first | Next step |
+| --- | --- | --- |
+| Tool or viewer is absent | `qubicl inspect NAME`, selected preset, tool policy, and client profile | Select an existing capability/profile or change operator policy; an absent capability cannot be enabled by retrying |
+| Human ownership, stale lease, or fencing failure | Viewer/controller status and the current operation result | Release human control when intended, obtain a fresh lease, or follow the reported fencing recovery; do not replay an uncertain action blindly |
+| Network or preview denied | Network profile, destination grant, app listener, and explicit publication | Correct the relevant scope/publication; exposing the management gateway does not publish every app |
+| Limit reached or output truncated | Named byte, time, concurrency, or resource limit | Page results, reduce the individual request, wait for capacity, or deliberately adjust available operator settings |
+| Image/state mismatch or interrupted operation | `qubicl doctor`, `qubicl status`, and the named journal | Use the documented upgrade/recovery path for the exact target |
+| Host or client workflow unavailable | [Platform support](platforms.md) and [client setup](clients.md) | Distinguish an unsupported workflow from a supported workflow lacking current validation |
+
+The [constraint register](constraints.md) explains which limits protect a
+boundary, which defaults are configurable, and which product exclusions remain.
+
 ## Remote gateway exposure
 
 Start with the read-only report:
@@ -62,8 +76,8 @@ Qubicl never scans silently for a different port.
 
 ### macOS and Docker Desktop
 
-Apple Silicon macOS with Docker Desktop is directly tested; Intel macOS is
-best-effort. Confirm the Mac is using the native Qubicl/npm architecture and
+Apple Silicon macOS with Docker Desktop is supported, with a historical v0.1.0
+general-platform test baseline; Intel macOS is best-effort. Confirm the Mac is using the native Qubicl/npm architecture and
 that Docker Desktop's local Linux engine is ready:
 
 ```sh
@@ -99,7 +113,12 @@ client's files.
 
 ## Offline setup fails
 
-`--offline` performs local inspection only. It never pulls or builds an image. The error names the missing exact reference. Provide that exact image locally, or rerun without `--offline` when network retrieval/building is acceptable.
+Image acquisition with `--offline` uses local inspection only; it never pulls
+or builds an image. Setup can still create local state and start the selected
+runtime. The error names the missing exact reference. Provide that image locally,
+or rerun without `--offline` when retrieval/building is acceptable. Offline
+devcontainer import rejects a build definition before contacting Docker; use
+an already-built compatible image for that workflow.
 
 Partially downloaded Docker layers after an online failure are ordinary reusable cache; setup does not commit new defaults until both images and the bind-mount probe pass.
 
@@ -107,14 +126,19 @@ Partially downloaded Docker layers after an online failure are ordinary reusable
 
 Curated and custom images require matching manifest/OCI labels. Unknown contract versions, unknown capability shapes, mismatched startup profiles, or local content drift fail closed.
 
-When running from a source checkout, rebuild stale local development images after pulling or switching revisions:
+When running from a source checkout, first identify the stale bundle/image or
+catalog. A documentation edit does not require an image rebuild. If setup or
+doctor reports a development image identity mismatch, refresh it from the
+matching source checkout using the current full development-build command:
 
 ```sh
 npm run images:build
 qubicl setup
 ```
 
-The rebuild command is development-only. It is not a recovery step for published or custom images.
+The rebuild command is development-only and currently builds all six targets.
+It is not a recovery step for published or custom images. See the
+[focused verification guide](development.md#choose-checks-for-the-change).
 
 ```sh
 qubicl inspect computer-name
@@ -160,7 +184,8 @@ Cleanup is similarly conservative. If `qubicl cleanup --orphans --images`
 preserves an image or volume for manual review, that is expected: images are
 shared across every state root using the Docker daemon, and volume names are
 mutable. Qubicl does not run a global prune or infer exclusive ownership from
-OCI labels. Inspect other installations and Docker references yourself before
+OCI labels. `--images` removes only eligible private image-contract cache records;
+it does not delete Docker image bytes. Inspect other installations and Docker references yourself before
 performing any separate manual removal.
 
 ## Docker Desktop still shows UUID-style Qubicl names
@@ -177,15 +202,31 @@ Viewer launch links are intentionally short-lived and single-use. If a copied
 link reports an expired ticket before the viewer session is established, run
 `qubicl view NAME` again instead of reusing or sharing the old URL.
 
-## A GUI application closed during human takeover
+## A GUI application or task changed state during human takeover
 
-Applications started with `exec_command` are ordinary lease-owned commands, even when they have a visible window. They are intentionally terminated on lease release, expiry, gateway restart, and human takeover.
+Applications opened with `open_desktop_application`, the persistent browser,
+retained tasks, declared services, and operator SSH sessions survive takeover.
+Session-scoped commands and PTYs stop because their input belongs to the old
+interactive owner. Ordinary tasks retain their record and bounded output across
+client disconnects, but a runtime restart interrupts them and does not replay
+their command. Agent clients can list, wait for, attach to, read, or stop one
+task through the task tools. Operators can inspect configured limits with
+`qubicl tasks show NAME` or stop all managed work with `qubicl tasks stop-all
+NAME`.
 
-For a workflow intended for handoff, use `open_desktop_application` on a `computer` or `workstation` contract and choose an application allowed by that preset. Workstation Writer accepts existing `.odt`, `.doc`, `.docx`, `.rtf`, or `.txt` files below `/home/qubicl`. The viewer states the policy before takeover and reports how many desktop-session applications were preserved and how many managed commands were stopped. After **Release control**, the agent must acquire a fresh lease before it can list, continue using, or close the preserved application.
+Installed applications are discovered dynamically. Open them by their reported
+application ID and acknowledge the unsaved-work warning before programmatic
+close. After **Release control**, the agent must acquire fresh interactive
+ownership before supplying browser, desktop, or PTY input.
 
 ## Human control remained active after the viewer closed
 
-Human control follows the controlling VNC WebSocket and is released automatically if it does not reconnect within 10 seconds. If the browser or network left an unusual stale session, run `qubicl control release NAME`. Restarting a computer also reconciles gateway ownership before reporting success.
+Human control follows the controlling VNC WebSocket and is released
+automatically if it does not reconnect within the configured grace. The default
+is 10 seconds; inspect or change it with `qubicl config set
+--viewer-reconnect-grace SECONDS` (5–300). If the browser or network left an
+unusual stale session, run `qubicl control release NAME`. Restarting a computer
+also reconciles gateway ownership before reporting success.
 
 ## A client cannot connect
 
@@ -199,14 +240,14 @@ correct when the client itself runs inside WSL.
 
 For Open WebUI, regenerate the adapter with `qubicl connect <name> --client open-webui` and add it under **Admin Panel → Settings → Integrations → Open Terminal**. Docker Desktop installations should use the printed `host.docker.internal` URL; Open WebUI running directly on the host should use `127.0.0.1`. Confirm the advanced OpenAPI path is `/openapi.json`, authentication is Bearer, and the key is the separate output of `qubicl token show <name>`. Verification should identify the service as **Terminal**. A 404 usually means the Qubicl computer image predates the compatibility route and must be rebuilt/refreshed; a 401 means the token is wrong; `human_control_active` means the viewer currently owns the computer.
 
-Qubicl exposes Open WebUI's managed process and ZIP-download compatibility, but
-continues to report interactive terminal and notebook capabilities as disabled.
+Qubicl exposes Open WebUI's retained-task, interactive PTY, and bounded
+ZIP-download compatibility. Notebook capability remains disabled.
 Process or archive limit errors are intentional and name the exceeded boundary;
 split the work or download fewer/smaller paths rather than raising limits in a
 running computer. Only two archive creations/transfers can be active for one
 computer at once; wait for an existing download when `archive_busy` appears.
-Human takeover or a policy change invalidates the compatibility lease and fences
-its retained processes.
+Human takeover or a policy change fences old interactive input while retained
+tasks continue under their bounded task lifecycle.
 
 If a llama.cpp-backed model reports `Failed to initialize samplers: failed to parse grammar`, fetch the compatibility OpenAPI document and confirm model-facing `date-time` fields contain `format: date-time` without a generated regex `pattern`. Current Qubicl builds sanitize that presentation while retaining strict runtime validation.
 

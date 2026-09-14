@@ -1,5 +1,5 @@
 import { lstat, readFile, realpath } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 import { ComputerDefaultsSchema, IMAGE_CATALOG, type ComputerConfig } from '@qubicl/core';
 import type { ParsedArgs } from './args.js';
 import { flag, stringOption } from './args.js';
@@ -21,10 +21,10 @@ interface DevcontainerDocument {
 
 const REJECTED = [
   'privileged', 'capAdd', 'securityOpt', 'mounts', 'runArgs', 'containerUser', 'remoteUser',
-  'initializeCommand', 'onCreateCommand', 'updateContentCommand', 'postCreateCommand',
-  'postStartCommand', 'postAttachCommand', 'dockerComposeFile', 'service', 'shutdownAction',
-  'hostRequirements', 'forwardPorts', 'portsAttributes', 'otherPortsAttributes', 'features',
+  'initializeCommand', 'postAttachCommand', 'dockerComposeFile', 'service', 'features',
 ];
+const INFORMATIONAL = ['hostRequirements', 'forwardPorts', 'portsAttributes', 'otherPortsAttributes', 'shutdownAction', 'name'];
+const GUEST_HOOKS = ['onCreateCommand', 'updateContentCommand', 'postCreateCommand', 'postStartCommand'] as const;
 
 function parseJsonc(source: string): unknown {
   let output = ''; let quote = false; let escape = false; let line = false; let block = false;
@@ -38,7 +38,25 @@ function parseJsonc(source: string): unknown {
     if (quote) { if (escape) escape = false; else if (char === '\\') escape = true; else if (char === '"') quote = false; }
     else if (char === '"') quote = true;
   }
-  return JSON.parse(output.replace(/,\s*([}\]])/gu, '$1'));
+  let normalized = ''; quote = false; escape = false;
+  for (let index = 0; index < output.length; index += 1) {
+    const char = output[index]!;
+    if (quote) {
+      normalized += char;
+      if (escape) escape = false;
+      else if (char === '\\') escape = true;
+      else if (char === '"') quote = false;
+      continue;
+    }
+    if (char === '"') { quote = true; normalized += char; continue; }
+    if (char === ',') {
+      let next = index + 1;
+      while (/\s/u.test(output[next] ?? '')) next += 1;
+      if (output[next] === '}' || output[next] === ']') continue;
+    }
+    normalized += char;
+  }
+  return JSON.parse(normalized);
 }
 
 async function loadDocument(directory: string): Promise<{ root: string; path: string; document: DevcontainerDocument }> {
@@ -53,9 +71,11 @@ async function loadDocument(directory: string): Promise<{ root: string; path: st
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('devcontainer.json must contain an object.');
   const document = parsed as DevcontainerDocument;
   const rejected = REJECTED.filter((key) => document[key] !== undefined);
-  if (rejected.length) throw new Error(`Unsupported or unsafe devcontainer fields: ${rejected.join(', ')}. Qubicl does not import mounts, privilege, lifecycle hooks, port publication, Compose, or capability claims.`);
+  if (rejected.length) throw new Error(`Unsupported or unsafe devcontainer fields: ${rejected.join(', ')}. Qubicl does not import host mounts, privileges, host hooks, Compose, or feature installers.`);
   if ((document.image === undefined) === (document.build === undefined)) throw new Error('devcontainer.json must specify exactly one of image or build.');
-  if (document.workspaceFolder !== undefined && (typeof document.workspaceFolder !== 'string' || !document.workspaceFolder.startsWith('/home/qubicl'))) {
+  if (document.workspaceFolder !== undefined && (typeof document.workspaceFolder !== 'string'
+    || posix.normalize(document.workspaceFolder) !== document.workspaceFolder
+    || (document.workspaceFolder !== '/home/qubicl' && !document.workspaceFolder.startsWith('/home/qubicl/')))) {
     throw new Error('workspaceFolder, when present, must be beneath /home/qubicl. Qubicl does not import arbitrary host mounts.');
   }
   return { root, path, document };
@@ -74,15 +94,32 @@ function environment(document: DevcontainerDocument): Record<string, string> | u
   return Object.keys(combined).length ? combined : undefined;
 }
 
-async function imageReference(root: string, document: DevcontainerDocument, requestedTag: string | undefined): Promise<string> {
+function guestConfiguration(document: DevcontainerDocument): ComputerConfig['devcontainer'] {
+  const hooks: Record<string, string> = {};
+  for (const name of GUEST_HOOKS) {
+    const value = document[name];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !value.trim() || value.length > 32_768 || value.includes('\0')) {
+      throw new Error(`${name} must be a non-empty bounded shell command. Object and array hook forms are not imported.`);
+    }
+    hooks[name] = value;
+  }
+  return {
+    ...(typeof document.workspaceFolder === 'string' ? { workspaceFolder: document.workspaceFolder } : {}),
+    ...(Object.keys(hooks).length ? { hooks } : {}),
+  };
+}
+
+async function imageReference(root: string, documentPath: string, document: DevcontainerDocument, requestedTag: string | undefined): Promise<string> {
   if (typeof document.image === 'string' && document.image) return document.image;
   if (!document.build || typeof document.build !== 'object' || Array.isArray(document.build)) throw new Error('build must be an object.');
   const build = document.build as Record<string, unknown>;
   const allowed = new Set(['dockerfile', 'context', 'args', 'target']);
   const unsupported = Object.keys(build).filter((key) => !allowed.has(key));
   if (unsupported.length) throw new Error(`Unsupported devcontainer build fields: ${unsupported.join(', ')}.`);
-  const context = await realpath(resolve(root, typeof build.context === 'string' ? build.context : '.'));
-  const dockerfile = await realpath(resolve(root, typeof build.dockerfile === 'string' ? build.dockerfile : 'Dockerfile'));
+  const documentRoot = dirname(documentPath);
+  const context = await realpath(resolve(documentRoot, typeof build.context === 'string' ? build.context : '.'));
+  const dockerfile = await realpath(resolve(documentRoot, typeof build.dockerfile === 'string' ? build.dockerfile : 'Dockerfile'));
   if (relative(root, context).startsWith('..') || relative(root, dockerfile).startsWith('..') || isAbsolute(relative(root, context))) throw new Error('Build context and Dockerfile must stay inside the imported directory.');
   const tag = requestedTag ?? `qubicl/devcontainer-${Date.now()}:local`;
   const command = ['build', '--tag', tag, '--file', dockerfile];
@@ -109,7 +146,15 @@ export async function devcontainerCommand(args: ParsedArgs): Promise<void> {
   if (!directory) throw new Error('Missing devcontainer directory.');
   const loaded = await loadDocument(directory);
   if (action === 'inspect') {
-    console.log(JSON.stringify({ path: loaded.path, image: loaded.document.image, build: loaded.document.build, environment: environment(loaded.document), rejectedFields: REJECTED }, null, 2));
+    console.log(JSON.stringify({
+      path: loaded.path,
+      image: loaded.document.image,
+      build: loaded.document.build,
+      environment: environment(loaded.document),
+      guest: guestConfiguration(loaded.document),
+      ignoredInformationalFields: INFORMATIONAL.filter((key) => loaded.document[key] !== undefined),
+      rejectedFields: REJECTED,
+    }, null, 2));
     return;
   }
   const name = args.positionals[2];
@@ -117,8 +162,11 @@ export async function devcontainerCommand(args: ParsedArgs): Promise<void> {
   const paths = statePaths();
   await withStateLock(paths, async () => {
     const state = await loadState(paths);
+    if (flag(args, 'offline') && loaded.document.build !== undefined) {
+      throw new Error('--offline does not build devcontainer images. Build the image explicitly, set image in devcontainer.json, and retry.');
+    }
     const host = await validateDocker();
-    const reference = await imageReference(loaded.root, loaded.document, stringOption(args, 'tag'));
+    const reference = await imageReference(loaded.root, loaded.path, loaded.document, stringOption(args, 'tag'));
     const acquired = await acquireCustomImage(reference, { offline: flag(args, 'offline'), platform: host.platform });
     const recommendation = IMAGE_CATALOG.presets[acquired.manifest.compatibility];
     const defaults = ComputerDefaultsSchema.parse({
@@ -128,12 +176,13 @@ export async function devcontainerCommand(args: ParsedArgs): Promise<void> {
     });
     const computer: ComputerConfig = addConfiguredComputer(state, name, defaults);
     computer.environment = environment(loaded.document);
+    computer.devcontainer = guestConfiguration(loaded.document);
     const start = !flag(args, 'no-start');
     await ensureRuntimeImages(state, [computer], flag(args, 'offline'));
     await executeStateTransaction(paths, createStateTransaction('create', state, {
       activeSources: { [computer.id]: 'create' }, runtime: { startIds: start ? [computer.id] : [] },
     }));
     if (start) await synchronizeStartedSkillPolicies(state, [computer]);
-    console.log(`Imported ${loaded.path} as ${computer.name}${start ? ' and started it' : ' (stopped)'}. The image passed Qubicl capability-manifest validation; host mounts, hooks, privileges, forwarded ports, and feature claims were not imported.`);
+    console.log(`Imported ${loaded.path} as ${computer.name}${start ? ' and started it' : ' (stopped)'}. Guest lifecycle hooks run as the computer user; host mounts, host hooks, privileges, Compose, and feature installers were not imported.${INFORMATIONAL.some((key) => loaded.document[key] !== undefined) ? ' Informational-only fields were reported but not treated as runtime guarantees.' : ''}`);
   });
 }

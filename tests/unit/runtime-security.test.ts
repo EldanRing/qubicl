@@ -166,7 +166,7 @@ test('current computers use one bounded runtime container plus the shared gatewa
       createdAt: new Date().toISOString(),
       controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
       ...presetDefaults('workstation'),
-      network: { profile: 'offline', allowDomains: [], denyDomains: [], temporaryApprovals: [] },
+      network: { profile: 'offline', allowDomains: [], denyDomains: [], allowCidrs: [], allowTcpPorts: [], temporaryApprovals: [] },
       environment: { PROJECT_MODE: 'test' },
       ssh: { enabled: true, port: 22_220, publicKey: `ssh-ed25519 ${'A'.repeat(48)} qubicl:test`, fingerprint: 'SHA256:test-fingerprint' },
     };
@@ -431,7 +431,7 @@ test('runtime identities are stable per installation and isolated across QUBICL_
   }
 });
 
-test('the primary installation renders one qubicl group with literal computer names', async () => {
+test('the primary installation namespaces its Docker group and keeps a stable readable container identity', async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'qubicl-runtime-primary-'));
   try {
     const state = await initializeState(statePaths(temporaryRoot));
@@ -452,17 +452,17 @@ test('the primary installation renders one qubicl group with literal computer na
       name: string;
       services: Record<string, { container_name: string }>;
     };
-    assert.equal(document.name, 'qubicl');
-    assert.equal(document.services.gateway?.container_name, 'gateway');
-    assert.equal(document.services[computer.name]?.container_name, 'openwebui-qubicl');
+    assert.equal(document.name, projectName(state.config.installationId, state.paths.root));
+    assert.equal(document.services.gateway?.container_name, gatewayContainerName(state.config.installationId, state.paths.root));
+    assert.equal(document.services[serviceName(computer.id)]?.container_name, computer.runtimeName);
     assert.equal(Object.keys(document.services).length, 2);
-    assert.equal(document.services[serviceName(computer.id)], undefined);
+    assert.equal(document.services[computer.name], undefined);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
 
-test('a namespaced primary runtime with Docker Desktop bind paths migrates without changing durable state', async () => {
+test('a 0.5 primary runtime with global Docker names migrates to its installation namespace without changing durable state', async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'qubicl-runtime-friendly-migration-'));
   try {
     const source = await initializeState(statePaths(temporaryRoot));
@@ -476,8 +476,20 @@ test('a namespaced primary runtime with Docker Desktop bind paths migrates witho
     source.config.computers.push(computer);
     source.secrets.computers[computer.id] = { token: 't'.repeat(43), internalKey: 'i'.repeat(43) };
     await renderRuntime(source);
-    const sourceGateway = gatewayContainerName(source.config.installationId, source.paths.root);
-    const sourceComputer = containerName(source.config.installationId, computer.id, computer.runtimeName, source.paths.root);
+    const legacy = YAML.parse(await readFile(source.paths.compose, 'utf8')) as {
+      name: string;
+      services: Record<string, { container_name: string }>;
+      networks: Record<string, { name: string }>;
+    };
+    legacy.name = 'qubicl';
+    legacy.services.gateway!.container_name = 'gateway';
+    legacy.networks.gateway!.name = 'qubicl-gateway';
+    legacy.services[computer.name] = legacy.services[serviceName(computer.id)]!;
+    delete legacy.services[serviceName(computer.id)];
+    legacy.services[computer.name]!.container_name = computer.name;
+    await writeFile(source.paths.compose, YAML.stringify(legacy), { mode: 0o600 });
+    const sourceGateway = 'gateway';
+    const sourceComputer = computer.name;
     const inspections = new Map<string, RuntimeInspection>([
       [sourceGateway, {
         State: { Status: 'running' },
@@ -507,26 +519,25 @@ test('a namespaced primary runtime with Docker Desktop bind paths migrates witho
     };
 
     assert.equal(await prepareRuntimeMigration(source, adapter), true);
-    const target = { ...source, paths: { ...source.paths, root: join(homedir(), '.qubicl') } };
-    await renderRuntime(target);
-    assert.equal(await migrateLegacyRuntime(target, adapter), true);
+    await renderRuntime(source);
+    assert.equal(await migrateLegacyRuntime(source, adapter), true);
 
     assert.ok(dockerCalls.some((args) => args.join(' ') === `rm --force ${sourceComputer}`));
     assert.ok(dockerCalls.some((args) => args.join(' ') === `rm --force ${sourceGateway}`));
     assert.deepEqual(composeCalls, [
       ['up', '--detach', '--no-deps', 'gateway'],
-      ['up', '--detach', computer.name],
+      ['up', '--detach', serviceName(computer.id)],
     ]);
     const document = YAML.parse(await readFile(source.paths.compose, 'utf8')) as { name: string; services: Record<string, { container_name: string }> };
-    assert.equal(document.name, 'qubicl');
-    assert.equal(document.services.gateway?.container_name, 'gateway');
-    assert.equal(document.services[computer.name]?.container_name, computer.name);
+    assert.equal(document.name, projectName(source.config.installationId, source.paths.root));
+    assert.equal(document.services.gateway?.container_name, gatewayContainerName(source.config.installationId, source.paths.root));
+    assert.equal(document.services[serviceName(computer.id)]?.container_name, computer.runtimeName);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
 
-test('a primary UUID service label migrates to the literal computer name shown by Docker Desktop', async () => {
+test('a 0.5 human service label migrates to the stable UUID service without replacing an absent gateway', async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'qubicl-runtime-service-label-'));
   try {
     const state = await initializeState(statePaths(temporaryRoot));
@@ -542,18 +553,19 @@ test('a primary UUID service label migrates to the literal computer name shown b
     state.secrets.computers[computer.id] = { token: 't'.repeat(43), internalKey: 'i'.repeat(43) };
     await renderRuntime(state);
     const document = YAML.parse(await readFile(state.paths.compose, 'utf8')) as {
+      name: string;
       services: Record<string, { container_name: string; labels: Record<string, string> }>;
+      networks: Record<string, { name: string }>;
     };
-    document.services[serviceName(computer.id)] = document.services[computer.name]!;
-    delete document.services[computer.name];
+    document.name = 'qubicl';
+    document.services[computer.name] = document.services[serviceName(computer.id)]!;
+    delete document.services[serviceName(computer.id)];
+    document.services.gateway!.container_name = 'gateway';
+    document.services[computer.name]!.container_name = computer.name;
+    document.networks.gateway!.name = 'qubicl-gateway';
     await writeFile(state.paths.compose, YAML.stringify(document), { mode: 0o600 });
 
     const inspections = new Map<string, RuntimeInspection>([
-      ['gateway', {
-        State: { Status: 'running' },
-        Config: { Labels: { 'dev.qubicl.role': 'gateway', 'dev.qubicl.installation': state.config.installationId } },
-        Mounts: [{ Source: state.paths.runtime, Destination: '/runtime' }],
-      }],
       [computer.name, {
         State: { Status: 'running' },
         Config: { Labels: { 'dev.qubicl.role': 'computer', 'dev.qubicl.installation': state.config.installationId, 'dev.qubicl.id': computer.id } },
@@ -582,16 +594,16 @@ test('a primary UUID service label migrates to the literal computer name shown b
 
     assert.ok(dockerCalls.some((args) => args.join(' ') === `rm --force ${computer.name}`));
     assert.equal(dockerCalls.some((args) => args.join(' ') === 'rm --force gateway'), false);
-    assert.deepEqual(composeCalls, [['up', '--detach', computer.name]]);
+    assert.deepEqual(composeCalls, [['up', '--detach', serviceName(computer.id)]]);
     const migrated = YAML.parse(await readFile(state.paths.compose, 'utf8')) as { services: Record<string, unknown> };
-    assert.ok(migrated.services[computer.name]);
-    assert.equal(migrated.services[serviceName(computer.id)], undefined);
+    assert.ok(migrated.services[serviceName(computer.id)]);
+    assert.equal(migrated.services[computer.name], undefined);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
 
-test('renaming a primary computer recreates only its service despite an unrelated missing image pin', async () => {
+test('renaming a primary computer retains its Docker identity and does not inspect an unrelated image pin', async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'qubicl-runtime-friendly-rename-'));
   try {
     const state = await initializeState(statePaths(temporaryRoot));
@@ -599,14 +611,14 @@ test('renaming a primary computer recreates only its service despite an unrelate
     const computer: ComputerConfig = {
       id: '00000000-0000-4000-8000-000000000678',
       name: 'before-name',
-      runtimeName: 'before-name',
+      runtimeName: readableContainerName(state.config.installationId, '00000000-0000-4000-8000-000000000678', 'before-name', state.paths.root),
       createdAt: new Date().toISOString(),
       ...presetDefaults('workstation'),
     };
     const unrelated: ComputerConfig = {
       id: '00000000-0000-4000-8000-000000000679',
       name: 'retained-unrelated',
-      runtimeName: 'retained-unrelated',
+      runtimeName: readableContainerName(state.config.installationId, '00000000-0000-4000-8000-000000000679', 'retained-unrelated', state.paths.root),
       createdAt: new Date().toISOString(),
       ...presetDefaults('workstation'),
     };
@@ -625,48 +637,13 @@ test('renaming a primary computer recreates only its service despite an unrelate
       viewerAuthentication: LEGACY_VIEWER_AUTHENTICATION,
     }]);
     await renderRuntime(state);
-    const inspections = new Map<string, RuntimeInspection>([
-      ['gateway', {
-        State: { Status: 'running' },
-        Config: { Labels: { 'dev.qubicl.role': 'gateway', 'dev.qubicl.installation': state.config.installationId } },
-        Mounts: [{ Source: state.paths.runtime, Destination: '/runtime' }],
-      }],
-      ['before-name', {
-        State: { Status: 'running' },
-        Config: { Labels: { 'dev.qubicl.role': 'computer', 'dev.qubicl.installation': state.config.installationId, 'dev.qubicl.id': computer.id } },
-        Mounts: [{ Source: join(state.paths.computers, computer.id, 'home'), Destination: '/home' }],
-      }],
-      [unrelated.name, {
-        State: { Status: 'running' },
-        Config: { Labels: { 'dev.qubicl.role': 'computer', 'dev.qubicl.installation': state.config.installationId, 'dev.qubicl.id': unrelated.id } },
-        Mounts: [{ Source: join(state.paths.computers, unrelated.id, 'home'), Destination: '/home' }],
-      }],
-    ]);
-    const dockerCalls: string[][] = [];
-    const composeCalls: string[][] = [];
-    const adapter: LegacyRuntimeMigrationAdapter = {
-      inspectContainer: async (name) => inspections.get(name),
-      docker: async (args) => {
-        dockerCalls.push(args);
-        if (args[0] === 'image') return args.at(-1) === unrelatedImage ? '' : 'sha256:available';
-        if (args[0] === 'rm') inspections.delete(args.at(-1)!);
-        return '';
-      },
-      compose: async (_state, args) => { composeCalls.push(args); return ''; },
-      waitForContainerHealthy: async () => undefined,
-      waitForHealthy: async () => undefined,
-      waitForGatewayComputer: async () => undefined,
-    };
+    const originalContainer = computer.runtimeName!;
     computer.name = 'after-name';
-    computer.runtimeName = 'after-name';
-    assert.equal(await prepareRuntimeMigration(state, adapter), true);
     await renderRuntime(state);
-    assert.equal(await migrateLegacyRuntime(state, adapter), true);
-    assert.ok(dockerCalls.some((args) => args.join(' ') === 'rm --force before-name'));
-    assert.equal(dockerCalls.some((args) => args.join(' ') === `rm --force ${unrelated.name}`), false);
-    assert.equal(dockerCalls.some((args) => args[0] === 'image' && args.at(-1) === unrelatedImage), false);
-    assert.equal(dockerCalls.some((args) => args[0] === 'rename'), false);
-    assert.deepEqual(composeCalls, [['up', '--detach', 'after-name']]);
+    const renamed = YAML.parse(await readFile(state.paths.compose, 'utf8')) as { services: Record<string, { container_name: string }> };
+    assert.equal(renamed.services[serviceName(computer.id)]?.container_name, originalContainer);
+    assert.equal(renamed.services[computer.name], undefined);
+    assert.equal(runtimeImageReference(unrelated.image, 'computer', unrelated.compatibility), unrelatedImage);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
