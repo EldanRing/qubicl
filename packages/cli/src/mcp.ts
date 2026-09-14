@@ -137,8 +137,12 @@ export class TransparentLeaseBridge {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const proof = await this.ensureLease();
       const result = await this.post(name, { ...input, lease: proof });
-      if (result.ok || errorCode(result.value) !== 'stale_lease' || attempt > 0) return result;
-      if (sameProof(this.lease, proof)) this.lease = undefined;
+      const code = errorCode(result.value);
+      if (result.ok || !['stale_lease', 'background_lease'].includes(code ?? '') || attempt > 0) return result;
+      if (sameProof(this.lease, proof)) {
+        if (code === 'background_lease') await this.release();
+        else this.lease = undefined;
+      }
     }
     return { ok: false, value: { error: { code: 'stale_lease', message: 'The MCP connection could not refresh exclusive control.' } } };
   }

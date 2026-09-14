@@ -70,6 +70,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Transparent MCP connections replace a background-only lease after human
+  control ends, so browser and desktop actions resume without exposing lease
+  plumbing to the client.
 - Operator release of human control now requires the computer's internal
   operator key; the workload bearer can no longer invoke that route.
 - Queued browser work rechecks ownership immediately before dispatch, late

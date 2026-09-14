@@ -338,3 +338,41 @@ test('stdio bridge owns, refreshes, and releases an opaque lease outside model c
   assert.deepEqual(injected.map(({ generation: value }) => value), [1, 1, 2]);
   assert.equal(calls.at(-1)!.body.lease && (calls.at(-1)!.body.lease as { generation: number }).generation, 2);
 });
+
+test('stdio bridge replaces a background-only lease when interactive control resumes', async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const calls: Array<{ name: string; body: Record<string, unknown> }> = [];
+  let generation = 0;
+  let browserCalls = 0;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const name = new URL(String(input)).pathname.split('/').pop()!;
+    const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+    calls.push({ name, body });
+    if (name === 'acquire_lease') {
+      generation += 1;
+      return Response.json({ id: 'a'.repeat(32), generation, epoch: 'b'.repeat(16) });
+    }
+    if (name === 'browser_navigate') {
+      browserCalls += 1;
+      if (browserCalls === 1) return Response.json({ error: { code: 'background_lease', message: 'background only' } }, { status: 409 });
+      return Response.json({ url: 'https://example.com' });
+    }
+    if (name === 'release_lease') return Response.json({ released: true });
+    return Response.json({ error: { code: 'unexpected', message: name } }, { status: 500 });
+  }) as typeof fetch;
+
+  const bridge = new TransparentLeaseBridge('http://computer.test', 'token');
+  assert.equal((await bridge.call('browser_navigate', { url: 'https://example.com' })).ok, true);
+  await bridge.release();
+  assert.deepEqual(calls.map(({ name }) => name), [
+    'acquire_lease',
+    'browser_navigate',
+    'release_lease',
+    'acquire_lease',
+    'browser_navigate',
+    'release_lease',
+  ]);
+  const injected = calls.filter(({ name }) => name === 'browser_navigate').map(({ body }) => body.lease as { generation: number });
+  assert.deepEqual(injected.map(({ generation: value }) => value), [1, 2]);
+});
