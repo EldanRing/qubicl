@@ -274,8 +274,21 @@ try {
     return value;
   };
   const computerLease = await computerCall('acquire_lease', { durationSeconds: 60 });
-  const computerNavigation = await computerCall('browser_navigate', { lease: computerLease, url: 'https://example.com/' });
-  assert.match(computerNavigation.title, /Example Domain/i);
+  await computerCall('write_file', {
+    lease: computerLease,
+    path: '/home/qubicl/computer-browser.html',
+    content: '<!doctype html><title>Qubicl computer browser</title><h1>Computer preset browser works</h1>',
+  });
+  const computerBrowserServer = await computerCall('exec_command', {
+    lease: computerLease,
+    command: 'python3 -m http.server 8765 --bind 127.0.0.1 --directory /home/qubicl',
+    lifecycle: 'session',
+    label: 'Computer browser contract server',
+    yieldTimeMs: 1_000,
+  });
+  assert.equal(computerBrowserServer.running, true);
+  const computerNavigation = await computerCall('browser_navigate', { lease: computerLease, url: 'http://127.0.0.1:8765/computer-browser.html' });
+  assert.equal(computerNavigation.title, 'Qubicl computer browser');
   await computerCall('release_lease', { lease: computerLease });
   await exec('docker', ['exec', computerSessionRuntime(computerContract), 'pgrep', '-x', 'chromium']);
   const computerSshPort = await freePort();
