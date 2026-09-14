@@ -142,10 +142,11 @@ prepare_browser_keyring_password() {
     runuser -u qubicl -- sh -ceu 'umask 077; head -c 32 /dev/urandom | base64 >"$1"' qubicl-keyring "$path"
   fi
   owner="$(stat -c '%u:%g' -- "$path")"
-  if [[ "$owner" != "$expected_owner" ]]; then
+  if [[ "$owner" != "$expected_owner" && "$owner" != 0:0 ]]; then
     browser_home_ownership_error "$path"
   fi
   runuser -u qubicl -- chmod 0600 "$path"
+  runuser -u qubicl -- test -r "$path" -a -w "$path" || browser_home_ownership_error "$path"
   if ! runuser -u qubicl -- grep -Eq '^[A-Za-z0-9+/]{43}=$' "$path"; then
     echo "Qubicl browser keyring credential is invalid: ${path}" >&2
     echo "Restore this computer from a trusted backup before opening the managed browser." >&2

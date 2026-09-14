@@ -248,6 +248,8 @@ test('container bases are pinned by digest', async () => {
   const chromiumWrapper = await readFile(join(root, 'images/computer/chromium-wrapper.sh'), 'utf8');
   assert.match(entrypoint, /prepare_browser_keyring_password\(\)/);
   assert.match(entrypoint, /runuser -u qubicl -- sh -ceu[^\n]*head -c 32 \/dev\/urandom \| base64/);
+  assert.match(entrypoint, /"\$owner" != "\$expected_owner" && "\$owner" != 0:0/);
+  assert.match(entrypoint, /runuser -u qubicl -- test -r "\$path" -a -w "\$path"/);
   assert.ok(entrypoint.indexOf('prepare_browser_keyring_password\n') < entrypoint.indexOf('start_internal_session()'));
   assert.match(chromiumWrapper, /browser-keyring-password/);
   assert.match(chromiumWrapper, /stat -c %a[^\n]*!= 600/);

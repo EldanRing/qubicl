@@ -5,8 +5,8 @@ launch_browser='
 keyring_directory="${XDG_DATA_HOME:-$HOME/.local/share}/qubicl"
 keyring_password_file="$keyring_directory/browser-keyring-password"
 if [ -L "$keyring_password_file" ] || [ ! -f "$keyring_password_file" ] ||
-   [ "$(stat -c %u "$keyring_password_file")" != "$(id -u)" ] ||
    [ "$(stat -c %a "$keyring_password_file")" != 600 ] ||
+   [ ! -r "$keyring_password_file" ] || [ ! -w "$keyring_password_file" ] ||
    ! grep -Eq "^[A-Za-z0-9+/]{43}=$" "$keyring_password_file"; then
   echo "Qubicl browser keyring credential is invalid at $keyring_password_file. Restore its 0600 regular file or restore the computer from backup." >&2
   exit 78
