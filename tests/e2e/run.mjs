@@ -857,7 +857,8 @@ try {
   ]);
   await commandCli(['ssh', 'enable', computer.name, '--port', `${sshPort}`]);
   const firstHostFingerprint = (await exec('docker', [
-    'exec', computerSshRuntime(computer), 'ssh-keygen', '-lf', '/etc/ssh/ssh_host_ed25519_key.pub',
+    'exec', computerSshRuntime(computer), 'ssh-keygen', '-lf',
+    '/home/qubicl/.local/share/qubicl/ssh-host-keys/ssh_host_ed25519_key.pub',
   ])).stdout.trim();
   const sshKey = join(root, 'computers', computer.id, 'ssh', 'id_ed25519');
   const sshOptions = [
@@ -880,7 +881,8 @@ try {
   const sshPeerPort = await freePort();
   await commandCli(['ssh', 'enable', sshPeer.name, '--port', `${sshPeerPort}`]);
   const secondHostFingerprint = (await exec('docker', [
-    'exec', computerSshRuntime(sshPeer), 'ssh-keygen', '-lf', '/etc/ssh/ssh_host_ed25519_key.pub',
+    'exec', computerSshRuntime(sshPeer), 'ssh-keygen', '-lf',
+    '/home/qubicl/.local/share/qubicl/ssh-host-keys/ssh_host_ed25519_key.pub',
   ])).stdout.trim();
   assert.notEqual(secondHostFingerprint, firstHostFingerprint);
   await commandCli(['ssh', 'disable', sshPeer.name]);
