@@ -6,7 +6,9 @@ import { join } from 'node:path';
 import test from 'node:test';
 import YAML from 'yaml';
 import {
+  CONTROL_PROTOCOL_VERSION,
   LegacyConfigV3Schema,
+  LegacyConfigV4Schema,
   LegacySecretsV3Schema,
   defaultConfig,
   defaultSecrets,
@@ -141,6 +143,90 @@ test('version-3 schemas are strict and explicit bootstrap identity is retained',
   assert.deepEqual(LegacySecretsV3Schema.parse(version3Secrets).computers, {});
   assert.throws(() => LegacyConfigV3Schema.parse({ ...version3Config, unexpected: true }));
   assert.throws(() => LegacySecretsV3Schema.parse({ ...version3Secrets, unexpected: true }));
+});
+
+test('version-4 migration upgrades active and trashed durable metadata with the config', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-v4-metadata-migration-'));
+  const paths = statePaths(root);
+  const installationId = '00000000-0000-4000-8000-000000000430';
+  const computerId = '00000000-0000-4000-8000-000000000431';
+  const trashId = '00000000-0000-4000-8000-000000000432';
+  const createdAt = '2026-09-10T12:00:00.000Z';
+  const current = defaultConfig(installationId);
+  const legacyComputer = {
+    ...current.defaults,
+    id: computerId,
+    name: 'active-v4',
+    runtimeName: 'qubicl-active-v4',
+    createdAt,
+    controlProtocolVersion: 10,
+  };
+  const legacyTrash = {
+    ...legacyComputer,
+    id: trashId,
+    name: 'trash-v4',
+    runtimeName: 'qubicl-trash-v4',
+    deletedAt: '2026-09-10T13:00:00.000Z',
+  };
+  const config = LegacyConfigV4Schema.parse({
+    ...current,
+    version: 4,
+    computers: [legacyComputer],
+  });
+  const secrets = {
+    ...defaultSecrets(),
+    version: 4,
+    computers: {
+      [computerId]: {
+        token: `qubicl_${'t'.repeat(32)}`,
+        internalKey: 'k'.repeat(32),
+      },
+    },
+  };
+  const configRaw = YAML.stringify(config);
+  const secretsRaw = YAML.stringify(secrets);
+  await mkdir(join(paths.computers, computerId, 'home', 'qubicl'), { recursive: true });
+  await mkdir(join(paths.trash, trashId, 'home', 'qubicl'), { recursive: true });
+  await writeFile(paths.config, configRaw, { mode: 0o600 });
+  await writeFile(paths.secrets, secretsRaw, { mode: 0o600 });
+  await writeFile(join(paths.computers, computerId, 'metadata.yaml'), YAML.stringify(legacyComputer), { mode: 0o600 });
+  await writeFile(join(paths.trash, trashId, 'metadata.yaml'), YAML.stringify(legacyTrash), { mode: 0o600 });
+
+  await ensureCurrentState(paths);
+  const migrated = await loadState(paths);
+  const active = migrated.config.computers[0]!;
+  assert.equal(active.controlProtocolVersion, CONTROL_PROTOCOL_VERSION);
+  assert.equal(active.runtimeName, undefined);
+  assert.deepEqual(active.browser, { maxTabs: 24 });
+  assert.deepEqual(active.network, {
+    profile: 'developer',
+    allowDomains: [],
+    denyDomains: [],
+    allowCidrs: [],
+    allowTcpPorts: [],
+    temporaryApprovals: [],
+  });
+  assert.deepEqual(YAML.parse(await readFile(join(paths.computers, computerId, 'metadata.yaml'), 'utf8')), active);
+  const migratedTrash = YAML.parse(await readFile(join(paths.trash, trashId, 'metadata.yaml'), 'utf8'));
+  assert.equal(migratedTrash.deletedAt, legacyTrash.deletedAt);
+  assert.equal(migratedTrash.runtimeName, undefined);
+  assert.equal(migratedTrash.controlProtocolVersion, CONTROL_PROTOCOL_VERSION);
+  assert.deepEqual(migratedTrash.browser, { maxTabs: 24 });
+  assert.deepEqual(migratedTrash.network, active.network);
+
+  const backups = await readdir(paths.backups);
+  assert.equal(backups.length, 1);
+  const backup = join(paths.backups, backups[0]!);
+  assert.equal(await readFile(join(backup, 'config.yaml'), 'utf8'), configRaw);
+  assert.equal(await readFile(join(backup, 'secrets.yaml'), 'utf8'), secretsRaw);
+  assert.equal(
+    await readFile(join(backup, `active-${computerId}-metadata.yaml`), 'utf8'),
+    YAML.stringify(legacyComputer),
+  );
+  assert.equal(
+    await readFile(join(backup, `trash-${trashId}-metadata.yaml`), 'utf8'),
+    YAML.stringify(legacyTrash),
+  );
 });
 
 test('pending version-3 state migration resumes with its journal and backup identities', async () => {

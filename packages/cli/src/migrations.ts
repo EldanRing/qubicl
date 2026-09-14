@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from 'node:util';
 import YAML from 'yaml';
 import {
   ConfigSchema,
+  MetadataSchema,
   LegacyConfigV1Schema,
   LegacyConfigV2Schema,
   LegacyConfigV3Schema,
@@ -25,6 +26,8 @@ import {
   migrateConfigV2,
   migrateConfigV3,
   migrateConfigV4,
+  migrateComputerV3,
+  migrateComputerV4,
   migrateSecretsV1,
   migrateSecretsV2,
   migrateSecretsV3,
@@ -167,7 +170,7 @@ export async function ensureCurrentState(paths: StatePaths, options: StateMigrat
         ? migrateSecretsV3(LegacySecretsV3Schema.parse(secretsValue))
         : migrateSecretsV4(LegacySecretsV4Schema.parse(secretsValue));
   assertStateComputerIdsMatch(migratedConfig, migratedSecrets);
-  await validateMigrationDurableState(paths, migratedConfig);
+  await validateMigrationDurableState(paths, migratedConfig, configVersion);
   const metadataFiles = await metadataBackupFiles(paths, migratedConfig.computers.map(({ id }) => id));
   const migration = StateMigrationSchema.parse({
     version: 4,
@@ -196,7 +199,7 @@ export async function recoverStateMigration(paths: StatePaths, options: StateMig
   const migration = await readMigration(paths);
   if (!migration) return false;
   assertStateComputerIdsMatch(migration.config, migration.secrets);
-  await validateMigrationDurableState(paths, migration.config);
+  await validateMigrationDurableState(paths, migration.config, migration.sourceVersion);
   await saveState({ paths, config: migration.config, secrets: migration.secrets }, async () => {
     await checkpoint('config-written', migration, options);
   });
@@ -332,7 +335,11 @@ async function metadataBackupFiles(paths: StatePaths, activeIds: string[]): Prom
   return files;
 }
 
-async function validateMigrationDurableState(paths: StatePaths, config: StateMigration['config']): Promise<void> {
+async function validateMigrationDurableState(
+  paths: StatePaths,
+  config: StateMigration['config'],
+  sourceVersion: number,
+): Promise<void> {
   const activeIds = new Set(config.computers.map(({ id }) => id));
   const activeEntries = await ownedRealDirectoryEntries(paths.computers);
   const missing = [...activeIds].filter((id) => !activeEntries.includes(id)).sort();
@@ -350,7 +357,7 @@ async function validateMigrationDurableState(paths: StatePaths, config: StateMig
     await assertOwnedRealDirectory(join(directory, 'home', 'qubicl'));
     const metadataPath = join(directory, 'metadata.yaml');
     await assertOwnedRegularFile(metadataPath);
-    const metadata = await readMetadata(metadataPath);
+    const metadata = migrateMetadataForStateVersion(await readMetadata(metadataPath), sourceVersion);
     if (metadata.deletedAt || !isDeepStrictEqual(metadata, computer)) {
       throw new Error(`Active metadata ${metadataPath} does not match migrated computer ${computer.name} (${computer.id}).`);
     }
@@ -362,7 +369,7 @@ async function validateMigrationDurableState(paths: StatePaths, config: StateMig
     await assertOwnedRealDirectory(join(directory, 'home', 'qubicl'));
     const metadataPath = join(directory, 'metadata.yaml');
     await assertOwnedRegularFile(metadataPath);
-    const metadata = await readMetadata(metadataPath);
+    const metadata = migrateMetadataForStateVersion(await readMetadata(metadataPath), sourceVersion);
     if (metadata.id !== entry || !metadata.deletedAt || activeIds.has(metadata.id)) {
       throw new Error(`Trash metadata in ${directory} does not match its directory, lacks deletedAt, or duplicates an active computer.`);
     }
@@ -424,7 +431,7 @@ async function migrateStoredMetadata(paths: StatePaths, migration: StateMigratio
     const directory = join(paths.computers, computer.id);
     await assertOwnedRealDirectory(directory);
     const metadataPath = join(directory, 'metadata.yaml');
-    const existing = await readMetadata(metadataPath);
+    const existing = migrateMetadataForStateVersion(await readMetadata(metadataPath), migration.sourceVersion);
     if (existing.deletedAt || !isDeepStrictEqual(existing, computer)) {
       throw new Error(`Active metadata ${metadataPath} does not match migrated computer ${computer.name} (${computer.id}).`);
     }
@@ -432,12 +439,28 @@ async function migrateStoredMetadata(paths: StatePaths, migration: StateMigratio
   }
   for (const entry of await realDirectoryEntries(paths.trash)) {
     const directory = join(paths.trash, entry);
-    const metadata = await readMetadata(join(directory, 'metadata.yaml'));
+    const metadata = migrateMetadataForStateVersion(
+      await readMetadata(join(directory, 'metadata.yaml')),
+      migration.sourceVersion,
+    );
     if (metadata.id !== entry || !metadata.deletedAt) {
       throw new Error(`Trash metadata in ${directory} does not match its directory or lacks deletedAt.`);
     }
     await saveMetadataInDirectory(directory, metadata);
   }
+}
+
+function migrateMetadataForStateVersion(
+  metadata: ReturnType<typeof MetadataSchema.parse>,
+  sourceVersion: number,
+): ReturnType<typeof MetadataSchema.parse> {
+  const { deletedAt, ...computer } = MetadataSchema.parse(metadata);
+  const migrated = sourceVersion === 3
+    ? migrateComputerV3(computer)
+    : sourceVersion === 4
+      ? migrateComputerV4(computer)
+      : computer;
+  return MetadataSchema.parse({ ...migrated, ...(deletedAt ? { deletedAt } : {}) });
 }
 
 async function realDirectoryEntries(path: string): Promise<string[]> {

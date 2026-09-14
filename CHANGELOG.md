@@ -70,6 +70,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- State-format migration now transforms each valid 0.5 active and trashed
+  computer metadata record alongside its configuration, so existing
+  installations can complete the backed-up 0.6 migration.
 - Transparent MCP and Open Terminal connections replace a background-only
   lease after human control ends, so browser and desktop actions resume
   without exposing lease plumbing to the client.

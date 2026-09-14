@@ -806,8 +806,13 @@ export function migrateConfigV3(config: LegacyQubiclConfigV3): QubiclConfig {
   return ConfigSchema.parse({
     version: STATE_FORMAT_VERSION,
     ...fields,
-    computers: fields.computers.map(({ runtimeName: _runtimeName, ...computer }) => computer),
+    computers: fields.computers.map(migrateComputerV3),
   });
+}
+
+export function migrateComputerV3(computer: ComputerConfig): ComputerConfig {
+  const { runtimeName: _runtimeName, ...fields } = ComputerConfigSchema.parse(computer);
+  return ComputerConfigSchema.parse(fields);
 }
 
 export function migrateSecretsV3(secrets: LegacyQubiclSecretsV3): QubiclSecrets {
@@ -820,12 +825,17 @@ export function migrateConfigV4(config: LegacyQubiclConfigV4): QubiclConfig {
   return ConfigSchema.parse({
     version: STATE_FORMAT_VERSION,
     ...fields,
-    computers: fields.computers.map(({ runtimeName: _runtimeName, ...computer }) => ({
-      ...computer,
-      controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
-      network: computer.network ?? { profile: 'developer', allowDomains: [], denyDomains: [], allowCidrs: [], allowTcpPorts: [], temporaryApprovals: [] },
-      browser: computer.browser ?? { maxTabs: 24 },
-    })),
+    computers: fields.computers.map(migrateComputerV4),
+  });
+}
+
+export function migrateComputerV4(computer: ComputerConfig): ComputerConfig {
+  const { runtimeName: _runtimeName, ...fields } = ComputerConfigSchema.parse(computer);
+  return ComputerConfigSchema.parse({
+    ...fields,
+    controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
+    network: fields.network ?? { profile: 'developer', allowDomains: [], denyDomains: [], allowCidrs: [], allowTcpPorts: [], temporaryApprovals: [] },
+    browser: fields.browser ?? { maxTabs: 24 },
   });
 }
 
