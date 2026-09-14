@@ -253,6 +253,7 @@ test('container bases are pinned by digest', async () => {
   assert.ok(entrypoint.indexOf('prepare_browser_keyring_password\n') < entrypoint.indexOf('start_internal_session()'));
   assert.match(chromiumWrapper, /browser-keyring-password/);
   assert.match(chromiumWrapper, /stat -c %a[^\n]*!= 600/);
+  assert.match(chromiumWrapper, /export GNOME_KEYRING_CONTROL/);
   assert.ok(chromiumWrapper.indexOf('gnome-keyring-daemon --login') < chromiumWrapper.indexOf('gnome-keyring-daemon --start'));
   assert.match(chromiumWrapper, /--password-store=gnome-libsecret/);
   for (const target of ['file-system', 'browser', 'computer', 'workstation']) assert.match(computer, new RegExp(` AS ${target}$`, 'm'));

@@ -236,6 +236,11 @@ try {
     test "$(stat -c %a "$keyring_password")" = 600
     runuser -u qubicl -- test -r "$keyring_password" -a -w "$keyring_password"
     grep -Eq '^[A-Za-z0-9+/]{43}=$' "$keyring_password"
+    login_keyring=/home/qubicl/.local/share/keyrings/login.keyring
+    test -f "$login_keyring"
+    test ! -L "$login_keyring"
+    test "$(stat -c %a "$login_keyring")" = 600
+    runuser -u qubicl -- test -r "$login_keyring" -a -w "$login_keyring"
     pgrep -f '^gnome-keyring-daemon ' >/dev/null
     ! pgrep -x gcr-prompter >/dev/null
   `]);
@@ -310,6 +315,7 @@ try {
   }, 10_000);
   const computerNavigation = await computerCall('browser_navigate', { lease: computerLease, url: computerBrowserUrl });
   assert.equal(computerNavigation.title, 'Qubicl computer browser');
+  await exec('docker', ['exec', computerSessionRuntime(computerContract), 'sh', '-ceu', 'test -f /home/qubicl/.local/share/keyrings/login.keyring; ! pgrep -x gcr-prompter >/dev/null']);
   await computerCall('release_lease', { lease: computerLease });
   await exec('docker', ['exec', computerSessionRuntime(computerContract), 'pgrep', '-x', 'chromium']);
   const computerSshPort = await freePort();

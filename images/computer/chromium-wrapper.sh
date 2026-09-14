@@ -12,7 +12,8 @@ if [ -L "$keyring_password_file" ] || [ ! -f "$keyring_password_file" ] ||
   exit 78
 fi
 keyring_password=$(cat "$keyring_password_file")
-eval "$(printf "%s\n" "$keyring_password" | gnome-keyring-daemon --login)"
+eval "$(printf "%s" "$keyring_password" | gnome-keyring-daemon --login)"
+export GNOME_KEYRING_CONTROL
 eval "$(gnome-keyring-daemon --start --components=secrets)"
 unset keyring_password
 exec /usr/bin/chromium --password-store=gnome-libsecret "$@"
