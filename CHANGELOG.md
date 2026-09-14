@@ -4,27 +4,6 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
-### Changed
-
-- Release candidate construction now prints a read-only build/reuse/scan plan
-  by default and requires `--execute` for one explicit run. Schema-7 candidates
-  preserve unchanged image archives, fresh scan evidence, and OCI-efficiency
-  evidence with exact per-image input and origin provenance; stale scans no
-  longer force image rebuilds, and an all-reuse candidate skips the preliminary
-  image-context build. Candidate verification reuses hashes and OCI
-  inspections within a run, source E2E stays in the pre-freeze release check,
-  and exact npm/native acceptance runs once during candidate construction.
-- Release acceptance for schema-7 candidates begins at the frozen candidate
-  commit rather than later release-set assembly. The 0.6 initial profile uses
-  its reviewed Codex/Open WebUI representative set, and local publisher dry runs
-  no longer require the release commit to be pushed first.
-
-### Fixed
-
-- Release-impact evidence now includes deleted paths, scan freshness rejects
-  future-dated binding/database/check-bundle metadata, and release commands stop
-  after a failure instead of relying on repeated full candidate attempts.
-
 ## 0.6.0 - 2026-09-14
 
 ### Added
@@ -57,6 +36,18 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Changed
 
+- Release candidate construction now prints a read-only build/reuse/scan plan
+  by default and requires `--execute` for one explicit run. Schema-7 candidates
+  preserve unchanged image archives, fresh scan evidence, and OCI-efficiency
+  evidence with exact per-image input and origin provenance; stale scans no
+  longer force image rebuilds, and an all-reuse candidate skips the preliminary
+  image-context build. Candidate verification reuses hashes and OCI
+  inspections within a run, source E2E stays in the pre-freeze release check,
+  and exact npm/native acceptance runs once during candidate construction.
+- Release acceptance for schema-7 candidates begins at the frozen candidate
+  commit rather than later release-set assembly. The 0.6 initial profile uses
+  its reviewed Codex/Open WebUI representative set, and local publisher dry runs
+  no longer require the release commit to be pushed first.
 - State format 5 and control protocol 11 separate interactive ownership from
   observation, file work, retained tasks, services, and operator-owned SSH.
   Migration preserves IDs, homes, credentials, and explicit user policy.
@@ -91,6 +82,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Release-impact evidence now includes deleted paths, scan freshness rejects
+  future-dated binding/database/check-bundle metadata, and release commands stop
+  after a failure instead of relying on repeated full candidate attempts.
 - Persisted 0.5 authenticated-gateway evidence remains readable during the
   coordinated upgrade, while malformed and future protocol contracts still
   fail closed.
