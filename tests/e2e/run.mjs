@@ -661,6 +661,7 @@ try {
   const escapedProcesses = await call('exec_command', {
     lease: afterHumanLease,
     command: `setsid sh -c 'trap "" TERM HUP INT; while :; do sleep 60; done' >/tmp/qubicl-setsid.log 2>&1 & python3 -c 'import os,signal,time; p=os.fork(); p and os._exit(0); os.setsid(); p=os.fork(); p and os._exit(0); signal.signal(signal.SIGTERM, signal.SIG_IGN); open("/tmp/qubicl-double-fork", "w").write(str(os.getpid())); time.sleep(300)' >/tmp/qubicl-double-fork.log 2>&1 & sleep 300`,
+    lifecycle: 'session',
     yieldTimeMs: 25,
   });
   assert.equal(escapedProcesses.running, true);
