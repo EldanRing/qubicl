@@ -179,7 +179,11 @@ test('manifests omit and cannot revoke host-local gateway exposure', () => {
   };
   const manifest: QubiclManifest = {
     version: 2,
-    gateway: { port: config.gateway.port, image: structuredClone(config.gateway.image) },
+    gateway: {
+      port: config.gateway.port,
+      image: structuredClone(config.gateway.image),
+      viewerReconnectGraceSeconds: config.gateway.viewerReconnectGraceSeconds,
+    },
     defaults: structuredClone(config.defaults),
     computers: [],
   };
@@ -192,10 +196,19 @@ test('manifests omit and cannot revoke host-local gateway exposure', () => {
   const changedPort = structuredClone(manifest);
   changedPort.gateway.port += 1;
   assert.equal(reconcileManifest(config, changedPort, false).gatewayChanged, true);
+
+  const changedGrace = structuredClone(manifest);
+  changedGrace.gateway.viewerReconnectGraceSeconds = 45;
+  assert.equal(reconcileManifest(config, changedGrace, false).gatewayChanged, true);
+
+  const legacyV2 = structuredClone(manifest);
+  delete legacyV2.gateway.viewerReconnectGraceSeconds;
+  assert.equal(reconcileManifest(config, legacyV2, false).gatewayChanged, false);
 });
 
 test('manifest version 1 is accepted only through the explicit migration parser', () => {
   const fallback = defaultConfig();
+  fallback.gateway.viewerReconnectGraceSeconds = 45;
   const legacy = { version: 1, gateway: { port: 4321 }, computers: [{ name: 'old', image: 'example/custom:1', cpus: 3, memory: '5g' }] };
   const parsed = parseManifestDocument(legacy, fallback);
   assert.equal(parsed.migrated, true);
@@ -203,4 +216,5 @@ test('manifest version 1 is accepted only through the explicit migration parser'
   assert.equal(parsed.manifest.computers[0]?.preset, 'custom');
   assert.equal(parsed.manifest.computers[0]?.compatibility, 'workstation');
   assert.equal(parsed.manifest.computers[0]?.image.requested, 'example/custom:1');
+  assert.equal(parsed.manifest.gateway.viewerReconnectGraceSeconds, undefined);
 });

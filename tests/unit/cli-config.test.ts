@@ -121,12 +121,14 @@ test('manifest export omits host-local exposure and all protected TLS bytes', as
       tls: validated.metadata,
     });
     state.secrets.gateway = { tls: validated.secret };
+    state.config.gateway.viewerReconnectGraceSeconds = 45;
     await saveState(state);
 
     await exec(process.execPath, [cli, 'export', '--output', output], { env });
     const raw = await readFile(output, 'utf8');
     const manifest = YAML.parse(raw) as { gateway: Record<string, unknown> };
-    assert.deepEqual(Object.keys(manifest.gateway).sort(), ['image', 'port']);
+    assert.deepEqual(Object.keys(manifest.gateway).sort(), ['image', 'port', 'viewerReconnectGraceSeconds']);
+    assert.equal(manifest.gateway.viewerReconnectGraceSeconds, 45);
     assert.equal(manifest.gateway.exposure, undefined);
     assert.doesNotMatch(raw, /gateway\.example\.test|BEGIN (?:CERTIFICATE|PRIVATE KEY)|certificateSha256|privateKeySha256/u);
 

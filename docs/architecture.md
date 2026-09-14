@@ -89,6 +89,9 @@ without recreating them. Running changes use the existing exact gateway-replacem
 reattach only computers that were already running. Stopped and absent gateway
 state stays stopped or absent. Setup, image upgrade, and manifest apply preserve
 the host-local setting, while manifest export omits it.
+Viewer reconnect grace is portable behavior: v2 manifest export includes it,
+apply reconciles it, and older v2 manifests that omit it preserve the current
+local value.
 
 `web_search` and `web_extract` are ordinary lease-fenced tools. The first provider implementations are `ddgs` and `local`; their stable public schemas do not expose provider-specific responses. Direct extraction validates public DNS answers locally in developer mode or delegates that validation to the authenticated gateway egress service on private restricted networks; every redirect is revalidated, time, redirect, download, and decompressed-byte budgets are bounded, and supported content is parsed locally. HTML extraction then runs Trafilatura, readability-lxml only when the primary result is not meaningful, and finally a bounded structural heuristic over the same fetched bytes. Non-HTML handlers remain direct. Browser rendering reuses the computer's Chromium only for the established render modes and sparse/JavaScript signals, validates each HTTP(S) request, blocks non-public destinations, waits within a fixed content-stability budget, and sends at most 1.5 MB of sanitized rendered DOM through a localhost-authenticated route. The same Trafilatura/readability pipeline handles that DOM and may recover bounded high-signal JSON-LD, microdata, price attributes, and accessible market labels. It does not create another browser stack or expose page credentials, cookies, response headers, or arbitrary network responses. Tool policy, transport profile, network policy, and audit behavior are unchanged.
 

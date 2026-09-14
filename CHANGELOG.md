@@ -107,8 +107,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   leave an interactive shell waiting indefinitely.
 - Audit events are validated and bounded before persistence, and centralized
   rotation no longer depends on renaming a file bind-mounted into computers.
-- Configuration can change the viewer reconnect grace and safely rebuild or
-  reconnect the gateway only when that behavior actually changes.
+- Configuration and portable manifests can change the viewer reconnect grace
+  and safely rebuild or reconnect the gateway only when that behavior actually
+  changes. Older v2 manifests preserve the current grace when the field is absent.
 - Observation-only browser calls no longer attempt to validate a missing
   interactive lease, Open Terminal sessions sharing one client credential no
   longer compete for separate compatibility leases, and protocol-10 computers

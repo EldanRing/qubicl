@@ -1393,7 +1393,11 @@ async function exportManifest(output: string): Promise<void> {
   const state = await loadState();
   const manifest: QubiclManifest = {
     version: 2,
-    gateway: { port: state.config.gateway.port, image: state.config.gateway.image },
+    gateway: {
+      port: state.config.gateway.port,
+      image: state.config.gateway.image,
+      viewerReconnectGraceSeconds: state.config.gateway.viewerReconnectGraceSeconds,
+    },
     defaults: state.config.defaults,
     computers: state.config.computers.map(({ name, preset, compatibility, image, capabilityContractVersion, capabilities, cpus, memory }) => ({
       name, preset, compatibility, image, capabilityContractVersion, capabilities, cpus, memory,
@@ -1418,7 +1422,7 @@ async function applyManifest(path: string, dryRun: boolean, prune: boolean): Pro
     const localExposure = state.config.gateway.exposure;
     const targetGateway = {
       ...structuredClone(manifest.gateway),
-      viewerReconnectGraceSeconds: state.config.gateway.viewerReconnectGraceSeconds,
+      viewerReconnectGraceSeconds: manifest.gateway.viewerReconnectGraceSeconds ?? state.config.gateway.viewerReconnectGraceSeconds,
       ...(localExposure ? { exposure: structuredClone(localExposure) } : {}),
     };
     if (reconciliation.gatewayChanged && state.config.gateway.port !== manifest.gateway.port) {

@@ -226,11 +226,16 @@ const manifestGatewayFields = {
   image: ImageIdentitySchema.omit({ manifestSha256: true }),
 };
 
-export const ManifestGatewayConfigSchema = z.strictObject(manifestGatewayFields);
+const viewerReconnectGraceSecondsSchema = z.number().int().min(5).max(300);
+
+export const ManifestGatewayConfigSchema = z.strictObject({
+  ...manifestGatewayFields,
+  viewerReconnectGraceSeconds: viewerReconnectGraceSecondsSchema.optional(),
+});
 
 export const GatewayConfigSchema = z.strictObject({
   ...manifestGatewayFields,
-  viewerReconnectGraceSeconds: z.number().int().min(5).max(300).default(10),
+  viewerReconnectGraceSeconds: viewerReconnectGraceSecondsSchema.default(10),
   exposure: GatewayExposureConfigSchema.optional(),
 }).superRefine((value, context) => {
   if (value.exposure?.port === value.port) {
@@ -1019,11 +1024,19 @@ export function reconcileManifest(config: QubiclConfig, manifest: QubiclManifest
     return JSON.stringify(comparable(current)) !== JSON.stringify(comparable(declared));
   });
   const trashes = prune ? config.computers.filter(({ name }) => !names.has(name)) : [];
+  const declaredGateway = {
+    ...manifest.gateway,
+    viewerReconnectGraceSeconds: manifest.gateway.viewerReconnectGraceSeconds ?? config.gateway.viewerReconnectGraceSeconds,
+  };
   return {
     creates,
     updates,
     trashes,
-    gatewayChanged: JSON.stringify({ port: config.gateway.port, image: config.gateway.image }) !== JSON.stringify(manifest.gateway),
+    gatewayChanged: JSON.stringify({
+      port: config.gateway.port,
+      image: config.gateway.image,
+      viewerReconnectGraceSeconds: config.gateway.viewerReconnectGraceSeconds,
+    }) !== JSON.stringify(declaredGateway),
     defaultsChanged: JSON.stringify(config.defaults) !== JSON.stringify(manifest.defaults),
   };
 }
