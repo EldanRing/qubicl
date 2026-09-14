@@ -13,7 +13,7 @@ LABEL org.opencontainers.image.title="Qubicl gateway" \
       org.opencontainers.image.version="$QUBICL_VERSION" \
       org.opencontainers.image.revision="$QUBICL_REVISION" \
       org.opencontainers.image.created="$QUBICL_CREATED" \
-      dev.qubicl.gateway-protocol-version="2" \
+      dev.qubicl.gateway-protocol-version="3" \
       dev.qubicl.gateway-exposure="direct-tls-v1" \
       dev.qubicl.viewer-authentication="header-v1"
 

@@ -117,6 +117,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   storage, network-CIDR, import-root, credential-template, and viewer-grace
   values. Storage reports include current and legacy audit paths, and network
   explanations evaluate literal IPv4 and IPv6 CIDR matches.
+- The gateway image advertises protocol 3 consistently with its runtime health
+  and viewer-routing contract, so source and packaged artifact acceptance no
+  longer reject the 0.6 image as a legacy gateway.
 
 ### Security
 

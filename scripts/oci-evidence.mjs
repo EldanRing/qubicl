@@ -149,7 +149,7 @@ export async function inspectOciArchive(archive, {
         } else {
           const qubiclLabels = Object.fromEntries(Object.entries(labels).filter(([name]) => name.startsWith('dev.qubicl.')));
           assert(canonicalJson(qubiclLabels) === canonicalJson({
-            'dev.qubicl.gateway-protocol-version': '2',
+            'dev.qubicl.gateway-protocol-version': '3',
             'dev.qubicl.gateway-exposure': 'direct-tls-v1',
             'dev.qubicl.viewer-authentication': 'header-v1',
           }), `${archive} ${platform} gateway has the wrong authenticated-viewer contract labels.`);

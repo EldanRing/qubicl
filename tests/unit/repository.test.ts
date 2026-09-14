@@ -205,6 +205,9 @@ test('container bases are pinned by digest', async () => {
   const gateway = await readFile(join(root, 'images/gateway/Dockerfile'), 'utf8');
   assert.match(gateway, /apk upgrade --no-cache libcrypto3 libssl3/);
   assert.match(gateway, /\/usr\/local\/lib\/node_modules\/npm/);
+  assert.match(gateway, /dev\.qubicl\.gateway-protocol-version="3"/);
+  const ociEvidence = await readFile(join(root, 'scripts/oci-evidence.mjs'), 'utf8');
+  assert.match(ociEvidence, /'dev\.qubicl\.gateway-protocol-version': '3'/);
 
   const computer = await readFile(join(root, 'images/computer/Dockerfile'), 'utf8');
   assert.match(computer, /apt-get upgrade -y/);
