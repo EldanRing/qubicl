@@ -296,7 +296,19 @@ try {
     yieldTimeMs: 1_000,
   });
   assert.equal(computerBrowserServer.running, true);
-  const computerNavigation = await computerCall('browser_navigate', { lease: computerLease, url: `http://${computerExecutorRuntime(computerContract)}:8765/computer-browser.html` });
+  await waitFor(async () => {
+    const ports = await computerCall('list_ports', { lease: computerLease });
+    return ports.ports.some(({ port }) => port === 8765);
+  }, 10_000);
+  const computerBrowserUrl = `http://${computerExecutorRuntime(computerContract)}:8765/computer-browser.html`;
+  await waitFor(async () => {
+    await exec('docker', [
+      'exec', computerSessionRuntime(computerContract), 'node', '--input-type=module', '--eval',
+      `const response=await fetch(${JSON.stringify(computerBrowserUrl)});if(!response.ok)process.exit(1)`,
+    ]);
+    return true;
+  }, 10_000);
+  const computerNavigation = await computerCall('browser_navigate', { lease: computerLease, url: computerBrowserUrl });
   assert.equal(computerNavigation.title, 'Qubicl computer browser');
   await computerCall('release_lease', { lease: computerLease });
   await exec('docker', ['exec', computerSessionRuntime(computerContract), 'pgrep', '-x', 'chromium']);
