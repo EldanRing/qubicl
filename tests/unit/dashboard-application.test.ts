@@ -5,7 +5,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { presetDefaults } from '../../packages/core/dist/index.js';
-import { ManagementApplication, managementInterruptionRequired, managementPreviewUrl, validateManagementRequest, type ManagementBackend, type ManagementTimer, type ManagementTiming } from '../../packages/cli/dist/dashboard/application.js';
+import { ManagementApplication, managementComputerStatus, managementInterruptionRequired, managementPreviewUrl, validateManagementRequest, type ManagementBackend, type ManagementTimer, type ManagementTiming } from '../../packages/cli/dist/dashboard/application.js';
 import { initializeState, newSecret, saveState, statePaths } from '../../packages/cli/dist/state.js';
 
 async function fixture(backend: Partial<ManagementBackend> = {}, timing?: ManagementTiming) {
@@ -43,6 +43,17 @@ function manualTiming(start = Date.parse('2026-09-08T00:00:00.000Z')): Managemen
     unrefCount: () => scheduled.filter(({ unreferenced }) => unreferenced).length,
   };
 }
+
+test('headless computer status omits absent browser data from dashboard responses', () => {
+  const status = managementComputerStatus({
+    controller: { kind: 'none', generation: 0 },
+    managedProcesses: 0,
+    activePreviews: 0,
+  });
+  assert.equal(Object.hasOwn(status, 'browser'), false);
+  assert.deepEqual(JSON.parse(JSON.stringify(status)), status);
+  assert.deepEqual(managementComputerStatus({}), { resources: {} });
+});
 async function finished(app: ManagementApplication, id: string) {
   for (let attempts = 0; attempts < 100; attempts++) {
     const job = await app.operation(id);

@@ -468,7 +468,7 @@ export class HostManagementBackend implements ManagementBackend {
       const computers: ManagementComputer[] = state ? await mapBounded(state.config.computers, 4, async (computer) => {
         const runtime = host.available ? await managedComputerRuntimeObservation(state!, computer).catch(() => ({ status: 'unknown' })) : { status: 'unknown' };
         const status = runtime.status === 'running' ? await this.operator(state!, computer.id, '/status', 'GET').catch(() => undefined) as { controller?: unknown; managedProcesses?: number; activePreviews?: number; browser?: unknown } | undefined : undefined;
-        return { id: computer.id, name: computer.name, preset: computer.preset, status: runtime.status, ...('health' in runtime && typeof runtime.health === 'string' ? { health: runtime.health } : {}), ...(status ? { controller: status.controller, resources: { managedProcesses: status.managedProcesses, activePreviews: status.activePreviews }, browser: status.browser } : {}), cpus: computer.cpus, memory: computer.memory, image: computer.image, capabilities: computer.capabilities, tools: computer.toolPolicy ?? toolsForCapabilities(computer.capabilities), skills: computer.skillPolicy?.enabledCatalogSkills ?? [], network: computer.network ?? { profile: 'developer' }, clients: await dashboardClientCredentials(state!, computer.id, computer.createdAt) };
+        return { id: computer.id, name: computer.name, preset: computer.preset, status: runtime.status, ...('health' in runtime && typeof runtime.health === 'string' ? { health: runtime.health } : {}), ...(status ? managementComputerStatus(status) : {}), cpus: computer.cpus, memory: computer.memory, image: computer.image, capabilities: computer.capabilities, tools: computer.toolPolicy ?? toolsForCapabilities(computer.capabilities), skills: computer.skillPolicy?.enabledCatalogSkills ?? [], network: computer.network ?? { profile: 'developer' }, clients: await dashboardClientCredentials(state!, computer.id, computer.createdAt) };
       }) : [];
       const snapshot: ManagementSnapshot = {
         protocolVersion: 1, initialized: Boolean(state), migrationRequired: ['legacy', 'migration-pending'].includes(format.status),
@@ -655,6 +655,21 @@ export class HostManagementBackend implements ManagementBackend {
     if (!response.ok) throw new ManagementError('runtime_management_unavailable', 'Upgrade this computer runtime to enable management observation.', 409);
     return boundedJson(response, 262144);
   }
+}
+
+export function managementComputerStatus(status: { controller?: unknown; managedProcesses?: number; activePreviews?: number; browser?: unknown }): {
+  controller?: unknown;
+  resources: { managedProcesses?: number; activePreviews?: number };
+  browser?: unknown;
+} {
+  return {
+    ...(status.controller === undefined ? {} : { controller: status.controller }),
+    resources: {
+      ...(status.managedProcesses === undefined ? {} : { managedProcesses: status.managedProcesses }),
+      ...(status.activePreviews === undefined ? {} : { activePreviews: status.activePreviews }),
+    },
+    ...(status.browser === undefined ? {} : { browser: status.browser }),
+  };
 }
 
 async function boundedJson(response: Response, limit: number): Promise<unknown> {
