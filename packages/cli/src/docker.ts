@@ -325,6 +325,30 @@ interface RuntimeComposeDocument {
   networks?: Record<string, { name?: string }>;
 }
 
+async function preMigrationRuntimeCompose(state: LoadedState): Promise<RuntimeComposeDocument | undefined> {
+  let contents: string;
+  try {
+    const info = await lstat(state.paths.runtimeNamespacePending);
+    if (!info.isFile()) throw new Error(`${state.paths.runtimeNamespacePending} exists but is not a regular file.`);
+    if ((info.mode & 0o777) !== 0o600) throw new Error(`${state.paths.runtimeNamespacePending} must have mode 0600.`);
+    contents = await readFile(state.paths.runtimeNamespacePending, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  const marker = JSON.parse(contents) as Record<string, unknown>;
+  if (marker.installationId !== state.config.installationId) {
+    throw new Error('Runtime namespace migration marker belongs to another Qubicl installation.');
+  }
+  if (marker.version === 1) return undefined;
+  if (marker.version !== 2 || (marker.sourceCompose !== undefined && typeof marker.sourceCompose !== 'string')) {
+    throw new Error('Runtime namespace migration marker is invalid.');
+  }
+  return marker.sourceCompose === undefined
+    ? undefined
+    : YAML.parse(marker.sourceCompose) as RuntimeComposeDocument;
+}
+
 function runtimeComposeNeedsMigration(state: LoadedState, document: RuntimeComposeDocument | null): boolean {
   if (document?.name !== projectName(state.config.installationId, state.paths.root)) return true;
   if (document.services?.gateway?.container_name !== gatewayContainerName(state.config.installationId, state.paths.root)) return true;
@@ -402,7 +426,8 @@ function composeComputerService(
 async function captureNamedRuntime(state: LoadedState, adapter: LegacyRuntimeMigrationAdapter): Promise<NamedRuntimeMigration | undefined> {
   let document: RuntimeComposeDocument;
   try {
-    document = YAML.parse(await readFile(state.paths.compose, 'utf8')) as RuntimeComposeDocument;
+    document = await preMigrationRuntimeCompose(state)
+      ?? YAML.parse(await readFile(state.paths.compose, 'utf8')) as RuntimeComposeDocument;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw error;

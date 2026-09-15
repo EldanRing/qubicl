@@ -54,10 +54,10 @@ test('version-1 state migrates durably after every interruption boundary', async
       assert.equal((await inspectStateFormat(paths)).status, 'current');
       await assert.rejects(stat(paths.migration), { code: 'ENOENT' });
       assert.equal((await stat(paths.runtimeNamespacePending)).mode & 0o777, 0o600);
-      assert.deepEqual(JSON.parse(await readFile(paths.runtimeNamespacePending, 'utf8')), {
-        version: 1,
-        installationId: state.config.installationId,
-      });
+      const runtimeMarker = JSON.parse(await readFile(paths.runtimeNamespacePending, 'utf8'));
+      assert.equal(runtimeMarker.version, 2);
+      assert.equal(runtimeMarker.installationId, state.config.installationId);
+      assert.ok(runtimeMarker.sourceCompose === undefined || typeof runtimeMarker.sourceCompose === 'string');
 
       const backups = await readdir(paths.backups);
       assert.ok(backups.length >= 1);

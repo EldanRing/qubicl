@@ -498,7 +498,7 @@ test('the primary installation namespaces its Docker group and keeps a stable re
   }
 });
 
-test('a 0.5 primary runtime with global Docker names migrates to its installation namespace without changing durable state', async () => {
+test('a 0.5 runtime captured before state migration moves to its installation namespace', async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'qubicl-runtime-friendly-migration-'));
   try {
     const source = await initializeState(statePaths(temporaryRoot));
@@ -523,7 +523,14 @@ test('a 0.5 primary runtime with global Docker names migrates to its installatio
     legacy.services[computer.name] = legacy.services[serviceName(computer.id)]!;
     delete legacy.services[serviceName(computer.id)];
     legacy.services[computer.name]!.container_name = computer.name;
-    await writeFile(source.paths.compose, YAML.stringify(legacy), { mode: 0o600 });
+    const sourceCompose = YAML.stringify(legacy);
+    delete computer.runtimeName;
+    await writeFile(source.paths.runtimeNamespacePending, `${JSON.stringify({
+      version: 2,
+      installationId: source.config.installationId,
+      sourceCompose,
+    })}\n`, { mode: 0o600 });
+    await renderRuntime(source);
     const sourceGateway = 'gateway';
     const sourceComputer = computer.name;
     const inspections = new Map<string, RuntimeInspection>([
@@ -555,7 +562,6 @@ test('a 0.5 primary runtime with global Docker names migrates to its installatio
     };
 
     assert.equal(await prepareRuntimeMigration(source, adapter), true);
-    await renderRuntime(source);
     assert.equal(await migrateLegacyRuntime(source, adapter), true);
 
     assert.ok(dockerCalls.some((args) => args.join(' ') === `rm --force ${sourceComputer}`));
@@ -567,7 +573,10 @@ test('a 0.5 primary runtime with global Docker names migrates to its installatio
     const document = YAML.parse(await readFile(source.paths.compose, 'utf8')) as { name: string; services: Record<string, { container_name: string }> };
     assert.equal(document.name, projectName(source.config.installationId, source.paths.root));
     assert.equal(document.services.gateway?.container_name, gatewayContainerName(source.config.installationId, source.paths.root));
-    assert.equal(document.services[serviceName(computer.id)]?.container_name, computer.runtimeName);
+    assert.equal(
+      document.services[serviceName(computer.id)]?.container_name,
+      containerName(source.config.installationId, computer.id, undefined, source.paths.root),
+    );
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }

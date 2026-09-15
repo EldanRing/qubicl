@@ -82,6 +82,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- State migration retains the exact pre-migration Compose topology until Docker
+  resource names have been moved, so a running 0.5 computer no longer leaves
+  0.6 setup stuck in recoverable but inconsistent runtime state.
 - Artifact acceptance now gives its outer harness ownership of one explicit
   Docker Desktop-mountable temporary Qubicl home, removes the exact Compose
   project after success or failure, removes its temporary image namespace,

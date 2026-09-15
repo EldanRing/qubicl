@@ -207,11 +207,43 @@ export async function recoverStateMigration(paths: StatePaths, options: StateMig
   await migrateStoredMetadata(paths, migration);
   await checkpoint('metadata-written', migration, options);
   await prepareStateDirectories(paths);
-  await atomicWrite(paths.runtimeNamespacePending, `${JSON.stringify({ version: 1, installationId: migration.config.installationId })}\n`, 0o600);
+  await writeRuntimeNamespaceMarker(paths, migration.config.installationId);
   await renderRuntime({ paths, config: migration.config, secrets: migration.secrets });
   await checkpoint('runtime-rendered', migration, options);
   await durableRemove(paths.migration);
   return true;
+}
+
+async function writeRuntimeNamespaceMarker(paths: StatePaths, installationId: string): Promise<void> {
+  try {
+    const info = await lstat(paths.runtimeNamespacePending);
+    if (!info.isFile()) throw new Error(`${paths.runtimeNamespacePending} exists but is not a regular file.`);
+    if ((info.mode & 0o777) !== 0o600) throw new Error(`${paths.runtimeNamespacePending} must have mode 0600.`);
+    const existing = JSON.parse(await readFile(paths.runtimeNamespacePending, 'utf8')) as Record<string, unknown>;
+    if (![1, 2].includes(existing.version as number) || existing.installationId !== installationId) {
+      throw new Error('Runtime namespace migration marker is invalid or belongs to another Qubicl installation.');
+    }
+    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  const sourceCompose = await readExistingRuntimeCompose(paths);
+  await atomicWrite(paths.runtimeNamespacePending, `${JSON.stringify({
+    version: 2,
+    installationId,
+    ...(sourceCompose === undefined ? {} : { sourceCompose }),
+  })}\n`, 0o600);
+}
+
+async function readExistingRuntimeCompose(paths: StatePaths): Promise<string | undefined> {
+  try {
+    const info = await lstat(paths.compose);
+    if (!info.isFile()) throw new Error(`${paths.compose} exists but is not a regular file.`);
+    return readFile(paths.compose, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
 }
 
 export async function writeUpgradeBackup(paths: StatePaths, options: UpgradeBackupOptions): Promise<string> {
