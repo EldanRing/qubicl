@@ -5,7 +5,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { presetDefaults } from '../../packages/core/dist/index.js';
-import { ManagementApplication, managementComputerStatus, managementInterruptionRequired, managementPreviewUrl, validateManagementRequest, type ManagementBackend, type ManagementTimer, type ManagementTiming } from '../../packages/cli/dist/dashboard/application.js';
+import { ManagementApplication, managementClientScopeSummary, managementComputerStatus, managementInterruptionRequired, managementPreviewUrl, validateManagementRequest, type ManagementBackend, type ManagementTimer, type ManagementTiming } from '../../packages/cli/dist/dashboard/application.js';
 import { initializeState, newSecret, saveState, statePaths } from '../../packages/cli/dist/state.js';
 
 async function fixture(backend: Partial<ManagementBackend> = {}, timing?: ManagementTiming) {
@@ -53,6 +53,11 @@ test('headless computer status omits absent browser data from dashboard response
   assert.equal(Object.hasOwn(status, 'browser'), false);
   assert.deepEqual(JSON.parse(JSON.stringify(status)), status);
   assert.deepEqual(managementComputerStatus({}), { resources: {} });
+});
+
+test('management descriptions tolerate fields belonging only to other operations', () => {
+  assert.equal(managementClientScopeSummary(undefined), 'none');
+  assert.equal(managementClientScopeSummary(['observe', 'files']), 'observe, files');
 });
 async function finished(app: ManagementApplication, id: string) {
   for (let attempts = 0; attempts < 100; attempts++) {

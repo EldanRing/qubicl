@@ -85,6 +85,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 - Dashboard fleet snapshots omit unavailable browser metadata for headless
   computers, so mixed graphical and file-system fleets no longer fail the
   authenticated dashboard with an internal error.
+- Dashboard plan descriptions tolerate fields that belong only to other
+  operations, so reviewing computer creation and lifecycle changes no longer
+  fails while formatting an unrelated client-credential description.
 - State migration retains the exact pre-migration Compose topology until Docker
   resource names have been moved, so a running 0.5 computer no longer leaves
   0.6 setup stuck in recoverable but inconsistent runtime state.

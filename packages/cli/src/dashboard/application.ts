@@ -575,7 +575,7 @@ export class HostManagementBackend implements ManagementBackend {
         'credential.add': `Add scoped credential ${input.id} for ${input.baseUrl}${input.pathPrefix ?? '/'}; permitted methods ${(input.methods as string[] | undefined)?.join(', ') ?? 'GET'}.`,
         'credential.replace': `Replace scoped credential ${input.id} and its permitted destination/methods.`,
         'credential.remove': `Remove scoped credential ${input.id}.`,
-        'client.create': `Create client credential ${input.id} (${input.label}) with scopes ${(input.scopes as string[]).join(', ')}. The bearer is delivered once to this browser after success.`,
+        'client.create': `Create client credential ${input.id} (${input.label}) with scopes ${managementClientScopeSummary(input.scopes)}. The bearer is delivered once to this browser after success.`,
         'client.rotate': `Rotate only client credential ${input.id}; other clients remain connected.`,
         'client.revoke': `Revoke only client credential ${input.id}; other clients remain connected.`,
         'token.rotate': 'Replace this computer’s client token; reconnect clients with newly generated configuration from the host CLI.',
@@ -670,6 +670,11 @@ export function managementComputerStatus(status: { controller?: unknown; managed
     },
     ...(status.browser === undefined ? {} : { browser: status.browser }),
   };
+}
+
+export function managementClientScopeSummary(value: unknown): string {
+  if (!Array.isArray(value) || value.some((scope) => typeof scope !== 'string')) return 'none';
+  return value.join(', ') || 'none';
 }
 
 async function boundedJson(response: Response, limit: number): Promise<unknown> {
