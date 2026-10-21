@@ -10,6 +10,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 - Update the pinned Node.js 22 runtime for local development and all base
   images to 22.23.4 for the October 2026 security fixes.
+- Update the locked MCP client, server, and core SDK packages to 2.3.1 and
+  Hono to 4.13.13 to address dependency security advisories.
 
 ## 0.6.0 - 2026-09-14
 
