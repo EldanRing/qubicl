@@ -1,4 +1,4 @@
-FROM node:22-trixie-slim@sha256:db8a96a63e5264607ada2d206758876ebbed6a12be2ada7517793cbfb0c2a29c AS filesystem-base
+FROM node:22.23.4-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf AS filesystem-base
 
 ARG QUBICL_VERSION=development
 ARG QUBICL_REVISION=unknown

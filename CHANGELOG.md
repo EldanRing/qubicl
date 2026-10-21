@@ -4,6 +4,13 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
+## 0.6.1 - 2026-10-21
+
+### Security
+
+- Update the pinned Node.js 22 runtime for local development and all base
+  images to 22.23.4 for the October 2026 security fixes.
+
 ## 0.6.0 - 2026-09-14
 
 ### Added

@@ -119,7 +119,7 @@ test('dashboard static server exposes only manifest assets through GET and HEAD'
 
 test('dashboard image is an unprivileged static-only runtime', async () => {
   const dockerfile = await readFile(join(repositoryRoot, 'images/dashboard/Dockerfile'), 'utf8');
-  assert.match(dockerfile, /^FROM node:22-alpine@sha256:[a-f0-9]{64}$/m);
+  assert.match(dockerfile, /^FROM node:22\.23\.4-alpine@sha256:[a-f0-9]{64}$/m);
   assert.match(dockerfile, /^USER node$/m);
   assert.match(dockerfile, /^COPY --chown=node:node server\.mjs asset-manifest\.json \/app\/$/m);
   assert.match(dockerfile, /^ARG QUBICL_ASSET_MANIFEST_SHA256=unknown$/m);
