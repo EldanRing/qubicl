@@ -30,6 +30,7 @@ import { inspectOciArchive } from './oci-evidence.mjs';
 import { createOciPlatformView } from './oci-platform-view.mjs';
 import { requiresReleaseImpact, verifyReleaseImpactDocument } from './release-impact.mjs';
 import { createReleasePlan } from './release-plan.mjs';
+import { inspectFailedCandidateDonor } from './candidate-failed-donor.mjs';
 import { IMAGE_INPUTS_NAME } from './release-inputs.mjs';
 import { writeReleasePresetManifests } from './release-preset-manifests.mjs';
 
@@ -46,6 +47,8 @@ Build unpublished release candidates entirely on the current host.
   --plan              Print the plan without constructing artifacts
   --reuse DIRECTORY   Reuse unchanged images and fresh scans from a prior
                       candidate of this release version
+  --reuse-failed DIR  Recover verified image/scan bytes from failed staging;
+                      build fresh CLI artifacts and rerun acceptance
   --binary-only       Build only the native archive for this host
   --preview           Build an explicitly unsupported prerelease candidate whose
                       unfixed HIGH/CRITICAL findings are retained, not approved
@@ -66,7 +69,8 @@ Binary-only and --skip-images builds require --catalog. Nothing is uploaded.`);
 }
 
 assert(!(options.execute && options.plan), '--execute and --plan are mutually exclusive.');
-assert(!options.reuse || (!options.binaryOnly && !options.skipImages && !options.skipScan && !options.catalog),
+assert(!(options.reuse && options.reuseFailed), '--reuse and --reuse-failed are mutually exclusive.');
+assert(!(options.reuse || options.reuseFailed) || (!options.binaryOnly && !options.skipImages && !options.skipScan && !options.catalog),
   '--reuse applies only to a complete scanned image candidate.');
 assert(!options.binaryOnly && !options.skipImages || options.catalog,
   '--binary-only and --skip-images require --catalog PATH.');
@@ -74,7 +78,7 @@ assert(options.binaryOnly || options.skipImages || !options.catalog,
   '--catalog cannot be combined with a build that generates image candidates.');
 
 if (!options.execute || options.plan) {
-  const plan = await createReleasePlan(root, { reuse: options.reuse });
+  const plan = await createReleasePlan(root, { reuse: options.reuse, reuseFailed: options.reuseFailed });
   const planningWorkspace = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   const planningRevision = await capture('git', ['rev-parse', 'HEAD']);
   const planningTier = options.preview ? 'preview' : options.initial ? 'initial' : 'supported';
@@ -113,9 +117,10 @@ assert(!(options.preview && options.initial), '--preview and --initial are mutua
 const releaseTier = options.preview ? 'preview' : options.initial ? 'initial' : 'supported';
 const buildImages = !binaryOnly && !options.skipImages;
 const scanImages = buildImages && !options.skipScan;
-assert(!options.reuse || (buildImages && scanImages), '--reuse requires a complete scanned candidate.');
-const buildPlan = buildImages ? await createReleasePlan(root, { reuse: options.reuse }) : undefined;
-const refreshScans = scanImages && (!options.reuse || buildPlan.scanImages.length > 0);
+assert(!(options.reuse || options.reuseFailed) || (buildImages && scanImages), '--reuse requires a complete scanned candidate.');
+const buildPlan = buildImages ? await createReleasePlan(root, { reuse: options.reuse, reuseFailed: options.reuseFailed }) : undefined;
+const reuseSource = options.reuse ?? options.reuseFailed;
+const refreshScans = scanImages && (!reuseSource || buildPlan.scanImages.length > 0);
 console.log(JSON.stringify({ stage: 'execution-plan', plan: buildPlan }, null, 2));
 const supportedTargets = new Set(['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64']);
 const target = `${process.platform}-${process.arch}`;
@@ -199,7 +204,9 @@ try {
   let imageInputsPath;
   const donor = options.reuse
     ? JSON.parse(await readFile(join(options.reuse, 'candidate.json'), 'utf8'))
-    : undefined;
+    : options.reuseFailed
+      ? (await inspectFailedCandidateDonor(root, options.reuseFailed, { version, revision })).baseline
+      : undefined;
 
   if (buildImages) {
     if (donor) {
@@ -209,7 +216,7 @@ try {
     let dashboardAssetManifestSha256;
     let donorCatalogPath;
     if (buildPlan.buildImages.length === 0) {
-      donorCatalogPath = join(options.reuse, donor.imageCatalog.name);
+      donorCatalogPath = join(reuseSource, donor.imageCatalog.name);
       assert(await sha256(donorCatalogPath) === donor.imageCatalog.sha256,
         'Reusable image catalog does not match its candidate manifest.');
       dashboardAssetManifestSha256 = JSON.parse(await readFile(donorCatalogPath, 'utf8')).dashboard?.assetManifestSha256;
@@ -224,7 +231,7 @@ try {
     console.log(`Applying image plan with at most ${LOCAL_CANDIDATE_CONCURRENCY} concurrent builds.`);
     for (const spec of imageSpecs.filter(({ name }) => buildPlan.images[name].action === 'reuse')) {
       const name = `qubicl-${spec.name}.oci.tar`;
-      await copyFile(join(options.reuse, name), join(staging, name));
+      await copyFile(join(reuseSource, name), join(staging, name));
       assert(await stagedSha256(join(staging, name)) === donor.artifacts.find((artifact) => artifact.name === name)?.sha256,
         `Reused archive ${name} changed while it was copied.`);
     }
@@ -240,7 +247,7 @@ try {
     await writeFile(imageInputsPath, `${JSON.stringify(imageInputs, null, 2)}\n`, { mode: 0o644 });
     if (scanImages && !refreshScans) {
       for (const name of ['trivy-bindings.json', ...IMAGE_NAMES.flatMap((image) => PLATFORMS.map((platform) => `trivy-${image}-${platform.replace('/', '-')}.json`))]) {
-        await copyFile(join(options.reuse, name), join(staging, name));
+        await copyFile(join(reuseSource, name), join(staging, name));
         assert(await stagedSha256(join(staging, name)) === donor.artifacts.find((artifact) => artifact.name === name)?.sha256,
           `Reused scan evidence ${name} changed while it was copied.`);
       }
@@ -253,7 +260,7 @@ try {
     if (requiresClientConformance(version)) {
       const reportPath = join(staging, OCI_EFFICIENCY_REPORT_NAME);
       if (donor && buildPlan.buildImages.length === 0) {
-        await copyFile(join(options.reuse, OCI_EFFICIENCY_REPORT_NAME), reportPath);
+        await copyFile(join(reuseSource, OCI_EFFICIENCY_REPORT_NAME), reportPath);
         assert(await stagedSha256(reportPath) === donor.artifacts.find((artifact) => artifact.name === OCI_EFFICIENCY_REPORT_NAME)?.sha256,
           `Reused ${OCI_EFFICIENCY_REPORT_NAME} changed while it was copied.`);
       } else {
@@ -664,6 +671,8 @@ async function buildInIsolatedSource(args) {
   if (catalogIndex >= 0) childArgs[catalogIndex + 1] = options.catalog;
   const reuseIndex = childArgs.indexOf('--reuse');
   if (reuseIndex >= 0) childArgs[reuseIndex + 1] = options.reuse;
+  const failedIndex = childArgs.indexOf('--reuse-failed');
+  if (failedIndex >= 0) childArgs[failedIndex + 1] = options.reuseFailed;
   const impactIndex = childArgs.indexOf('--impact');
   if (impactIndex >= 0) childArgs[impactIndex + 1] = options.impact;
   const status = await capture('git', ['status', '--porcelain']);
@@ -728,7 +737,7 @@ async function buildInIsolatedSource(args) {
 }
 
 function parseOptions(args) {
-  const parsed = { execute: false, plan: false, reuse: undefined, binaryOnly: false, preview: false, initial: false, skipImages: false, skipScan: false, help: false, catalog: undefined, impact: undefined };
+  const parsed = { execute: false, plan: false, reuse: undefined, reuseFailed: undefined, binaryOnly: false, preview: false, initial: false, skipImages: false, skipScan: false, help: false, catalog: undefined, impact: undefined };
   for (let index = 0; index < args.length; index += 1) {
     const option = args[index];
     if (option === '--execute') parsed.execute = true;
@@ -736,6 +745,10 @@ function parseOptions(args) {
     else if (option === '--reuse') {
       assert(args[index + 1] && !args[index + 1].startsWith('--'), '--reuse requires a directory.');
       parsed.reuse = resolve(args[++index]);
+    }
+    else if (option === '--reuse-failed') {
+      assert(args[index + 1] && !args[index + 1].startsWith('--'), '--reuse-failed requires a directory.');
+      parsed.reuseFailed = resolve(args[++index]);
     }
     else if (option === '--binary-only') parsed.binaryOnly = true;
     else if (option === '--preview') parsed.preview = true;

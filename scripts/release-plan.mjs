@@ -5,10 +5,12 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { assertTrivyScannerIdentity, normalizeRepository, REQUIRED_TRIVY_VERSION } from './candidate-evidence.mjs';
+import { inspectFailedCandidateDonor } from './candidate-failed-donor.mjs';
 import { imageInputIdentities, IMAGE_INPUTS_NAME, RELEASE_IMAGES, selectImageActions, verifyImageInputs } from './release-inputs.mjs';
 
 const exec = promisify(execFile);
-export async function createReleasePlan(root, { reuse, now = new Date().toISOString() } = {}) {
+export async function createReleasePlan(root, { reuse, reuseFailed, now = new Date().toISOString() } = {}) {
+  if (reuse && reuseFailed) throw new Error('Choose --reuse or --reuse-failed, not both.');
   const git = async (...args) => (await exec('git', args, { cwd: root })).stdout.trim();
   const revision = await git('rev-parse', 'HEAD');
   const workspace = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
@@ -19,9 +21,12 @@ export async function createReleasePlan(root, { reuse, now = new Date().toISOStr
   let baseline;
   let scansFresh = false;
   let scanReason = 'no reusable scan reports';
-  if (reuse) {
-    const directory = resolve(reuse);
-    baseline = JSON.parse(await readFile(join(directory, 'candidate.json'), 'utf8'));
+  if (reuse || reuseFailed) {
+    const directory = resolve(reuse ?? reuseFailed);
+    const failedDonor = reuseFailed
+      ? await inspectFailedCandidateDonor(root, directory, { version, revision, now })
+      : undefined;
+    baseline = failedDonor?.baseline ?? JSON.parse(await readFile(join(directory, 'candidate.json'), 'utf8'));
     if (!/^[a-f0-9]{40}$/u.test(baseline.revision ?? '') || baseline.version !== version) throw new Error('--reuse requires a candidate from the same release version.');
     const repository = typeof workspace.repository === 'string' ? workspace.repository : workspace.repository?.url;
     if (baseline.source !== normalizeRepository(repository)) throw new Error('--reuse requires a candidate from the same source repository.');
@@ -36,7 +41,9 @@ export async function createReleasePlan(root, { reuse, now = new Date().toISOStr
       const artifact = artifacts.get(name);
       if (!Number.isInteger(artifact?.bytes) || !/^[a-f0-9]{64}$/u.test(artifact?.sha256 ?? '')) throw new Error(`--reuse candidate lacks exact ${name} identity.`);
     }
-    if (baseline.imageInputs) {
+    if (failedDonor) {
+      previous = failedDonor.previous;
+    } else if (baseline.imageInputs) {
       const evidence = await readFile(join(directory, IMAGE_INPUTS_NAME));
       if (baseline.imageInputs.name !== IMAGE_INPUTS_NAME || digest(evidence) !== baseline.imageInputs.sha256) throw new Error('Reusable image-input evidence does not match its candidate manifest.');
       previous = JSON.parse(evidence.toString('utf8'));
@@ -52,6 +59,7 @@ export async function createReleasePlan(root, { reuse, now = new Date().toISOStr
       }])) };
     }
     try {
+      if (failedDonor && !failedDonor.scansFresh) throw new Error(failedDonor.scanReason);
       const evidence = await readFile(join(directory, 'trivy-bindings.json'));
       const expected = artifacts.get('trivy-bindings.json').sha256;
       if (digest(evidence) !== expected) throw new Error('Reusable Trivy binding does not match its candidate manifest.');
@@ -90,9 +98,12 @@ function digest(value) { return createHash('sha256').update(value).digest('hex')
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
-  if (args.includes('--help')) console.log('Usage: node scripts/release-plan.mjs [--reuse CANDIDATE_DIRECTORY]\nRead-only build/reuse/scan plan. No Docker or network operations.');
+  if (args.includes('--help')) console.log('Usage: node scripts/release-plan.mjs [--reuse CANDIDATE_DIRECTORY | --reuse-failed FAILED_STAGING_DIRECTORY]\nRead-only build/reuse/scan plan. No Docker or network operations.');
   else {
-    if (args.length && (args.length !== 2 || args[0] !== '--reuse')) throw new Error('Expected --reuse CANDIDATE_DIRECTORY.');
-    console.log(JSON.stringify(await createReleasePlan(resolve(fileURLToPath(new URL('../', import.meta.url))), { reuse: args[1] }), null, 2));
+    if (args.length && (args.length !== 2 || !['--reuse', '--reuse-failed'].includes(args[0])))
+      throw new Error('Expected --reuse CANDIDATE_DIRECTORY or --reuse-failed FAILED_STAGING_DIRECTORY.');
+    console.log(JSON.stringify(await createReleasePlan(resolve(fileURLToPath(new URL('../', import.meta.url))), {
+      ...(args[0] === '--reuse' ? { reuse: args[1] } : args[0] === '--reuse-failed' ? { reuseFailed: args[1] } : {}),
+    }), null, 2));
   }
 }
