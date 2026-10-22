@@ -19,6 +19,7 @@ import {
 } from './oci-efficiency.mjs';
 import { inspectOciArchive } from './oci-evidence.mjs';
 import { IMAGE_INPUTS_NAME, verifyImageInputs } from './release-inputs.mjs';
+import { verifyAuditReuse } from './candidate-audit-reuse.mjs';
 export const IMAGE_NAMES = ['gateway', 'dashboard', 'file-system', 'browser', 'computer', 'workstation'];
 export const PLATFORMS = ['linux/amd64', 'linux/arm64'];
 export const REQUIRED_TRIVY_VERSION = '0.74.0';
@@ -468,7 +469,7 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
   const catalog = assertCatalogIdentity(JSON.parse(expectedCatalogText), candidate);
   const dependencyEvidencePath = join(candidateDirectory, 'dependency-evidence.json');
   assert(await hashFile(dependencyEvidencePath) === candidate.dependencies.sha256, 'candidate.json dependency-evidence hash does not match.');
-  await assertDependencyEvidence(await jsonFile(dependencyEvidencePath), candidate, root);
+  await assertDependencyEvidence(await jsonFile(dependencyEvidencePath), candidate, root, now);
   let imageInputs;
   if (candidate.imageInputs) {
     assert(await hashFile(join(candidateDirectory, IMAGE_INPUTS_NAME)) === candidate.imageInputs.sha256, 'Image input evidence hash mismatch.');
@@ -629,15 +630,23 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
   return { candidate, catalog, files: names };
 }
 
-async function assertDependencyEvidence(evidence, candidate, root) {
+async function assertDependencyEvidence(evidence, candidate, root, now) {
   assert(evidence?.schemaVersion === 1 && evidence.source?.revision === candidate.revision && evidence.source?.clean === true, 'Dependency evidence does not identify a clean archive of the candidate revision.');
   assert(/^[a-f0-9]{64}$/u.test(evidence.source?.archiveSha256 ?? ''), 'Dependency evidence lacks the source-archive SHA-256.');
-  assert(canonicalJson(evidence.install?.command) === canonicalJson(['npm', 'ci']), 'Candidate dependencies were not installed with npm ci.');
+  const expectedInstall = evidence.auditReuse ? ['npm', 'ci', '--no-audit'] : ['npm', 'ci'];
+  assert(canonicalJson(evidence.install?.command) === canonicalJson(expectedInstall), 'Candidate dependencies were not installed with npm ci.');
   assert(evidence.install?.npm === candidate.tools.npm, 'Dependency evidence npm version does not match the candidate toolchain.');
   const registry = new URL(evidence.install?.registry ?? 'invalid:');
   assert(registry.protocol === 'https:' && !registry.username && !registry.password, 'Dependency evidence registry must be credential-free HTTPS.');
   assert(root, 'Dependency verification requires the reviewed repository root.');
   assert(evidence.install?.lockfileSha256 === createHash('sha256').update((await exec('git', ['show', `${candidate.revision}:package-lock.json`], { cwd: root, maxBuffer: 20_000_000 })).stdout).digest('hex'), 'Dependency evidence lockfile does not match reviewed source.');
+  if (evidence.auditReuse) {
+    assert(evidence.auditReuse.schemaVersion === 1 && evidence.auditReuse.reason === 'npm-advisory-service-timeout'
+      && canonicalJson(evidence.audit) === canonicalJson(evidence.auditReuse.original?.audit),
+    'Reused audit does not match its recorded source.');
+    await verifyAuditReuse({ original: evidence.auditReuse.original, root, revision: candidate.revision,
+      registry: evidence.install.registry, now });
+  }
   const temporary = await mkdtemp(join(tmpdir(), 'qubicl-source-archive-'));
   try {
     const archive = join(temporary, 'source.tar');

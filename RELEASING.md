@@ -203,6 +203,14 @@ invalidate every image.
 Current host tool versions do not invalidate already immutable image bytes;
 their original toolchain remains recorded.
 
+If npm's advisory endpoint is unavailable, a recent successful audit for the
+same release dependency graph can be supplied through
+`QUBICL_AUDIT_REUSE_PATH=/path/to/dependency-evidence.json`. The builder still
+runs fresh `npm ci --no-audit` and signature checks. It embeds the original
+audit in the new dependency evidence; the verifier accepts it only when it is
+under 24 hours old, has no blocking findings, and both committed lockfiles
+match apart from the root and CLI Node/npm engine declarations.
+
 The builder copies only archives selected for reuse and checks each copy against
 the donor manifest. Changed image inputs rebuild only their mapped image group.
 A candidate that reuses every image also carries forward the verified dashboard

@@ -146,6 +146,7 @@ test('catalog generation carries forward exact unchanged image entries without o
     const scriptNames = [
       'generate-image-catalog.mjs', 'candidate-evidence.mjs', 'artifact-evidence.mjs',
       'bundle-evidence.mjs', 'release-impact.mjs', 'client-conformance.mjs',
+      'candidate-audit-reuse.mjs',
       'oci-efficiency.mjs', 'oci-evidence.mjs', 'release-inputs.mjs',
     ];
     await mkdir(join(directory, 'scripts'));

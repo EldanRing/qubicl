@@ -55,7 +55,7 @@ test('initial package publishing is explicit and guarded', async () => {
   assert.equal(manifest.author, 'Qubicl contributors');
   assert.equal(manifest.license, 'Apache-2.0');
   assert.notEqual(manifest.private, true);
-  assert.equal(manifest.engines?.node, '^22.14.0 || ^24.0.0');
+  assert.equal(manifest.engines?.node, '^22.23.4 || ^24.22.1');
   assert.ok(manifest.files?.includes('dist/THIRD_PARTY_NOTICES.txt'));
   assert.deepEqual(manifest.publishConfig, { access: 'public', registry: 'https://registry.npmjs.org/', tag: 'latest' });
   assert.equal(manifest.scripts?.prepublishOnly, 'node ../../scripts/guard-publish.mjs');

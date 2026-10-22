@@ -31,6 +31,7 @@ import { createOciPlatformView } from './oci-platform-view.mjs';
 import { requiresReleaseImpact, verifyReleaseImpactDocument } from './release-impact.mjs';
 import { createReleasePlan } from './release-plan.mjs';
 import { inspectFailedCandidateDonor } from './candidate-failed-donor.mjs';
+import { checkedAuditReuse } from './candidate-audit-reuse.mjs';
 import { IMAGE_INPUTS_NAME } from './release-inputs.mjs';
 import { writeReleasePresetManifests } from './release-preset-manifests.mjs';
 
@@ -701,22 +702,30 @@ async function buildInIsolatedSource(args) {
     const isolatedArchive = join(temporary, 'isolated-source.tar');
     await run('git', ['archive', '--format=tar', '--output', isolatedArchive, revision], { cwd: sourceRoot });
     assert(await sha256(isolatedArchive) === await sha256(archive), 'Isolated source archive does not reproduce the reviewed commit bytes.');
-    await run('npm', ['ci'], { cwd: sourceRoot });
+    const auditReusePath = process.env.QUBICL_AUDIT_REUSE_PATH;
+    const installCommand = ['npm', 'ci', ...(auditReusePath ? ['--no-audit'] : [])];
+    await run('npm', installCommand.slice(1), { cwd: sourceRoot });
     assert(await capture('git', ['status', '--porcelain'], { cwd: sourceRoot }) === '', 'npm ci modified the isolated reviewed source tree.');
-    const [inventoryText, auditText, signaturesText, registry] = await Promise.all([
+    const [inventoryText, signaturesText, registry] = await Promise.all([
       capture('npm', ['ls', '--all', '--json'], { cwd: sourceRoot, maxBuffer: 100_000_000, trim: false }),
-      capture('npm', ['audit', '--audit-level=high', '--json'], { cwd: sourceRoot, maxBuffer: 100_000_000, trim: false }),
       capture('npm', ['audit', 'signatures', '--json'], { cwd: sourceRoot, maxBuffer: 100_000_000, trim: false }),
       capture('npm', ['config', 'get', 'registry'], { cwd: sourceRoot }),
     ]);
+    const reusedAudit = auditReusePath
+      ? await checkedAuditReuse(auditReusePath, { root: sourceRoot, revision, registry, now: new Date().toISOString() })
+      : undefined;
+    const auditText = reusedAudit
+      ? JSON.stringify(reusedAudit.audit)
+      : await capture('npm', ['audit', '--audit-level=high', '--json'], { cwd: sourceRoot, maxBuffer: 100_000_000, trim: false });
     const lockfileSha256 = await sha256(join(sourceRoot, 'package-lock.json'));
     await writeFile(dependencyEvidence, `${JSON.stringify({
       schemaVersion: 1,
       createdAt: new Date().toISOString(),
       source: { revision, archiveSha256: await sha256(archive), clean: true },
-      install: { command: ['npm', 'ci'], npm: await capture('npm', ['--version'], { cwd: sourceRoot }), registry, lockfileSha256 },
+      install: { command: installCommand, npm: await capture('npm', ['--version'], { cwd: sourceRoot }), registry, lockfileSha256 },
       inventory: JSON.parse(inventoryText),
       audit: JSON.parse(auditText),
+      ...(reusedAudit ? { auditReuse: reusedAudit.auditReuse } : {}),
       signatures: JSON.parse(signaturesText),
     }, null, 2)}\n`, { mode: 0o600 });
     await run(process.execPath, ['scripts/build-local-candidates.mjs', ...childArgs], {
