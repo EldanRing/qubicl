@@ -18,51 +18,27 @@ artifacts when their inputs still match. A user request to ship a version covers
 the required local checks, commit, push, tag, and publication; report progress
 without stopping for permission at each step.
 
-## The practical pre-1.0 policy
+## Qualification and urgent security patches
 
-Qubicl remains a pre-1.0 series. The supported-host policy covers Linux x64,
-Apple Silicon macOS with Docker Desktop, and Windows 11 x64 through Ubuntu
-24.04 on WSL 2 with Docker Desktop. Their directly tested classifications
-record historical v0.1.0 evidence baselines; they do not claim that every
-current candidate repeats the full macOS and Windows matrices. Native Windows
-and WSL 1 are unsupported; Linux ARM64, Intel macOS, Windows on ARM, and other
-WSL distributions are best-effort.
-The initial v0.1 series allowed missing external-client or best-effort hardware
-coverage. That exception ended with v0.1: every v0.2-or-later publication,
-including one built with the `initial` candidate tier, requires the signed
-schema-4 release-set acceptance bundle. The signed tier selects the acceptance
-profile: `initial` records the exact Linux x64 general platform, lifecycle, and
-native remote-access evidence required for an honest pre-1.0 release, while
-`supported` retains the complete cross-platform and independent-review matrix.
-For v0.5, both tiers require the complete real-client/protocol matrix plus
-dashboard-specific native Linux x64, Apple Silicon macOS, and physical-iPhone
-Safari evidence. For v0.6 and later, the exact release-impact document selects
-affected protocols and platforms; every selected row needs applicable signed
-evidence, and missing coverage cannot pass. The narrower dashboard rows do not
-establish general current-candidate macOS or Windows testing.
-The versioned [platform support matrix](conformance/platform-support-v1.json)
-is the source of truth for these support and evidence classifications.
+Build one complete, signed candidate containing the CLI, native archive, six
+amd64/arm64 images, checksums, SBOMs, and twelve image scans. The scan policy
+rejects secrets and HIGH/CRITICAL findings for which a fix is available. Record
+remaining unfixed findings in the release evidence.
 
-An initial candidate must still:
+The standard publisher expects a signed schema-4 client and platform acceptance
+bundle selected by the release-impact document. Some checks require physical
+hardware or separate clients and may be unavailable during an urgent security
+patch. The owner may direct publication from a verified candidate with a
+separate signed qualification decision that lists exactly which checks passed
+and which did not. Release notes must disclose the gaps. No incomplete check is
+recorded as passing, and this exception does not claim new platform support.
 
-- come from a clean, privacy-checked public source revision;
-- pass source, package, native, and Docker acceptance on the release host;
-- contain exact amd64/arm64 OCI archives, catalogs, SBOMs, provenance, checksums,
-  and twelve retained Trivy reports;
-- bind post-freeze client, protocol, Linux x64 lifecycle, native-Linux
-  remote-access, and applicable dashboard evidence in schema 4;
-- bind an exact `release-impact.json` for v0.6 and later, including the prior
-  release commit, candidate commit, changed paths, artifacts, checks, protocols,
-  platforms, and evidence-reuse rule;
-- contain no scanner-detected secrets; and
-- reject every HIGH/CRITICAL finding for which the scanner reports an available
-  fix unless an exact current review record covers it.
-
-Unfixed distribution findings are retained in `trivy-summary.json` and release
-evidence. They are not silently described as fixed or safe. The stricter
-`candidate:local` policy—independent review for every remaining HIGH/CRITICAL
-finding plus the full client/platform acceptance record—remains the supported
-and 1.0 gate.
+Reuse successful build, scan, and test evidence while the exact inputs and
+freshness still match. A failed late check does not force another full build;
+resume complete staging or recover verified archives from preserved staging.
+The [platform support matrix](conformance/platform-support-v1.json) records
+support classifications. Release-specific signed evidence records what was
+actually tested.
 
 ## Public source identity
 
@@ -72,10 +48,9 @@ The maintained project identity is
 
 ```sh
 npm run public:check
-npm run public:export -- --destination /absolute/path/to/qubicl-public
 ```
 
-The export command is a recovery tool if the public source root ever needs to
+`npm run public:export` is a recovery tool if the public source root ever needs to
 be recreated. Its output contains only the committed tree: no `.git`, old
 refs, local state, ignored artifacts, candidate output, or Git identity. Any
 new public root must use the maintained identity above and pass the same source
@@ -150,31 +125,28 @@ native archives, or signatures. Its default is read-only; `--execute` runs one
 scenario once. Diagnose a failure before deciding what to rerun.
 
 Commit the frozen source, generate its impact document, and ask the candidate
-builder for a read-only plan. Supply the most recent complete candidate for the
-same version when one exists:
+builder for a read-only plan. Add `--reuse /path/to/previous-candidate/linux-x64` when an earlier
+complete candidate for this version exists:
 
 ```sh
-npm run release:impact -- --base v0.5.1 --output /secure/release-impact-v0.6.0.json
-npm run candidate:release -- \
-  --impact /secure/release-impact-v0.6.0.json \
-  --reuse /path/to/previous-0.6.0/linux-x64
+BASE="$(git describe --tags --abbrev=0 --match 'v[0-9]*')"
+VERSION="$(node -p "require('./package.json').version")"
+IMPACT="/secure/release-impact-v${VERSION}.json"
+npm run release:impact -- --base "$BASE" --output "$IMPACT"
+npm run candidate:release -- --impact "$IMPACT"
 ```
 
 Review `buildImages`, `reuseImages`, `scanImages`, and the recorded reasons. Only
 the explicit execution form performs expensive work:
 
 ```sh
-npm run candidate:release -- \
-  --impact /secure/release-impact-v0.6.0.json \
-  --reuse /path/to/previous-0.6.0/linux-x64 \
-  --execute
+npm run candidate:release -- --impact "$IMPACT" --execute
 ```
 
 Generate the impact document only after the release commit is frozen. The
 command resolves both revisions and refuses to overwrite an existing output.
 The candidate verifier recomputes the Git name-only diff and classifier, then
-checks the embedded document's hash and exact base/candidate identity. This 0.6
-source range affects shared contracts and therefore classifies as `full`.
+checks the embedded document's hash and exact base/candidate identity.
 
 If a late candidate check fails, Qubicl preserves staging under
 `release/candidates/.failed-*`. For a complete staging directory, correct the
@@ -238,7 +210,7 @@ serially. Publication includes the retained evidence.
 The builder writes an ignored candidate beneath:
 
 ```text
-release/candidates/0.6.0-<revision>/linux-x64/
+release/candidates/VERSION-<revision>/linux-x64/
 ```
 
 From the same clean reviewed revision, verify it without rebuilding or rerunning
@@ -303,7 +275,7 @@ test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 Publish the requested release:
 
 ```sh
-QUBICL_RELEASE_APPROVAL=0.6.0 npm run release:publish -- \
+QUBICL_RELEASE_APPROVAL="$(node -p "require('./package.json').version")" npm run release:publish -- \
   --candidate /path/to/candidate \
   --public-key /secure/offline/qubicl-release.public.pem \
   --signature /path/to/candidate.signature.json \
@@ -327,12 +299,9 @@ The guarded publisher:
 7. includes the exact release-impact document in the GitHub release; and
 8. only after those checks pass, moves the GHCR and npm `latest` tags.
 
-GitHub creates container packages pushed from the command line as private and
-does not provide a supported package-visibility REST operation. On the first
-run, the publisher therefore stops after the verified versioned image upload
-and prints the six package-settings links. Set each package to **Public**, then
-rerun the same command. The npm package is not published until all six image
-packages report public visibility, so `qubicl setup` cannot be stranded behind
+If a new GHCR package is private, make that exact package public and rerun
+the publisher against the same immutable candidate. The npm package is not
+published until all six image packages report public visibility, so `qubicl setup` cannot be stranded behind
 private images.
 
 Publication is retry-safe when existing versioned npm/image objects match the
@@ -345,7 +314,7 @@ never changes repository or package visibility.
 From a clean user environment:
 
 ```sh
-npm install -g qubicl-cli@0.6.0
+npm install -g qubicl-cli@latest
 qubicl setup
 qubicl doctor
 ```

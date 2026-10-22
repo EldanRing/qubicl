@@ -216,16 +216,16 @@ Read the complete [security model](https://github.com/EldanRing/qubicl/blob/main
 before relying on the boundary.
 
 The [0.6 design](https://github.com/EldanRing/qubicl/blob/main/docs/decisions/0002-v0.6-capabilities-and-constraints.md)
-is implemented in this source tree. A public 0.6 release still requires a frozen
-reviewed commit and its separately approved candidate, security, client,
-platform, accessibility, mobile, and publication evidence.
+is implemented in this source tree. Each release records the exact tested
+artifacts, security results, platform coverage, and any remaining gaps in its
+published evidence and notes.
 
 Qubicl `0.6.x` is a pre-1.0 series. Interfaces and state formats may
 still evolve before 1.0. The matrix's directly tested Linux x64, Apple Silicon
 macOS, and Windows/WSL rows describe historical v0.1.0 baselines, not general
-testing of every current candidate. The 0.6 initial release uses Linux x64 for general
-platform acceptance and separately requires dashboard-specific native Linux
-x64, Apple Silicon macOS, and physical iPhone Safari evidence. Linux ARM64,
+testing of every current candidate. Release-specific qualification and notes
+state the platforms and clients actually verified, and disclose any gaps.
+Linux ARM64,
 Intel macOS, Windows on ARM, and other WSL 2 distributions remain best-effort.
 Native Windows and WSL 1 are unsupported; Qubicl computers remain Linux
 containers on every host. Read the

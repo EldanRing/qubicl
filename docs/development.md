@@ -142,7 +142,7 @@ signature, or acceptance evidence.
 
 The versioned
 [remote-access requirements](../conformance/remote-access-v1.json) are an
-additional schema-4 release gate, not an automatic test runner. After candidate
+standard schema-4 release gate, not an automatic test runner. After candidate
 bytes are frozen, the pre-1.0 `initial` profile requires exact post-freeze
 native Linux x64 evidence. The `supported` profile additionally requires Apple
 Silicon through Docker Desktop and Windows 11 x64 through WSL 2/Docker Desktop.
@@ -217,7 +217,7 @@ read-only planners by default. A preview prerelease first prints its plan:
 
 ```sh
 npm run candidate:preview -- --impact /secure/release-impact-v0.6.0.json
-# After review, run that plan once:
+# After inspecting the plan, execute once:
 npm run candidate:preview -- --impact /secure/release-impact-v0.6.0.json --execute
 ```
 
@@ -233,7 +233,7 @@ profile:
 npm run candidate:release -- \
   --impact /secure/release-impact-v0.6.0.json \
   --reuse /path/to/last-complete-0.6-candidate
-# After review:
+# After inspecting the plan:
 npm run candidate:release -- \
   --impact /secure/release-impact-v0.6.0.json \
   --reuse /path/to/last-complete-0.6-candidate \
@@ -248,7 +248,7 @@ For the strict full-matrix supported-release policy:
 
 ```sh
 npm run candidate:local -- --impact /secure/release-impact-v0.6.0.json
-# After review, append --execute.
+# After inspecting the plan, append --execute.
 ```
 
 The plan names every image it will build, reuse, and scan before any expensive

@@ -277,10 +277,9 @@ interfaces and state format may still evolve before 1.0. The supported-host
 policy covers Linux x64, Apple Silicon macOS with Docker Desktop, and Windows 11
 x64 through Ubuntu 24.04 on WSL 2 with Docker Desktop. Their directly tested
 classifications record historical v0.1.0 evidence baselines; they do not mean
-every current candidate repeats the full macOS and Windows matrices. The 0.6
-initial release uses Linux x64 for general platform acceptance and separately requires
-dashboard-specific native Linux x64, Apple Silicon macOS, and physical iPhone
-Safari evidence. Linux ARM64, Intel macOS, Windows on ARM, and other WSL 2
+every current candidate repeats the full macOS and Windows matrices.
+Release-specific qualification and notes state the platforms and clients
+actually verified, and disclose any gaps. Linux ARM64, Intel macOS, Windows on ARM, and other WSL 2
 distributions remain best-effort. Native Windows and WSL 1 are unsupported;
 Qubicl computers remain Linux containers on every host. The versioned
 [Platform support](docs/platforms.md) matrix is authoritative. Back up important
