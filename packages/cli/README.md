@@ -66,7 +66,8 @@ your model or agent
 
 ## Quick start
 
-Requirements: Node.js 22 or 24, Docker Engine 24.0 or Docker Desktop 4.29+, and
+Requirements: Node.js 22.23.4 or 24.22.1 (or a newer patch in either line),
+Docker Engine 24.0 or Docker Desktop 4.29+, and
 Docker Compose 2.24+. The supported-host policy covers Linux x64, Apple Silicon
 macOS with Docker Desktop, and Windows 11 x64 through Ubuntu 24.04 on WSL 2
 with Docker Desktop. Their directly tested classifications record historical

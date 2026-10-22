@@ -67,7 +67,8 @@ your model or agent
 ## Quick start
 
 Requirements: Linux with Docker Engine or Docker Desktop, macOS with Docker
-Desktop, or Windows 11 through WSL 2 and Docker Desktop—plus Node.js 22 or 24
+Desktop, or Windows 11 through WSL 2 and Docker Desktop—plus Node.js 22.23.4
+or 24.22.1 (or a newer patch in either line)
 and Docker Compose 2.24+. Native Windows execution and WSL 1 are not supported;
 WSL installations must keep Qubicl state and computer homes in the WSL Linux
 filesystem under `/home`. See [Platform support](docs/platforms.md) before
@@ -268,9 +269,8 @@ compromise, or another user who controls the host account. The default
 ## Release status
 
 The [0.6 design](docs/decisions/0002-v0.6-capabilities-and-constraints.md) is
-implemented in this source tree. A public 0.6 release still requires a frozen
-reviewed commit and its separately approved candidate, security, client,
-platform, accessibility, mobile, and publication evidence.
+implemented in this source tree. Release artifacts carry checksums, signatures,
+image provenance, and vulnerability and acceptance evidence.
 
 Qubicl `0.6.x` is a pre-1.0 series intended for real use, but its
 interfaces and state format may still evolve before 1.0. The supported-host

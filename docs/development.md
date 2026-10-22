@@ -13,12 +13,11 @@ npm run build:types
 node --test dist-tests/unit/contracts.test.js
 ```
 
-The repository currently enforces npm 10.9.3 through `engines` and
-`devEngines`; `packageManager` records the same pin. `.nvmrc` selects the normal
-development Node version within the declared supported range. Release
-validation separately covers minimum Node 22 and Node 24 targets. A wider
-development npm range requires a manifest change and compatibility evidence;
-there is no documented bypass for the current pin.
+The repository uses Node.js 22.23.4 with its bundled npm 10.9.9. The
+`engines`, `devEngines`, and `packageManager` fields require patched
+versions. Update these pins with the security releases instead of installing
+an older npm separately. Release validation covers the declared Node 22 and
+Node 24 lines.
 
 Use `npm run build` when bundled artifacts are needed. `npm run test:unit` runs all unit tests after type compilation. These commands are alternatives selected for the changed surface, not prerequisites to repeat before `npm run check`.
 
@@ -90,8 +89,8 @@ Recompile after changing a test or its source; do not test stale `dist` output.
 
 `npm run check` remains the full source gate. Full suites, Docker acceptance,
 all-image builds/scans, and candidate construction are distinct operations;
-do not run them merely to validate a documentation edit. Maintainers also follow
-their local approval and resource policy. For 0.6 and later, generate and verify
+do not run them merely to validate a documentation edit. For 0.6 and later,
+generate and verify
 the exact [release-impact document](decisions/0002-v0.6-capabilities-and-constraints.md)
 before candidate work. It selects required evidence, while the current publisher
 still requires a complete signed candidate. Unchanged image bytes may be carried
@@ -326,8 +325,7 @@ node scripts/build-local-candidates.mjs --binary-only \
 
 Hardware not locally validated remains a supported-1.0 blocker. An initial or preview
 must identify only the platforms actually tested and make no broader support
-claim. Read [RELEASING.md](../RELEASING.md); publication always needs a separate
-explicit decision.
+claim. Read [RELEASING.md](../RELEASING.md) for the publication procedure.
 
 Retained candidates, native builds, package tarballs, and SBOMs are intentionally outside ordinary `npm run clean`. List eligible ignored artifacts without changing them:
 

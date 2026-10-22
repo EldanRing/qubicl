@@ -13,11 +13,10 @@ complete immutable signed candidate containing all six images. Candidate
 construction may reuse an unchanged image archive, scan report, and efficiency
 report when their recorded inputs and freshness still satisfy the verifier.
 
-Before selecting gates, identify changed source/dependencies, resulting
-artifacts, affected state/protocol/platform behavior, and reusable evidence with
-its exact input identities and freshness. Development-only documentation checks
-do not require a release candidate. Publication still needs the reviewed,
-implemented validator/publisher path and explicit approval for the version.
+Before building, identify changed inputs and reusable evidence. Reuse verified
+artifacts when their inputs still match. A user request to ship a version covers
+the required local checks, commit, push, tag, and publication; report progress
+without stopping for permission at each step.
 
 ## The practical pre-1.0 policy
 
@@ -132,13 +131,9 @@ The home is created under the maintainer's home directory so Docker Desktop can
 bind-mount it through the same shared filesystem required by a normal Qubicl
 installation.
 
-Treat a failed aggregate gate as terminal. Record the completed commands and do
-not restart the aggregate command. After correcting an external condition, run
-only the missing command. Source E2E may set `QUBICL_E2E_SKIP_IMAGE_BUILD=1`
-only when the failed gate already built the exact development images, those
-images remain locally available, and no image input changed; then run the
-remaining token and performance checks individually. A source or image-input
-change invalidates that reuse and requires a new reviewed plan.
+When a gate fails, fix the cause and resume the missing checks. Use
+`QUBICL_E2E_SKIP_IMAGE_BUILD=1` when the exact development images are still
+available and their inputs have not changed. Rebuild only changed image inputs.
 
 For a suspected lifecycle or
 migration problem, inspect the bounded diagnostic plan and then run that exact
@@ -152,7 +147,7 @@ npm run release:diagnose -- --candidate /path/to/last-complete-candidate --execu
 
 The diagnostic command never creates release evidence or builds images, scans,
 native archives, or signatures. Its default is read-only; `--execute` runs one
-scenario once. It does not retry or start another candidate after a failure.
+scenario once. Diagnose a failure before deciding what to rerun.
 
 Commit the frozen source, generate its impact document, and ask the candidate
 builder for a read-only plan. Supply the most recent complete candidate for the
@@ -181,21 +176,21 @@ The candidate verifier recomputes the Git name-only diff and classifier, then
 checks the embedded document's hash and exact base/candidate identity. This 0.6
 source range affects shared contracts and therefore classifies as `full`.
 
-If a late candidate check fails, Qubicl preserves the staging directory under
-`release/candidates/.failed-*` instead of deleting completed images, scans, and
-packages. After correcting an external verification-only condition, return to
-the same clean reviewed revision and resume without rebuilding:
+If a late candidate check fails, Qubicl preserves staging under
+`release/candidates/.failed-*`. For a complete staging directory, correct the
+external condition and verify the unchanged bytes:
 
 ```sh
 npm run candidate:resume -- release/candidates/.failed-VERSION-REVISION-TARGET.PID
 ```
 
-Resume runs only the complete candidate verifier before promoting the unchanged
-bytes; it does not rebuild images, rerun Trivy, or rerun artifact acceptance. If
-failure occurred before the manifest and checksums were complete, the directory
-remains available for diagnosis or explicit cleanup but cannot be promoted. A
-failed command is terminal: release tooling never launches a replacement build
-or loops until one passes.
+Resume runs only the complete candidate verifier. When failure happened before
+the manifest and checksums were written, use `--reuse-failed` with the
+preserved staging directory. That path verifies image origins, archive hashes,
+scan bindings, scanner freshness, and policy; it then builds fresh CLI artifacts
+and runs exact artifact acceptance. The failed directory itself is never
+promoted or edited. The read-only plan identifies any images or scans whose
+inputs actually changed.
 
 `candidate:release` first exports the reviewed commit into a disposable clean
 worktree, runs a fresh `npm ci`, and retains lockfile, registry, installed-tree,
@@ -245,9 +240,9 @@ acceptance:
 node scripts/verify-candidate.mjs /path/to/candidate
 ```
 
-If the candidate fails because source or dependencies must change, commit the
-fix and generate a new plan against the last complete candidate. Rebuild only
-the inputs that plan invalidates. Never edit candidate contents in place.
+If source or dependencies change, commit the fix and generate a new plan against
+the last complete candidate or preserved failed staging. Rebuild only the
+inputs that plan invalidates. Never edit candidate contents in place.
 
 ## Mandatory detached signature
 
@@ -285,12 +280,9 @@ npm run release:publish -- --candidate /path/to/candidate \
   --acceptance-signature /path/to/acceptance-signature.json
 ```
 
-The dry run verifies the full candidate and the exact checkout but performs no
-remote mutation. Actual publication requires separate authorization to
-fast-forward the exact reviewed release commit to `origin/main`; build, signing,
-or publication preparation does not substitute for that push approval. Push
-only that reviewed commit, then confirm the remote-tracking branch resolves to
-it:
+The dry run verifies the full candidate and the exact checkout without remote
+mutation. When shipping the release, push only the reviewed commit and confirm
+the remote-tracking branch resolves to it:
 
 ```sh
 git fetch origin main
@@ -300,7 +292,7 @@ git fetch origin main
 test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 ```
 
-After explicit publication approval:
+Publish the requested release:
 
 ```sh
 QUBICL_RELEASE_APPROVAL=0.6.0 npm run release:publish -- \

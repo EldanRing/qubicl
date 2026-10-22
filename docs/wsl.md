@@ -141,7 +141,7 @@ Use the Node version in `.nvmrc` and the exact npm version declared by the root
 cd "$HOME/src"
 git clone https://github.com/EldanRing/qubicl.git
 cd qubicl
-npm install --global npm@10.9.3
+npm --version # Node.js 22.23.4 bundles npm 10.9.9
 npm ci
 npm run images:build
 npm install --global --prefix "$HOME/.local" ./packages/cli

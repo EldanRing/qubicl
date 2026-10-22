@@ -28,7 +28,7 @@
     "qubicl": "dist/qubicl.mjs"
   },
   "files": ["dist/qubicl.mjs", "dist/assets", "dist/LICENSE", "dist/THIRD_PARTY_NOTICES.txt", "dist/SBOM.spdx.json"],
-  "engines": { "node": "^22.14.0 || ^24.0.0" },
+  "engines": { "node": "^22.23.4 || ^24.22.1" },
   "os": ["darwin", "linux"],
   "publishConfig": {
     "access": "public",
