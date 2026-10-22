@@ -44,17 +44,20 @@ ARG NPM_VERSION=12.0.2
 RUN npm install --global "npm@$NPM_VERSION" \
  && npm install --prefix /tmp/npm-security-patches \
       --ignore-scripts --no-audit --no-fund --package-lock=false \
-      brace-expansion@5.0.9 ip-address@10.3.1 tar@7.5.21 \
+      brace-expansion@5.0.12 ip-address@10.3.1 tar@7.5.21 undici@6.28.1 \
  && rm -rf \
       /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
       /usr/local/lib/node_modules/npm/node_modules/ip-address \
       /usr/local/lib/node_modules/npm/node_modules/tar \
+      /usr/local/lib/node_modules/npm/node_modules/undici \
  && cp -a /tmp/npm-security-patches/node_modules/brace-expansion \
       /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
  && cp -a /tmp/npm-security-patches/node_modules/ip-address \
       /usr/local/lib/node_modules/npm/node_modules/ip-address \
  && cp -a /tmp/npm-security-patches/node_modules/tar \
       /usr/local/lib/node_modules/npm/node_modules/tar \
+ && cp -a /tmp/npm-security-patches/node_modules/undici \
+      /usr/local/lib/node_modules/npm/node_modules/undici \
  && rm -rf /tmp/npm-security-patches \
  && npm cache clean --force
 

@@ -12,6 +12,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   images to 22.23.4 for the October 2026 security fixes.
 - Update the locked MCP client, server, and core SDK packages to 2.3.1 and
   Hono to 4.13.13 to address dependency security advisories.
+- Refresh the computer images' pinned npm and Python dependencies to resolve
+  fixable image scan findings, including the document and image skill runtimes.
 
 ## 0.6.0 - 2026-09-14
 

@@ -14,9 +14,9 @@ lxml                        6.1.2       BSD-3-Clause
 openpyxl                    3.1.5       MIT
 pdfminer.six                20260107    MIT
 pdfplumber                  0.11.10     MIT
-pillow                      12.3.0      MIT-CMU
+pillow                      13.0.0      MIT-CMU
 pycparser                   3.0         BSD-3-Clause
-pypdf                       6.16.1      BSD-3-Clause
+pypdf                       6.21.2      BSD-3-Clause
 pypdfium2                   5.13.0      BSD-3-Clause / Apache-2.0 / bundled notices
 python-docx                 1.2.0       MIT
 python-pptx                 1.0.2       MIT

@@ -213,7 +213,8 @@ test('container bases are pinned by digest', async () => {
   assert.match(computer, /apt-get upgrade -y/);
   assert.match(computer, /apt-get download novnc/);
   assert.doesNotMatch(computer, /^\s+novnc \\/m);
-  assert.match(computer, /brace-expansion@5\.0\.9/);
+  assert.match(computer, /brace-expansion@5\.0\.12/);
+  assert.match(computer, /undici@6\.28\.1/);
   assert.match(computer, /ip-address@10\.3\.1/);
   assert.match(computer, /tar@7\.5\.21/);
   for (const instruction of computer.split(/\n(?=RUN )/u)) {
