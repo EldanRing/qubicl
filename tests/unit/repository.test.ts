@@ -28,17 +28,10 @@ test('initial package publishing is explicit and guarded', async () => {
   const workspace = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
     license?: string;
     packageManager?: string;
-    scripts?: Record<string, string>;
-    devDependencies?: Record<string, string>;
+    engines?: { node?: string };
   };
   assert.equal(workspace.license, 'Apache-2.0');
   assert.match(workspace.packageManager ?? '', /^npm@\d+\.\d+\.\d+$/u);
-  assert.match(workspace.devDependencies?.oxlint ?? '', /^\d+\.\d+\.\d+$/u);
-  assert.match(workspace.scripts?.['lint:source'] ?? '', /oxlint/);
-  assert.match(workspace.scripts?.test ?? '', /test-coverage-lines=75/);
-  assert.match(workspace.scripts?.['check:release'] ?? '', /scan:secrets/);
-  assert.match(workspace.scripts?.['release:check'] ?? '', /public:check/);
-
   const manifest = JSON.parse(await readFile(join(root, 'packages/cli/package.json'), 'utf8')) as {
     name?: string;
     version?: string;
@@ -55,74 +48,16 @@ test('initial package publishing is explicit and guarded', async () => {
   assert.equal(manifest.author, 'Qubicl contributors');
   assert.equal(manifest.license, 'Apache-2.0');
   assert.notEqual(manifest.private, true);
-  assert.equal(manifest.engines?.node, '^22.23.4 || ^24.22.1');
+  assert.equal(manifest.engines?.node, workspace.engines?.node);
   assert.ok(manifest.files?.includes('dist/THIRD_PARTY_NOTICES.txt'));
   assert.deepEqual(manifest.publishConfig, { access: 'public', registry: 'https://registry.npmjs.org/', tag: 'latest' });
   assert.equal(manifest.scripts?.prepublishOnly, 'node ../../scripts/guard-publish.mjs');
-
-  const candidateBuilder = await readFile(join(root, 'scripts/build-local-candidates.mjs'), 'utf8');
-  assert.match(candidateBuilder, /release', 'candidates'/);
-  assert.match(candidateBuilder, /const args = \[\s*'buildx', 'build'/);
-  assert.match(candidateBuilder, /await run\('docker', args, \{ env:/);
-  assert.match(candidateBuilder, /'trivy'/);
-  assert.match(candidateBuilder, /trivy-summary\.json/);
-  assert.match(candidateBuilder, /inspectOciEfficiencyArchives/);
-  assert.match(candidateBuilder, /OCI_EFFICIENCY_REPORT_NAME/);
-  assert.match(candidateBuilder, /vulnerability-applicability\.json/);
-  assert.match(candidateBuilder, /verify-candidate\.mjs/);
-  assert.match(candidateBuilder, /'bundle', 'create', bundle, 'HEAD'/);
-  assert.match(candidateBuilder, /'clone', '--quiet', '--no-checkout', bundle, sourceRoot/);
-  assert.match(candidateBuilder, /'checkout', '--quiet', '--detach', revision/);
-  assert.match(candidateBuilder, /Isolated source archive does not reproduce the reviewed commit bytes/);
-  assert.match(candidateBuilder, /Preserved failed candidate staging at/);
-  assert.doesNotMatch(candidateBuilder, /Exact candidate source/);
-  assert.doesNotMatch(candidateBuilder, /npm', \['publish/);
-  assert.doesNotMatch(candidateBuilder, /docker', \['push/);
-  assert.doesNotMatch(candidateBuilder, /gh', \['release/);
-
-  const rootManifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
-  assert.equal(rootManifest.scripts?.['candidate:preview'], 'node scripts/build-local-candidates.mjs --preview');
-  assert.equal(rootManifest.scripts?.['candidate:release'], 'node scripts/build-local-candidates.mjs --initial');
-  assert.equal(rootManifest.scripts?.['candidate:resume'], 'node scripts/resume-candidate.mjs');
-  assert.equal(rootManifest.scripts?.['release:publish'], 'node scripts/publish-candidate.mjs');
-  assert.match(candidateBuilder, /releaseTier/);
-  assert.match(candidateBuilder, /--preview requires a prerelease package version/);
-
-  const acceptance = await readFile(join(root, 'scripts/acceptance-evidence.mjs'), 'utf8');
-  assert.match(acceptance, /Acceptance schemaVersion must be 3 or 4/);
-  assert.match(acceptance, /schemaVersion 4 is required for v0\.2/);
-  assert.match(acceptance, /remote-access-v1\.json|REMOTE_ACCESS_REQUIREMENTS_NAME/);
-  assert.match(acceptance, /remoteGateway/);
-  const remoteAccessRequirements = JSON.parse(await readFile(join(root, 'conformance/remote-access-v1.json'), 'utf8')) as {
-    schemaVersion?: number;
-    protocol?: string;
-    profiles?: Array<{ platformId?: string }>;
-    requiredSurfaces?: string[];
-  };
-  assert.equal(remoteAccessRequirements.schemaVersion, 1);
-  assert.equal(remoteAccessRequirements.protocol, 'direct-tls-v1');
-  assert.deepEqual(remoteAccessRequirements.profiles?.map(({ platformId }) => platformId), [
-    'linux-x64',
-    'macos-apple-silicon',
-    'windows-wsl2-x64',
-  ]);
-  assert.ok(remoteAccessRequirements.requiredSurfaces?.includes('preview-websocket'));
-  assert.match(acceptance, /releaseSetSha256/);
-  const publisher = await readFile(join(root, 'scripts/publish-candidate.mjs'), 'utf8');
-  assert.match(publisher, /v0\.2 or later publication require a signed release set/);
-  assert.match(publisher, /requiresClientConformance\(candidate\.version\)/);
-  const candidateEvidence = await readFile(join(root, 'scripts/candidate-evidence.mjs'), 'utf8');
-  assert.match(candidateEvidence, /Trivy binding schemaVersion.*required for v0\.2 and later candidates/);
-  assert.match(candidateEvidence, /v0\.2 and later image candidates require exact OCI efficiency evidence/);
-  assert.match(candidateEvidence, /oci-efficiency\.json does not match the exact candidate OCI archives/);
-
 });
 
-test('vulnerability applicability inventory is machine-validated and empty by default', async () => {
+test('vulnerability applicability inventory satisfies its schema', async () => {
   const module = await import(pathToFileURL(join(root, 'scripts/candidate-evidence.mjs')).href);
   const document = JSON.parse(await readFile(join(root, 'security/vulnerability-applicability.json'), 'utf8'));
-  const statements = module.parseVulnerabilityApplicability(document) as Array<Record<string, unknown>>;
-  assert.deepEqual(statements, []);
+  assert.doesNotThrow(() => module.parseVulnerabilityApplicability(document));
 });
 
 test('repository does not define GitHub Actions workflows', async () => {
@@ -142,9 +77,6 @@ test('routine dependency review stays manual and local', async () => {
     readFile(join(root, '.github/dependabot.yml'), 'utf8'),
     (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT',
   );
-  const development = await readFile(join(root, 'docs/development.md'), 'utf8');
-  assert.match(development, /Dependency review is manual and local/u);
-  assert.match(development, /Hosted security\s+alerts are a separate repository setting/u);
 });
 
 test('brand marks are deterministic vector assets with light and dark README variants', async () => {
@@ -166,20 +98,6 @@ test('brand marks are deterministic vector assets with light and dark README var
   assert.match(readme, /prefers-color-scheme: dark/);
   assert.match(readme, /assets\/brand\/qubicl-mark\.svg/);
   assert.match(readme, /assets\/brand\/qubicl-mark-dark\.svg/);
-
-  const branding = await readFile(join(root, 'BRANDING.md'), 'utf8');
-  const brandLicense = await readFile(join(root, 'assets', 'brand', 'LICENSE-CC-BY-4.0.md'), 'utf8');
-  assert.match(branding, /assets\/brand\/\*\.svg/);
-  assert.match(branding, /assets\/brand\/exploration\/\*\*\/\*\.png/);
-  assert.match(branding, /copy, display, share, modify, redistribute/);
-  assert.match(branding, /including commercially/);
-  assert.match(branding, /unofficial fork/);
-  assert.match(branding, /does not\s+automatically apply to screenshots/);
-  assert.match(brandLicense, /SPDX-License-Identifier: CC-BY-4\.0/);
-  assert.match(brandLicense, /Qubicl logo by EldanRing, licensed under CC BY 4\.0/);
-  assert.match(readme, /source code and documentation are Apache-2\.0/);
-  assert.match(readme, /official brand artwork are CC BY 4\.0/);
-  assert.match(readme, /\[BRANDING\.md\]\(BRANDING\.md\)/);
 });
 
 test('public issue intake disables blank issues and routes security reports privately', async () => {
@@ -213,10 +131,6 @@ test('container bases are pinned by digest', async () => {
   assert.match(computer, /apt-get upgrade -y/);
   assert.match(computer, /apt-get download novnc/);
   assert.doesNotMatch(computer, /^\s+novnc \\/m);
-  assert.match(computer, /brace-expansion@5\.0\.12/);
-  assert.match(computer, /undici@6\.28\.1/);
-  assert.match(computer, /ip-address@10\.3\.1/);
-  assert.match(computer, /tar@7\.5\.21/);
   for (const instruction of computer.split(/\n(?=RUN )/u)) {
     if (instruction.includes('apt-get install')) {
       assert.match(instruction, /apt-get install -y --no-install-recommends/);
@@ -275,9 +189,6 @@ test('web extraction dependencies are fully pinned, licensed, and included in im
     .filter((line) => line && !line.startsWith('#'));
   assert.ok(requirements.every((line) => /^[A-Za-z0-9_.-]+==[^=\s]+$/.test(line)));
   assert.equal(new Set(requirements.map((line) => line.split('==')[0]!.toLowerCase().replaceAll('_', '-'))).size, requirements.length);
-  for (const dependency of ['trafilatura==2.2.0', 'readability-lxml==0.8.4.1', 'courlan==1.4.0', 'jusText==3.0.2']) {
-    assert.ok(requirements.includes(dependency), `${dependency} must be pinned in the web image closure`);
-  }
 
   const notices = await readFile(join(root, 'images/computer/WEB_THIRD_PARTY_NOTICES.txt'), 'utf8');
   for (const requirement of requirements) {

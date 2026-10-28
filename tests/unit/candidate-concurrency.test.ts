@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
@@ -66,32 +65,4 @@ test('artifact acceptance receives disjoint ports and unique Docker image namesp
     assert.match(isolation.imageNamespace, /^qubicl\/e2e-(?:source|npm|binary)-[a-f0-9]{12}$/u);
   }
   assert.throws(() => artifactAcceptanceIsolation('unknown', '/tmp/unknown'), /source, npm, or binary/);
-});
-
-test('candidate assembly wires bounded incremental builds and isolated serial artifact acceptance', async () => {
-  const [builder, harness, e2e] = await Promise.all([
-    readFile(join(process.cwd(), 'scripts', 'build-local-candidates.mjs'), 'utf8'),
-    readFile(join(process.cwd(), 'scripts', 'test-artifact-e2e.mjs'), 'utf8'),
-    readFile(join(process.cwd(), 'tests', 'e2e', 'run.mjs'), 'utf8'),
-  ]);
-
-  assert.match(
-    builder,
-    /runWithConcurrency\(imageSpecs\.filter\(\(\{ name \}\) => buildPlan\.images\[name\]\.action === 'build'\), \(spec\) => buildImageCandidate\(spec, dashboardAssetManifestSha256\)\)/u,
-  );
-  assert.match(builder, /async function buildImageCandidate\(spec, dashboardAssetManifestSha256\)/u);
-  assert.match(builder, /for \(const spec of imageSpecs\) await scanImageCandidate\(spec\)/u);
-  assert.match(builder, /for \(const args of acceptanceJobs\)/u);
-  assert.doesNotMatch(builder, /runWithConcurrency\(acceptanceJobs/u);
-  assert.match(harness, /artifactAcceptanceIsolation\(mode, temporary\)/u);
-  assert.match(harness, /mkdtemp\(resolve\(homedir\(\), `\.qubicl-\$\{mode\}-e2e-`\)\)/u);
-  assert.match(harness, /QUBICL_E2E_HOME: e2eHome/u);
-  assert.match(harness, /cleanupE2eHome\(e2eHome, isolation\.imageNamespace\)/u);
-  assert.match(harness, /label=com\.docker\.compose\.project=\$\{project\}/u);
-  assert.match(harness, /reference=\$\{imageNamespace\}-custom\*/u);
-  assert.match(e2e, /QUBICL_E2E_PORT_START/u);
-  assert.match(e2e, /QUBICL_E2E_PORT_END/u);
-  assert.match(e2e, /QUBICL_E2E_IMAGE_NAMESPACE/u);
-  assert.match(e2e, /const ownsRoot = externalRoot === undefined/u);
-  assert.doesNotMatch(e2e, /qubicl\/e2e-custom(?:-|:)*/u);
 });

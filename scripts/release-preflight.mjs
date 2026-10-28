@@ -20,7 +20,7 @@ const temporary = await mkdtemp(join(tmpdir(), 'qubicl-release-preflight-'));
 
 try {
   const workspace = await jsonFile(join(root, 'package.json'));
-  assert(workspace.packageManager === 'npm@10.9.9', 'The release npm version must remain pinned.');
+  assert(/^npm@\d+\.\d+\.\d+$/u.test(workspace.packageManager ?? ''), 'Declare the default release npm version in packageManager.');
   const manifests = await Promise.all((await readdir(join(root, 'packages'), { withFileTypes: true }))
     .filter((entry) => entry.isDirectory())
     .map((entry) => jsonFile(join(root, 'packages', entry.name, 'package.json'))));

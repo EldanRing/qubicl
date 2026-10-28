@@ -19,22 +19,38 @@ its patched engine range; development accepts npm `>=10.9.9 <13`. The
 downgrade a compatible development npm. Candidate evidence records actual
 tool versions. Verify the affected dependency/build behavior when changing them.
 
-Use `npm run build` when bundled artifacts are needed. `npm run test:unit` runs all unit tests after type compilation. These commands are alternatives selected for the changed surface, not prerequisites to repeat before `npm run check`.
+Use `npm run build` when bundled artifacts are needed. `npm run test:unit` builds the current artifacts and runs all unit tests. These commands are alternatives selected for the changed surface, not prerequisites to repeat before `npm run check`.
 
-`npm run check` performs strict TypeScript, Oxlint, unit/integration tests with
-coverage floors, executable documentation/release-impact contract checks, and a
-high-severity npm audit. `npm run performance -- --no-build` reuses the existing
-bundle and records no build timing; use it only after verifying the bundle
-matches the source under measurement. The default `npm run performance`
-includes build timing and checks package/CLI/all-six-image size budgets; add
-`-- --runtime` for one controlled four-preset startup/workload/60-second-idle
-run.
+`npm run check` builds/typechecks once, lints source, runs the compiled tests
+and release-workflow `.mjs` tests, and checks documentation. It does not contact
+advisory services, start Docker acceptance, or run benchmarks. `npm test` builds
+and runs the same tests; `npm run test:built` reuses an already-current build.
+`npm run test:unit` builds the artifacts its CLI tests need before running the
+unit and release-workflow tests, so it cannot silently use an old CLI bundle.
 
-Run `npm run tokens:audit` to print exact compact tool-definition bytes for
-every preset and static profile. The command fails if the lease-transparent full
-`workstation` catalog reaches the reviewed 38,000-byte 0.6 regression ceiling,
-including retained tasks, terminals, skills, and native web research. It also
-prints the smaller static profile sizes so clients can select a focused catalog.
+Coverage is available through `npm run test:coverage` as an optional report;
+there are no blanket percentage floors. `npm run docs:check` validates local
+links, heading anchors, and documented commands without enforcing marketing
+phrases. `test:contracts` remains a compatibility alias for that documentation
+check; release-impact tests are now included in the normal test commands.
+
+Run `npm run check:security` when current npm advisory/signature and source-secret
+checks are needed. `release:check` combines source/privacy/security checks;
+`check:release` is an alias. Docker E2E, performance measurements, and token-size
+reports are separate explicit commands selected for the change, not hidden steps
+in either aggregate. Reuse applicable evidence rather than running both aliases.
+
+`npm run performance -- --no-build` measures an already-current bundle without
+rebuilding it. Default performance mode includes build timing and reports package,
+CLI, and available image sizes. `--runtime` additionally starts four preset
+workloads and includes a shared 60-second idle measurement. Select that cost
+explicitly when needed. Reports have no universal size, latency, or RSS gates;
+compare relevant measurements on comparable hardware and inspect actual failures.
+
+`npm run tokens:audit` reports compact tool-definition bytes and rough token
+estimates for each preset and profile. There is no fixed catalog-size ceiling
+that blocks a useful tool or clearer description. Profiles remain available
+when a client needs a smaller catalog.
 Set `QUBICL_TOKEN_METRICS=1` on a control service or stdio bridge to log
 size-only per-tool result/catalog events to stderr without logging tool
 arguments or result content.
@@ -180,7 +196,7 @@ trivy --version
 npm run scan:secrets
 ```
 
-The command scans reachable history and worktree with redacted findings. Before public cutover, also scan every retained remote branch/PR ref in a temporary bare clone; worktree checks cannot remove GitHub-owned PR refs. `npm run check:release` already runs `npm audit signatures`; reuse that result for the same dependency bytes and review Trivy reports in candidate output. Repeat external security checks when their advisories, trust data, or required freshness change.
+The command scans reachable history and worktree with redacted findings. Before public cutover, also scan every retained remote branch/PR ref in a temporary bare clone; worktree checks cannot remove GitHub-owned PR refs. `npm run check:security` runs `npm audit signatures`; reuse that result for the same dependency bytes and review Trivy reports in candidate output. Repeat external security checks when their advisories, trust data, or required freshness change.
 
 Dependency review is manual and local. The repository does not configure
 Dependabot or another bot to open routine public update pull requests. Review

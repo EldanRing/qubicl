@@ -6,7 +6,7 @@ are welcome; public interfaces and state formats may still change before 1.0.
 ## Before opening a change
 
 - Search existing issues and pull requests.
-- Open an issue before a substantial behavior, architecture, state-format, or public-interface change.
+- For a substantial design change, discuss the approach early or include its rationale directly in a focused pull request. An issue is not a prerequisite.
 - Keep a pull request focused and explain the user-visible outcome.
 - Describe effects on persistence, mounts, networking, authentication, privileges, clients, and supported platforms.
 - Never include credentials, tokens, private routes, viewer tickets, unredacted diagnostics, or `~/.qubicl` contents.
@@ -30,19 +30,19 @@ node --test dist-tests/unit/contracts.test.js
 For documentation-only changes, inspect the diff and check links and claims;
 no dependency installation or runtime build is needed. For code, choose checks
 from the [change-to-check guide](docs/development.md#choose-checks-for-the-change).
-`npm run check` is the full source gate, and Docker acceptance is a separate
-gate for affected runtime workflows. Docker runs build large images and change
+`npm run check` is the offline source check. Security checks, Docker acceptance,
+coverage, and performance reports are separate commands selected for the change. Docker runs build large images and change
 local Docker state temporarily, so let one run finish before starting another.
 
 ## Local-only project automation
 
-Qubicl does not use GitHub Actions, repository self-hosted runners, paid CI, or paid build/release services. Maintainers run tests and release preparation directly on controlled local hosts. External contributors should report the exact commands and environment they tested; maintainers independently run the required local gates before merging or releasing.
+Qubicl does not use GitHub Actions, repository self-hosted runners, paid CI, or paid build/release services. Maintainers run tests and release preparation directly on controlled local hosts. External contributors should report the exact commands and environment they tested; maintainers review and reuse applicable evidence, then run any remaining checks needed for the changed behavior.
 
 Do not add a workflow file as part of a contribution.
 
 ## Pull-request checklist
 
-- Add or update tests for behavior changes.
+- Update relevant behavior tests when needed; trivial edits do not need new tests or a coverage quota.
 - Report the focused checks you ran and any relevant checks still outstanding.
 - Run relevant Docker acceptance, or explain why it does not apply.
 - Update documentation and `CHANGELOG.md` for user-visible changes.

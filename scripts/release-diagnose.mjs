@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { assertCatalogIdentity } from './candidate-evidence.mjs';
-import { IMAGE_INPUTS_NAME } from './release-inputs.mjs';
+import { IMAGE_INPUTS_NAME, uncommittedImageInputs } from './release-inputs.mjs';
 import { createReleasePlan } from './release-plan.mjs';
 import { writeReleasePresetManifests } from './release-preset-manifests.mjs';
 
@@ -40,17 +40,19 @@ if (options.help) {
       'Diagnostic image-input evidence does not match candidate.json.');
   }
   const compatibility = await createReleasePlan(root, { reuse: options.candidate });
+  const dirtyImageInputs = await uncommittedImageInputs(root);
   const plan = {
     stage: 'diagnosis', candidate: options.candidate,
     scenario: options['upgrade-from'] ? 'real-upgrade' : 'source-e2e',
     builds: ['local JavaScript'], imageBuilds: 0, scans: 0, nativeBuilds: 0,
-    compatibleImageInputs: compatibility.buildImages.length === 0,
+    compatibleImageInputs: compatibility.buildImages.length === 0 && dirtyImageInputs.length === 0,
+    dirtyImageInputs,
     cleanSource: compatibility.clean,
     finalReleaseEvidence: false,
   };
   console.log(JSON.stringify(plan, null, 2));
   if (options.execute) {
-    assert(compatibility.clean, 'Diagnostic execution requires a clean committed source tree.');
+    assert(dirtyImageInputs.length === 0, `Diagnostic images do not include uncommitted runtime/build inputs: ${dirtyImageInputs.join(', ')}.`);
     assert(compatibility.buildImages.length === 0,
       `Diagnostic candidate is stale for image inputs: ${compatibility.buildImages.join(', ')}.`);
     const env = {
@@ -62,7 +64,7 @@ if (options.help) {
     };
     await run('npm', ['run', 'build'], env);
     await writeReleasePresetManifests(root, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       version: manifest.version,
       images: Object.fromEntries(Object.entries(compatibility.images).map(([name, value]) => [name, value.origin])),
     });

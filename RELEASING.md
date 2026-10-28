@@ -18,8 +18,10 @@ migration impact, affected artifacts, and relevant checks. Accumulate changes
 under `Unreleased`; bump workspace manifests and the lockfile together only when
 preparing an approved release. Add dated notes in `release-notes/vVERSION.md`.
 
-Select focused source checks for the actual change. `release:check` is an
-available aggregate, not a mandatory sequence to repeat for every release.
+Select focused source checks for the actual change. `release:check` combines
+source/privacy/security checks. It does not start Docker E2E or benchmarks; select
+those explicitly when the change requires them.
+It is not a mandatory sequence to repeat for every release.
 Use [development guidance](docs/development.md#choose-checks-for-the-change)
 and retain exact commands, outcomes, and input identities. Real-client or
 physical-platform claims require observations of those clients or machines.
@@ -93,6 +95,22 @@ candidate verification. It never publishes. If the advisory endpoint is down,
 `QUBICL_AUDIT_REUSE_PATH` may supply the existing bounded audit-reuse mechanism;
 the verifier still checks identity and freshness. Security exceptions and
 applicability statements remain explicit, scoped, dated records in `security/`.
+
+## Diagnose before freezing source
+
+```sh
+npm run release:diagnose -- --candidate /path/to/previous-candidate
+# Inspect the plan before appending --execute.
+```
+
+Local diagnosis can build uncommitted CLI or documentation fixes against an
+existing compatible image catalog; it is not publication evidence. The planner
+lists uncommitted runtime/build inputs and refuses to pair them with stale
+images. Staged, unstaged, new, and removed files are considered. Candidate
+construction and publication still require their clean committed source identity.
+`--upgrade-from OLD_NATIVE_CLI` selects the existing isolated upgrade scenario;
+otherwise execution runs source E2E. Diagnose the chosen failure once, then fix
+its cause instead of repeatedly running the entire release pipeline.
 
 ## Recover a failed construction
 

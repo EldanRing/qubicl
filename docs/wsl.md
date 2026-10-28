@@ -154,7 +154,7 @@ The image build creates the gateway, dashboard, and all four preset images from
 the same source revision as the CLI. This is a complete source-install recipe,
 not the verification requirement for every edit. Use the
 [change-to-check guide](development.md#choose-checks-for-the-change) for focused
-development; the full source gate is `npm run check`.
+development; the offline aggregate source check is `npm run check`.
 
 For a private checkout, use an SSH key or authenticated credential helper. Do
 not place a token in the clone URL or repository configuration. If GitHub CLI

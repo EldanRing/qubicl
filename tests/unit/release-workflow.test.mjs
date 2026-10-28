@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { imageInputIdentities, imageInputsForPath, IMAGE_INPUTS_NAME, RELEASE_IMAGES, selectImageActions, verifyImageInputs } from '../../scripts/release-inputs.mjs';
+import { imageInputIdentities, imageInputsForPath, uncommittedImageInputs, IMAGE_INPUTS_NAME, RELEASE_IMAGES, selectImageActions, verifyImageInputs } from '../../scripts/release-inputs.mjs';
 import { classifyReleaseImpact, releaseMetadataOnlyFiles, verifyReleaseImpactDocument } from '../../scripts/release-impact.mjs';
 import { createReleasePlan } from '../../scripts/release-plan.mjs';
 import { writeReleasePresetManifests } from '../../scripts/release-preset-manifests.mjs';
@@ -300,7 +300,6 @@ test('workstation-specific inputs do not rebuild other images in schema 2', () =
   assert.deepEqual(imageInputsForPath('images/computer/entrypoint.sh', 2), RELEASE_IMAGES.slice(2));
 });
 
-
 test('release impact verifies version-only metadata from Git and refuses forged narrow scope', async () => fixture(async ({ root, directory, write, commit, base }) => {
   await write('package.json', JSON.stringify({ name: 'fixture', version: '0.7.0', repository: source }));
   const revision = await commit();
@@ -315,4 +314,17 @@ test('release impact verifies version-only metadata from Git and refuses forged 
   const changed = await commit();
   await writeFile(path, JSON.stringify({ ...document, revision: changed }));
   await assert.rejects(verifyReleaseImpactDocument(path, { revision: changed, repositoryRoot: root }), /metadata does not match/);
+}));
+
+test('local diagnosis allows dirty CLI/docs changes but detects staged, unstaged, new and removed image inputs', async () => fixture(async ({ root, git, write }) => {
+  await write('packages/cli/src/migrations.ts', 'local fix\n');
+  await write('docs/local-debug.md', 'notes\n');
+  assert.deepEqual(await uncommittedImageInputs(root), []);
+  await write('packages/control/src/new-runtime.ts', 'new runtime\n');
+  await write('packages/gateway/src/main.ts', 'changed runtime\n');
+  await git('add', 'packages/gateway/src/main.ts');
+  await git('rm', 'packages/control/src/main.ts');
+  assert.deepEqual(await uncommittedImageInputs(root), ['packages/control/src/main.ts', 'packages/control/src/new-runtime.ts', 'packages/gateway/src/main.ts']);
+  await write('package.json', JSON.stringify({ version: '0.6.0', dependencies: { changed: '^1' } }));
+  assert((await uncommittedImageInputs(root)).includes('package.json'));
 }));

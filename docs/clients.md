@@ -298,10 +298,8 @@ interruption. An Open WebUI/Open Terminal connection still shares one fenced
 lease and one assigned computer; chat folders are organizational directories,
 not security isolation or automatically provisioned computers.
 
-The 0.6 release-impact document identifies affected client adapters and
-protocols; missing required coverage is never treated as a pass. The complete
-0.6 source change affects the shared contract and therefore still requires real
-acceptance for Codex, Claude Code, Claude
-Desktop, Cursor, VS Code, OpenCode, OpenClaw, Hermes and Open WebUI, together with
-all four protocol profiles, including for an initial release. No adapter or
-physical-client acceptance is inferred from dashboard mock tests.
+The release-impact document identifies affected adapters and protocols. Signed
+qualification records actual results and discloses unavailable or failed checks.
+Dashboard mocks do not establish real-client or physical-device behavior. See
+[release conformance evidence](#release-conformance-evidence); the historical
+full-client matrix is not an extra requirement on the new qualification path.

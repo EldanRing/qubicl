@@ -68,3 +68,9 @@ that installation/executable check. Candidate construction, physical platforms,
 and actual release publication require their own release evidence. Review the input map whenever
 build inputs change and the npm range when a new major version is considered.
 Review recipe behavior when changing the base distribution or Python ABI.
+
+Maintenance follow-up: default source checks build once and do not implicitly
+run advisory requests, Docker E2E, or benchmarks. Coverage and size reports are
+optional measurements without universal quotas. Documentation checks validate
+links and commands, not exact prose. Local diagnosis may use uncommitted
+host-only fixes when the image inputs still match; release source stays immutable.

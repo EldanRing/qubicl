@@ -2,7 +2,7 @@
 
 The versioned
 [platform support matrix](../conformance/platform-support-v1.json) is the
-machine-readable release contract. Support policy and validation evidence are
+machine-readable support policy and legacy acceptance inventory. Support policy and validation evidence are
 separate:
 
 - **Supported** means the Qubicl release policy covers that host shape.
@@ -20,7 +20,7 @@ retaining the corresponding release evidence.
 | Host shape | CLI support | Historical validation | Evidence baseline | Execution boundary |
 | --- | --- | --- | --- | --- |
 | Linux x64 | Supported | Directly tested | v0.1.0 | Native Linux CLI with a local Linux Docker Engine or Docker Desktop |
-| Linux ARM64 | Best-effort | Not directly tested | — | Native Linux CLI; ARM64 images and archive are produced, but no physical-host claim is made |
+| Linux ARM64 | Best-effort | Not directly tested | — | Native Linux CLI; ARM64 images are available; native archive availability is release-specific and no physical-host claim is made |
 | Apple Silicon macOS | Supported | Directly tested | v0.1.0 | Native arm64 CLI with Docker Desktop's Linux VM |
 | Intel macOS | Best-effort | Not directly tested | — | Native x64 CLI with Docker Desktop's Linux VM |
 | Windows 11 x64 through Ubuntu 24.04 on WSL 2 | Supported | Directly tested | v0.1.0 | Linux CLI, state, and Docker access stay inside WSL 2; Docker Desktop supplies the Linux engine |
@@ -30,11 +30,10 @@ retaining the corresponding release evidence.
 | WSL 1 | Unsupported | Not directly tested | — | Setup and doctor fail closed |
 
 The directly tested labels record historical v0.1.0 baselines. They do not
-establish current 0.6 behavior. The 0.6 release-impact document selects the
-platform and dashboard rows affected by the exact source range; signed
-acceptance must identify current runs or applicable evidence reused with exact
-input, artifact, tool, platform, and freshness identity. Missing required
-coverage cannot pass.
+establish behavior in a current release. Impact-selected qualification records
+current runs, applicable reused evidence, and explicit gaps. Missing coverage is
+never counted as passing; disclosed limitations do not promote support claims.
+Native archives are selected per release, independently of the support matrix.
 
 Native Windows and WSL 1 are unsupported. Qubicl computers are Linux
 containers on every host; macOS and Windows support does not mean native
@@ -43,11 +42,10 @@ against the host, Docker, or the host kernel. The gateway remains loopback-only
 by default. Optional direct TLS exposure has focused source/loopback tests, but
 peer-IP behavior behind Docker Desktop/NAT must be validated on the actual host
 before relying on a CIDR allowlist. The separate versioned
-[remote-access requirements](../conformance/remote-access-v1.json) require
-post-freeze native-Linux evidence for a pre-1.0 initial release. A supported
-remote-access claim additionally requires Apple Silicon Docker Desktop and
-Windows WSL 2/Docker Desktop evidence; those rows do not promote any
-best-effort platform by themselves.
+[remote-access requirements](../conformance/remote-access-v1.json) describe
+useful host-specific checks and the legacy acceptance contract. For the new
+qualification path, select checks relevant to the change and disclose gaps.
+Claims about Docker Desktop/NAT filtering still need evidence from that host.
 
 ## macOS with Docker Desktop
 
@@ -111,9 +109,8 @@ The management helper currently supports native Linux x64 and Apple Silicon
 macOS. Existing WSL CLI workflows remain available; dashboard service installation
 on WSL, native Windows and Intel macOS is deferred. Linux uses `systemd --user`
 with a foreground fallback; macOS uses a user LaunchAgent. Neither starts Docker
-or claims pre-login availability. The acceptance validator requires every
-dashboard row selected by the exact release-impact document. Native rows must
-record the exact architecture, service identity, and TLS identity. These are
+or claims pre-login availability. Qualification accounts for selected dashboard checks and any gaps. Actual
+native-host results identify architecture, service identity, and TLS identity. These are
 dashboard-specific checks and do not establish a general macOS platform run.
 Focused source tests and a responsive mock-browser run do not establish the
 physical-host or phone results. See

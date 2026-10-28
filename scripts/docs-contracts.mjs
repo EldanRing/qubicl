@@ -58,24 +58,6 @@ for (const [name, contents] of documents) {
   }
 }
 
-for (const name of ['README.md', 'packages/cli/README.md']) {
-  const text = documents.get(name)?.toLowerCase() ?? '';
-  for (const claim of ['named client credential', 'interactive terminal', 'retained task', 'installation export']) {
-    if (!text.includes(claim)) errors.push(`${name}: missing 0.6 product claim containing ${JSON.stringify(claim)}`);
-  }
-}
-
-const currentDocs = [...documents].filter(([name]) => !name.startsWith('release-notes/') && name !== 'CHANGELOG.md' && !name.startsWith('docs/decisions/'));
-const staleClaims = [
-  ['non-PTY managed process', 'the current terminal documentation still declares PTY unavailable'],
-  ['encrypted backups remain CLI-only', 'the dashboard guide still excludes encrypted backup operations'],
-  ['reload requires login', 'the dashboard guide still claims same-tab refresh loses login'],
-  ['accepted and in implementation', 'the public product status still calls the implemented 0.6 design pending'],
-];
-for (const [needle, message] of staleClaims) {
-  for (const [name, contents] of currentDocs) if (contents.toLowerCase().includes(needle.toLowerCase())) errors.push(`${name}: ${message}`);
-}
-
 if (errors.length) throw new Error(`Documentation contract check failed:\n- ${errors.join('\n- ')}`);
 console.log(JSON.stringify({ ok: true, markdownFiles: files.length, localLinks, headingLinks, documentedCommands: commands.size }, null, 2));
 

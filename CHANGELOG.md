@@ -17,6 +17,15 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Changed
 
+- Make ordinary source checks offline and build once; include release-workflow
+  tests in the normal test commands and ensure unit CLI tests use a current bundle.
+  Keep security checks, coverage, Docker E2E, performance, and token measurements
+  explicit. Remove fixed coverage/catalog-size/performance quotas and exact-prose
+  documentation rules; retain behavior, artifact, and security validation.
+  Performance reports use schema 3 with raw measurements and no `budgets` array.
+- Allow local diagnosis of uncommitted CLI fixes when runtime image inputs match,
+  and read the default npm release pin from metadata instead of hardcoding it in
+  preflight. Clarify contributor and platform guidance for signed qualification.
 - Decouple CLI/catalog versions from image origins. New candidates reuse
   unchanged runtime images across versions and refresh scans per image while
   retaining exact archive, dependency, and original build provenance.

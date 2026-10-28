@@ -36,7 +36,7 @@ const runtime = options.runtime ? await runtimeMeasurements() : undefined;
 const binary = options.binary ? await binaryMeasurement(resolve(options.binary), iterations) : undefined;
 
 const report = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   measuredAt: new Date().toISOString(),
   source: { revision: revision.stdout.trim(), dirty },
   environment: {
@@ -59,16 +59,14 @@ const report = {
   ...(binary ? { binary } : {}),
 };
 
-const budgets = evaluateBudgets(report);
-printSummary(report, budgets);
+printSummary(report);
 if (options.output) {
   const output = resolve(options.output);
   await mkdir(dirname(output), { recursive: true });
-  await writeFile(output, `${JSON.stringify({ ...report, budgets }, null, 2)}\n`);
+  await writeFile(output, `${JSON.stringify(report, null, 2)}\n`);
   console.log(`JSON report: ${output}`);
 }
-if (options.json) console.log(JSON.stringify({ ...report, budgets }, null, 2));
-if (budgets.some(({ passed }) => !passed)) process.exitCode = 1;
+if (options.json) console.log(JSON.stringify(report, null, 2));
 
 async function packageMeasurement() {
   const result = await command('npm', ['pack', '--workspace', 'packages/cli', '--dry-run', '--json', '--ignore-scripts']);
@@ -264,40 +262,7 @@ function percentile(sorted, fraction) {
   return sorted[Math.max(0, Math.ceil(sorted.length * fraction) - 1)];
 }
 
-function evaluateBudgets(report) {
-  const checks = [
-    // The CLI package deliberately carries both the minimal Playwright runtime
-    // and the verified, operator-selectable core skill baselines installed
-    // into computer images. Keep a narrow ceiling above that reviewed payload
-    // so types, trace UIs, installers, or unrelated assets cannot silently land.
-    budget('npm packed bytes', report.package.packedBytes, 7_000_000),
-    // Loading the full lifecycle/security command surface remains interactive;
-    // 125 ms leaves ordinary local scheduling jitter without masking regressions.
-    budget('CLI help p95 milliseconds', report.cli.help.elapsedMs.p95, 125),
-  ];
-  // The complete v0.6 Node-wrapped CLI measures about 108 MiB on the release
-  // host. Keep modest runtime/ASLR headroom without allowing a materially larger
-  // dependency graph to land.
-  if (report.cli.help.maxRssKiB) checks.push(budget('CLI help max RSS KiB', report.cli.help.maxRssKiB.max, 112 * 1024));
-  if (report.images.gateway.downloadBytes !== null) checks.push(budget('gateway download bytes', report.images.gateway.downloadBytes, 65_000_000));
-  if (report.images.dashboard.downloadBytes !== null) checks.push(budget('dashboard download bytes', report.images.dashboard.downloadBytes, 65_000_000));
-  // The universal local web service, source skill catalog, and common CLI utilities
-  // are present in every image. Browser adds Chromium, OCR, and its smaller
-  // document closure; computer adds XFCE, SSH, and the full document closure;
-  // workstation adds LibreOffice and the compiler toolchain.
-  const imageBudgets = { 'file-system': 205_000_000, browser: 625_000_000, computer: 675_000_000, workstation: 925_000_000 };
-  for (const [preset, maximum] of Object.entries(imageBudgets)) {
-    if (report.images[preset].downloadBytes !== null) checks.push(budget(`${preset} download bytes`, report.images[preset].downloadBytes, maximum));
-    if (report.runtime?.[preset]) checks.push(budget(`${preset} startup milliseconds`, report.runtime[preset].startupMs, report.runtime[preset].startupBudgetMs));
-  }
-  return checks;
-}
-
-function budget(name, observed, maximum) {
-  return { name, observed, maximum, passed: observed <= maximum };
-}
-
-function printSummary(report, budgets) {
+function printSummary(report) {
   console.log('Qubicl local performance report');
   console.log(`source       ${report.source.revision.slice(0, 12)}${report.source.dirty ? ' (dirty)' : ''}`);
   console.log(report.build ? `build        ${formatMs(report.build.elapsedMs.p95)}; peak RSS ${formatRss(report.build.maxRssKiB?.max)}` : 'build        reused existing artifacts; build timing not measured');
@@ -316,7 +281,6 @@ function printSummary(report, budgets) {
       console.log(`${preset.padEnd(27)} startup ${formatMs(measurement.startupMs)}; idle ${measurement.idle.cpuPercent.toFixed(2)}% CPU, ${formatBytes(measurement.idle.memoryBytes)}, ${measurement.idle.pids} PIDs`);
     }
   }
-  for (const check of budgets) console.log(`${check.passed ? 'PASS' : 'FAIL'} budget  ${check.name}: ${check.observed} <= ${check.maximum}`);
 }
 
 function formatMs(value) {

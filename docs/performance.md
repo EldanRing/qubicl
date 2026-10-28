@@ -1,4 +1,4 @@
-# Local performance contract
+# Local performance measurements
 
 Performance checks run only on the current maintainer-controlled host and upload nothing.
 
@@ -6,7 +6,12 @@ Performance checks run only on the current maintainer-controlled host and upload
 npm run performance
 ```
 
-The baseline builds source, dry-runs the npm package, samples CLI help/version latency and peak RSS, inspects the exact local gateway, dashboard, and all four preset images, and enforces initial size budgets. It uses `docker image inspect` only; missing images are reported rather than pulled/built.
+The default command builds source, dry-runs the npm package, samples CLI
+help/version latency and peak RSS, and inspects available local image metadata.
+It reports measurements without enforcing fixed package/image sizes or
+machine-dependent latency/RSS thresholds. Missing images are reported rather
+than pulled or built. This command is optional and is not part of `check` or
+`release:check`. Use `--no-build` when the existing artifacts match your source.
 
 For preset recommendations, run one explicit container session and wait for it to finish:
 
@@ -16,33 +21,22 @@ npm run performance -- --runtime --output "$HOME/qubicl-performance.json"
 
 Runtime mode starts the four exact local preset images with their recommended CPU/memory/PID/shared-memory limits and `--pull never`. It measures health startup, runs the representative shell/browser/desktop/development/office workload, waits one shared 60-second idle interval, samples CPU/memory/PIDs once, then removes its containers and temporary homes. It does not publish or contact a benchmark service.
 
-Current guardrails, enforced by [the performance checker](../scripts/performance.mjs):
+Compare reports from equivalent artifacts, hardware, and cache conditions.
+Investigate meaningful regressions against a selected baseline instead of
+raising arbitrary ceilings until a run passes. Package size includes runtime
+assets, skill baselines, and license/SBOM material; it is not just JavaScript.
 
-The npm package deliberately includes the six verified Qubicl core-skill baselines,
-runtime build assets, and legal/SBOM material needed for source-local operation;
-the packed-package budget therefore measures more than the JavaScript CLI
-bundle. Container layers are measured separately below.
-
-| Artifact | Maximum |
-| --- | ---: |
-| npm package | 7 MB packed |
-| CLI help p95 | 125 ms |
-| CLI help peak RSS | 112 MiB |
-| gateway image | 65 MB expanded platform content |
-| dashboard image | 65 MB expanded platform content |
-| file-system image | 205 MB |
-| browser image | 625 MB |
-| computer image | 675 MB |
-| workstation image | 925 MB |
-
-Each preset also must become healthy inside its catalog startup budget and complete its workload without OOM/PID exhaustion. These are regression guardrails, not cross-machine marketing promises. Recommendations are raised if real acceptance lacks reasonable headroom; they are not lowered to improve appearance.
+Runtime mode still fails when a command, health check, or representative
+workload fails. Normal product startup timeouts and resource limits continue to
+apply; removing benchmark quotas does not hide a failed workload.
+Reports use schema 3 and contain raw measurements without the former `budgets`
+array. Historical schema-2 reports retain their original data.
 
 Use `--binary PATH` to sample an already-built native candidate and `--json` for machine-readable stdout. Reports include only revision/dirty state, tool/platform versions, and measurements—never username, hostname, home path, IP, or credentials.
 
 Multi-computer scaling and cold/warm hardware comparisons remain separate local acceptance records because they require an isolated host and controlled cache state.
 
-Complete image candidates from v0.2 onward also carry `oci-efficiency.json`. Unlike the
-local expanded-size guardrails above, that immutable report compares both
+Complete image candidates from v0.2 onward also carry `oci-efficiency.json`. That immutable report compares both
 architectures across all six exact OCI archives. It records compressed and
 expanded layer sharing and a bounded normalized package inventory derived from
 each platform's embedded SPDX attestation. Candidate verification regenerates the

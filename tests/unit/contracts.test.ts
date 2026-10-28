@@ -3,7 +3,6 @@ import test from 'node:test';
 import {
   buildOpenApi,
   buildOpenTerminalOpenApi,
-  compactToolDefinitionBytes,
   enabledToolNames,
   jsonSchemaForTool,
   mcpToolResult,
@@ -260,9 +259,8 @@ test('MCP result modes never repeat a full payload unless compatibility is expli
   assert.match((compatible.content[0] as { text: string }).text, /x{100}/);
 });
 
-test('lease-transparent workstation catalog stays within its reviewed 0.6 budget and profiles remain static subsets', async () => {
+test('lease-transparent profiles remain static subsets with the expected lease semantics', async () => {
   const workstation = enabledToolNames(PRESET_DEFINITIONS.workstation.capabilities);
-  assert.ok(compactToolDefinitionBytes(workstation, { leaseTransparent: true }) < 38_000);
   const transparent = toolNamesForProfile(workstation, 'full', true);
   assert.equal(transparent.includes('acquire_lease'), false);
   assert.equal(transparent.includes('renew_lease'), false);

@@ -34,6 +34,17 @@ export function imageInputsForPath(path, schemaVersion = 1) {
   return RELEASE_IMAGES;
 }
 
+// Diagnostics may use dirty host-only code, but must not pair changed runtime
+// inputs with older immutable images. Include staged, unstaged and new files.
+export async function uncommittedImageInputs(root) {
+  const results = await Promise.all([
+    exec('git', ['diff', '--name-only', '--no-renames', '-z', 'HEAD', '--'], { cwd: root, maxBuffer: 20_000_000 }),
+    exec('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd: root, maxBuffer: 20_000_000 }),
+  ]);
+  return [...new Set(results.flatMap(({ stdout }) => stdout.split('\0').filter(Boolean)))]
+    .filter((path) => path === 'package.json' || imageInputsForPath(path, 2).length > 0).sort();
+}
+
 export async function imageInputIdentities(root, revision, schemaVersion = 1) {
   assert(/^[a-f0-9]{40}$/u.test(revision), 'Image inputs require an exact Git commit.');
   assert([1, 2].includes(schemaVersion), 'Unknown image input schema.');
