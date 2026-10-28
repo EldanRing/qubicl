@@ -102,6 +102,7 @@ import {
   readPendingTransaction,
   recoverPendingTransaction,
 } from './transactions.js';
+import { buildSoftwareImage, softwareRecipe } from './software.js';
 import { upgradedComputer } from './upgrade.js';
 import { setupCommand } from './setup.js';
 import { checkViewerHealth } from './viewer-health.js';
@@ -177,7 +178,7 @@ async function executeUnlocked(command: string | undefined, args: ParsedArgs): P
     return;
   }
   await prepareStateBeforeCommand(command, args);
-  await maybePrintLocalUpdateNotification(command, args);
+  if (!(command === 'connect' && stringOption(args, 'ssh'))) await maybePrintLocalUpdateNotification(command, args);
   switch (command) {
     case undefined:
     case 'help':
@@ -193,6 +194,7 @@ async function executeUnlocked(command: string | undefined, args: ParsedArgs): P
     case 'down': return down();
     case 'create': return create(args);
     case 'upgrade': return upgrade(args);
+    case 'software': return software(args);
     case 'update': return updateCommand(args);
     case 'installation': return installationCommand(args);
     case 'list': return list(args);
@@ -247,6 +249,7 @@ async function executeUnlocked(command: string | undefined, args: ParsedArgs): P
       stringOption(args, 'client-host'),
       stringOption(args, 'access'),
       stringOption(args, 'credential'),
+      stringOption(args, 'ssh'),
     );
     case 'mcp': return mcp(
       required(args.positionals[0], 'computer name'),
@@ -552,7 +555,18 @@ async function upgrade(args: ParsedArgs): Promise<void> {
   return upgradeComputer(args);
 }
 
-async function upgradeComputer(args: ParsedArgs): Promise<void> {
+async function software(args: ParsedArgs): Promise<void> {
+  const packages = stringOption(args, 'apt');
+  if (packages && flag(args, 'reset')) throw new Error('--apt and --reset are mutually exclusive.');
+  if (!packages && !flag(args, 'reset')) {
+    const computer = findComputer(await loadState(), required(args.positionals[0], 'computer name'));
+    operationOutput('log', JSON.stringify(computer.software ?? { aptPackages: [], baseImage: computer.image.requested }, null, 2));
+    return;
+  }
+  await upgradeComputer(args, flag(args, 'reset') ? 'reset' : packages!.split(',').map((name) => name.trim()));
+}
+
+async function upgradeComputer(args: ParsedArgs, softwareChange?: string[] | 'reset'): Promise<void> {
   const name = required(args.positionals[0], 'computer name');
   const paths = statePaths();
   await withStateLock(paths, async () => {
@@ -575,11 +589,14 @@ async function upgradeComputer(args: ParsedArgs): Promise<void> {
     printBrowserProfileDisclosure('upgrade');
     const presetValue = stringOption(args, 'preset');
     const image = stringOption(args, 'image');
+    const recipe = softwareChange === 'reset' ? undefined : (current.software || Array.isArray(softwareChange))
+      ? softwareRecipe(current, Array.isArray(softwareChange) ? softwareChange : []) : undefined;
+    const savedBase = recipe ?? (softwareChange === 'reset' ? current.software : undefined);
     if (presetValue && image) throw new Error('--preset and --image are mutually exclusive.');
 
     let imageDefaults: ComputerDefaults;
     let targetPreviewAccessProtocol: typeof COMPUTER_PREVIEW_ACCESS_PROTOCOL | undefined;
-    const targetPreset = presetValue ?? (image || current.preset === 'custom' ? undefined : current.preset);
+    const targetPreset = presetValue ?? (image ? undefined : savedBase?.basePreset ?? (current.preset === 'custom' ? undefined : current.preset));
     if (targetPreset) {
       const preset = PresetSchema.parse(targetPreset);
       const acquired = await acquireCatalogPreset(preset, {
@@ -592,7 +609,7 @@ async function upgradeComputer(args: ParsedArgs): Promise<void> {
         image: acquired.identity,
       });
     } else {
-      const requested = image ?? current.image.requested;
+      const requested = image ?? savedBase?.baseImage ?? current.image.requested;
       const acquired = await acquireCustomImage(requested, {
         offline: flag(args, 'offline'),
         platform: host.platform,
@@ -609,6 +626,15 @@ async function upgradeComputer(args: ParsedArgs): Promise<void> {
         memory: recommendation.recommendedMemory,
       });
     }
+    if (recipe) {
+      recipe.baseImage = imageDefaults.image.requested;
+      if (targetPreset) recipe.basePreset = PresetSchema.parse(targetPreset);
+      else delete recipe.basePreset;
+      operationOutput('log', `Preparing saved system packages for ${current.name}: ${recipe.aptPackages.join(', ')}. The computer will keep its home and running/stopped state.`);
+      const tag = await buildSoftwareImage(imageDefaults.image.resolved, recipe, current.id, flag(args, 'offline'));
+      const acquired = await acquireCustomImage(tag, { offline: true, platform: host.platform });
+      imageDefaults = ComputerDefaultsSchema.parse({ ...imageDefaults, preset: 'custom', image: acquired.identity });
+    }
     assertRemotePreviewUpgradeCompatibility(
       state.config.gateway.exposure?.previewDomain,
       current.name,
@@ -616,6 +642,8 @@ async function upgradeComputer(args: ParsedArgs): Promise<void> {
     );
 
     const replacement = upgradedComputer(current, imageDefaults);
+    if (recipe) replacement.software = recipe;
+    else delete replacement.software;
     const recommendation = PRESET_DEFINITIONS[replacement.compatibility];
     if (replacement.cpus < recommendation.cpus || memoryBytes(replacement.memory) < memoryBytes(recommendation.memory)) {
       operationOutput('warn', `Warning: preserved resources are below the tested ${replacement.compatibility} recommendation (${recommendation.cpus} CPU / ${recommendation.memory}).`);
@@ -1214,9 +1242,22 @@ async function connectClient(
   clientHost: string | undefined,
   accessValue: string | undefined,
   credentialId: string | undefined,
+  sshHost: string | undefined,
 ): Promise<void> {
   if (profile) ToolProfileSchema.parse(profile);
   if (resultMode) McpResultModeSchema.parse(resultMode);
+  if (sshHost) {
+    assertValidName(name);
+    if (accessValue || credentialId || (clientHost && clientHost !== 'local')) throw new Error('--ssh uses the remote host’s local stdio bridge; omit --access, --credential, and --client-host windows.');
+    const snippet = connectionSnippet({ client, computerName: name, endpoints: { mcp: '', openapi: '' }, sshHost,
+      ...(transport ? { transport } : {}), ...(profile ? { profile } : {}), ...(resultMode ? { resultMode } : {}) });
+    operationOutput('error', `Authenticate with ssh ${sshHost} once and verify its host key. The remote account must have qubicl on its non-interactive PATH and own computer ${name}.`);
+    const instructions = connectionInstructions(snippet);
+    for (const line of instructions.before) operationOutput('error', line);
+    operationOutput('log', snippet.content);
+    for (const line of instructions.after) operationOutput('error', line);
+    return;
+  }
   const state = await loadState();
   const computer = findComputer(state, name);
   const access = parseGatewayAccess(accessValue);
@@ -1465,7 +1506,7 @@ async function applyManifest(path: string, dryRun: boolean, prune: boolean): Pro
 }
 
 async function prepareStateBeforeCommand(command: string | undefined, args: ParsedArgs): Promise<void> {
-  if (!command || ['help', 'version', 'image', 'doctor', 'dashboard', 'recover'].includes(command)
+  if ((command === 'connect' && stringOption(args, 'ssh')) || !command || ['help', 'version', 'image', 'doctor', 'dashboard', 'recover'].includes(command)
     || (command === 'installation' && args.positionals[0] === 'inspect')) return;
   const paths = statePaths();
   const initialFormat = await inspectStateFormat(paths);
@@ -2078,6 +2119,7 @@ const invocationRules: Record<string, InvocationRule> = {
   up: { minPositionals: 0, maxPositionals: 0 },
   down: { minPositionals: 0, maxPositionals: 0 },
   create: { minPositionals: 0, maxPositionals: 1, options: ['preset', 'image', 'cpus', 'memory', 'skills', 'tools', 'no-start', 'offline', 'yes', 'json'] },
+  software: { minPositionals: 1, maxPositionals: 1, options: ['apt', 'reset', 'offline'] },
   upgrade: { minPositionals: 0, maxPositionals: 1, options: ['preset', 'image', 'offline', 'all', 'yes'] },
   update: { minPositionals: 0, maxPositionals: 1, options: ['offline', 'json'] },
   installation: { minPositionals: 1, maxPositionals: 2, options: ['output', 'target-root', 'passphrase-file', 'json'] },
@@ -2112,7 +2154,7 @@ const invocationRules: Record<string, InvocationRule> = {
   restore: { minPositionals: 1, maxPositionals: 1 },
   purge: { minPositionals: 1, maxPositionals: 1, options: ['yes'] },
   view: { minPositionals: 1, maxPositionals: 1, options: ['no-open', 'access'] },
-  connect: { minPositionals: 1, maxPositionals: 1, options: ['client', 'client-host', 'transport', 'profile', 'result-mode', 'access', 'credential'] },
+  connect: { minPositionals: 1, maxPositionals: 1, options: ['client', 'client-host', 'transport', 'profile', 'result-mode', 'access', 'credential', 'ssh'] },
   mcp: { minPositionals: 1, maxPositionals: 1, options: ['profile', 'result-mode'] },
   token: { minPositionals: 2, maxPositionals: 3, options: ['label', 'scopes', 'yes', 'json'] },
   image: { minPositionals: 1, maxPositionals: 3 },
@@ -2239,7 +2281,7 @@ Usage: qubicl <command> [arguments]
   view <name> [--no-open] [--access local|remote]
                                          Open the interactive desktop
   connect <name> --client <client> [--client-host local|windows]
-                 [--transport stdio|http|openapi]
+                 [--ssh user@host] [--transport stdio|http|openapi]
                  [--access local|remote]
                  [--credential id]
                  [--profile full|files|browser-semantic|browser-visual|desktop]
@@ -2251,6 +2293,8 @@ Usage: qubicl <command> [arguments]
   token create <name> <id> [--label TEXT] [--scopes observe,files,tasks,interactive,publish]
   token show|rotate <name> [id]          Show or rotate one client credential
   token revoke <name> <id> --yes         Revoke one named client without disrupting others
+  software <name> [--apt pkg,pkg] [--reset] [--offline]
+                                         Show, add, or reset saved system packages; preserve the home
   image build <tag> <directory>          Build a custom computer image
   export [--output qubicl.yaml]          Export a secret-free manifest
   apply <file> [--dry-run] [--prune]     Reconcile a manifest`;

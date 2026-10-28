@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 import { imageInputIdentities, imageInputsForPath, IMAGE_INPUTS_NAME, RELEASE_IMAGES, selectImageActions, verifyImageInputs } from '../../scripts/release-inputs.mjs';
+import { classifyReleaseImpact, releaseMetadataOnlyFiles, verifyReleaseImpactDocument } from '../../scripts/release-impact.mjs';
 import { createReleasePlan } from '../../scripts/release-plan.mjs';
 import { writeReleasePresetManifests } from '../../scripts/release-preset-manifests.mjs';
 import { assertTrivyScannerIdentity } from '../../scripts/candidate-evidence.mjs';
@@ -25,7 +26,8 @@ async function fixture(run) {
   try {
     await git('init', '--quiet');
     await write('package.json', JSON.stringify({ name: 'fixture', version: '0.6.0', repository: source }));
-    for (const name of ['packages/gateway/src/main.ts', 'packages/control/src/main.ts', 'packages/cli/src/migrations.ts', 'scripts/build.mjs', 'package-lock.json']) await write(name, 'original\n');
+    for (const name of ['packages/gateway/src/main.ts', 'packages/control/src/main.ts', 'packages/cli/src/migrations.ts', 'scripts/build.mjs']) await write(name, 'original\n');
+    await write('package-lock.json', JSON.stringify({ name: 'fixture', version: '0.6.0', lockfileVersion: 3, packages: {} }));
     const base = await commit();
     await run({ directory, root, git, write, commit, base });
   } finally { await rm(directory, { recursive: true, force: true }); }
@@ -152,6 +154,7 @@ test('catalog generation carries forward exact unchanged image entries without o
     await mkdir(join(directory, 'scripts'));
     for (const name of scriptNames) await copyFile(join(process.cwd(), 'scripts', name), join(directory, 'scripts', name));
     const version = '0.6.0';
+    const nextVersion = '0.7.0';
     const origin = 'a'.repeat(40);
     const revision = 'b'.repeat(40);
     const source = 'https://github.com/example/qubicl';
@@ -201,8 +204,8 @@ test('catalog generation carries forward exact unchanged image entries without o
     };
     const inputPath = join(directory, IMAGE_INPUTS_NAME);
     await writeFile(inputPath, JSON.stringify({
-      schemaVersion: 1,
-      version,
+      schemaVersion: 2,
+      version: nextVersion,
       revision,
       images: Object.fromEntries(RELEASE_IMAGES.map((name) => [name, {
         version,
@@ -221,7 +224,7 @@ test('catalog generation carries forward exact unchanged image entries without o
       join(directory, 'scripts/generate-image-catalog.mjs'),
       '--directory', directory,
       '--output', outputPath,
-      '--version', version,
+      '--version', nextVersion,
       '--revision', revision,
       '--source', source,
       '--owner', 'example',
@@ -231,6 +234,8 @@ test('catalog generation carries forward exact unchanged image entries without o
     ], { cwd: directory });
     const generated = JSON.parse(await readFile(outputPath, 'utf8'));
     assert.equal(generated.revision, revision);
+    assert.equal(generated.releaseVersion, nextVersion);
+    assert.equal(generated.gateway.requested, 'ghcr.io/example/qubicl-gateway:0.7.0');
     assert.equal(generated.gateway.indexDigest, catalog.gateway.indexDigest);
     assert.equal(generated.presets.workstation.manifestSha256, catalog.presets.workstation.manifestSha256);
   } finally {
@@ -256,3 +261,58 @@ test('release packaging writes preset manifests for each image origin without ch
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('schema-2 image identity survives release version bumps and keeps real dependency changes significant', async () => fixture(async ({ root, write, commit }) => {
+  const lock = { name: 'fixture', version: '0.6.0', lockfileVersion: 3, packages: {
+    '': { version: '0.6.0' },
+    'packages/core': { name: '@qubicl/core', version: '0.6.0', dependencies: { zod: '^4' } },
+    'node_modules/zod': { version: '4.0.0', integrity: 'original' },
+  } };
+  await write('package-lock.json', JSON.stringify(lock));
+  await write('packages/core/package.json', JSON.stringify(lock.packages['packages/core']));
+  const origin = await commit();
+  const baseline = await imageInputIdentities(root, origin, 2);
+  await write('package.json', JSON.stringify({ name: 'fixture', version: '0.7.0', repository: source }));
+  lock.version = lock.packages[''].version = lock.packages['packages/core'].version = '0.7.0';
+  await write('package-lock.json', JSON.stringify(lock));
+  await write('packages/core/package.json', JSON.stringify(lock.packages['packages/core']));
+  const revision = await commit();
+  const current = await imageInputIdentities(root, revision, 2);
+  assert.deepEqual(current, baseline);
+  const previous = { ...inputs(origin, baseline), schemaVersion: 2 };
+  await verifyImageInputs({ ...previous, version: '0.7.0', revision }, { version: '0.7.0', revision }, root);
+  const actions = selectImageActions({ current, previous, version: '0.7.0', revision, tools: toolchain,
+    scansFresh: Object.fromEntries(RELEASE_IMAGES.map((name) => [name, name !== 'gateway'])) });
+  assert(Object.values(actions).every(({ action }) => action === 'reuse'));
+  assert.equal(actions.gateway.scan, 'scan');
+  assert.equal(actions.workstation.scan, 'reuse');
+  const forged = structuredClone({ ...previous, version: '0.7.0', revision });
+  forged.images.browser.version = '0.5.0';
+  await assert.rejects(verifyImageInputs(forged, { version: '0.7.0', revision }, root), /differs from its origin/);
+  lock.packages['node_modules/zod'].integrity = 'changed';
+  await write('package-lock.json', JSON.stringify(lock));
+  const changed = await imageInputIdentities(root, await commit(), 2);
+  assert(RELEASE_IMAGES.every((name) => changed[name] !== baseline[name]));
+}));
+
+test('workstation-specific inputs do not rebuild other images in schema 2', () => {
+  assert.deepEqual(imageInputsForPath('images/computer/libreoffice-registrymodifications.xcu', 2), ['workstation']);
+  assert.deepEqual(imageInputsForPath('images/computer/entrypoint.sh', 2), RELEASE_IMAGES.slice(2));
+});
+
+
+test('release impact verifies version-only metadata from Git and refuses forged narrow scope', async () => fixture(async ({ root, directory, write, commit, base }) => {
+  await write('package.json', JSON.stringify({ name: 'fixture', version: '0.7.0', repository: source }));
+  const revision = await commit();
+  const files = ['package.json'];
+  const metadataOnlyFiles = await releaseMetadataOnlyFiles(root, base, revision, files);
+  const document = { ...classifyReleaseImpact(files, { schemaVersion: 2, metadataOnlyFiles }), baseRevision: base, revision };
+  assert.deepEqual(document.affectedArtifacts, ['source', 'npm', 'native']);
+  const path = join(directory, 'impact.json');
+  await writeFile(path, JSON.stringify(document));
+  await verifyReleaseImpactDocument(path, { revision, repositoryRoot: root });
+  await write('package.json', JSON.stringify({ name: 'fixture', version: '0.7.0', repository: source, dependencies: { external: '^2' } }));
+  const changed = await commit();
+  await writeFile(path, JSON.stringify({ ...document, revision: changed }));
+  await assert.rejects(verifyReleaseImpactDocument(path, { revision: changed, repositoryRoot: root }), /metadata does not match/);
+}));

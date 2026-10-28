@@ -134,7 +134,7 @@ user.
 
 ## Build and install from source
 
-Use the Node version in `.nvmrc` and the exact npm version declared by the root
+Use the Node version in `.nvmrc` and an npm version in the range declared by the root
 `packageManager` field. Clone into the WSL filesystem:
 
 ```sh

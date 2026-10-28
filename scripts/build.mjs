@@ -98,6 +98,8 @@ await Promise.all([
   cp(new URL('../images/gateway/Dockerfile', import.meta.url), new URL('gateway/Dockerfile', assets)),
   cp(new URL('../images/computer/Dockerfile', import.meta.url), new URL('computer/Dockerfile', assets)),
   cp(new URL('../images/computer/entrypoint.sh', import.meta.url), new URL('computer/entrypoint.sh', assets)),
+  cp(new URL('../images/computer/setup-user-software.sh', import.meta.url), new URL('computer/setup-user-software.sh', assets)),
+  cp(new URL('../images/computer/user-software-profile.sh', import.meta.url), new URL('computer/user-software-profile.sh', assets)),
   cp(new URL('../images/computer/chromium-wrapper.sh', import.meta.url), new URL('computer/chromium-wrapper.sh', assets)),
   cp(new URL('../images/computer/pty-helper.py', import.meta.url), new URL('computer/pty-helper.py', assets)),
   cp(new URL('../images/computer/qubicl_viewer_auth.py', import.meta.url), new URL('computer/qubicl_viewer_auth.py', assets)),

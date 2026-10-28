@@ -103,7 +103,7 @@ test('allowlisted desktop-session applications survive takeover while generic co
   };
   assert.equal(child.env.DISPLAY, ':9');
   assert.equal(child.env.HOME, root);
-  assert.equal(child.env.PATH, `${join(root, '.local/bin')}:/usr/local/bin:/usr/bin:/bin`);
+  assert.equal(child.env.PATH, `${join(root, '.local/bin')}:${join(root, '.local/share/qubicl/python/current/bin')}:/opt/qubicl/skills-venv/bin:/usr/local/bin:/usr/bin:/bin`);
   assert.equal(child.env.QUBICL_INTERNAL_KEY, undefined);
   assert.equal(child.env.QUBICL_GATEWAY_CREDENTIAL, undefined);
   assert.deepEqual(child.paths, [await realpath(document)]);
@@ -237,3 +237,24 @@ function isAlive(pid: number): boolean {
     return false;
   }
 }
+
+
+test('installed desktop applications may resolve outside bin directories and launch by absolute path', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-app-location-'));
+  const appDirectory = join(root, 'Applications', 'An App');
+  const app = join(appDirectory, 'launch');
+  await mkdir(appDirectory, { recursive: true });
+  await mkdir(join(root, '.local/bin'), { recursive: true });
+  await mkdir(join(root, '.local/share/applications'), { recursive: true });
+  await writeFile(app, '#!/bin/sh\ntouch "$HOME/launched"\nsleep 10\n', { mode: 0o755 });
+  await symlink(app, join(root, '.local/bin/linked-app'));
+  await writeFile(join(root, '.local/share/applications/app.desktop'), `[Desktop Entry]\nName=An App\nType=Application\nExec="${app}" %F\n`);
+  const manager = new DesktopApplicationManager('computer', { root });
+  context.after(async () => { await manager.shutdown(); await rm(root, { recursive: true, force: true }); });
+  const linked = await manager.open('linked-app', []);
+  await waitForFile(join(root, 'launched'));
+  assert.equal(linked.executable, app);
+  const absolute = await manager.open(app, []);
+  assert.equal(absolute.executable, app);
+  assert.equal((await manager.available()).some(({ application }) => application === app), true);
+});

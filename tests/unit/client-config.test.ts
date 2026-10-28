@@ -181,3 +181,17 @@ test('unknown clients and incompatible options are rejected', () => {
   assert.throws(() => connectionSnippet({ ...base, client: 'cursor', transport: 'http' }), /uses stdio/);
   assert.throws(() => connectionSnippet({ ...base, client: 'generic', transport: 'sse' }), /Transport must/);
 });
+
+
+test('SSH client snippets preserve a single remote command and reject shell or option injection', () => {
+  const snippet = connectionSnippet({ ...base, client: 'stdio', sshHost: 'operator@qubicl-host', profile: 'files' });
+  const launcher = JSON.parse(snippet.content) as { command: string; args: string[] };
+  assert.equal(launcher.command, 'ssh');
+  assert.deepEqual(launcher.args.slice(-3), ['--', 'operator@qubicl-host', 'qubicl mcp research --profile files']);
+  assert(launcher.args.includes('BatchMode=yes'));
+  assert.equal(launcher.args.some((value) => value.includes('StrictHostKeyChecking=no')), false);
+  for (const host of ['-oProxyCommand=evil', 'user@host;evil', 'host\nwhoami']) {
+    assert.throws(() => connectionSnippet({ ...base, client: 'stdio', sshHost: host }), /SSH config alias/);
+  }
+  assert.throws(() => connectionSnippet({ ...base, client: 'http', sshHost: 'host' }), /requires stdio/);
+});

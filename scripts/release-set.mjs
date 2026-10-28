@@ -10,12 +10,16 @@ import { signEvidence, verifyEvidenceSignature } from './evidence-signature.mjs'
 const repositoryRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
 export const RELEASE_TARGETS = ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64'];
 
-export async function createReleaseSet(directory, { root = repositoryRoot } = {}) {
+export async function createReleaseSet(directory, { root = repositoryRoot, targets: selectedTargets } = {}) {
   const setDirectory = resolve(directory);
   const completeCandidate = await verifyCandidateDirectory(join(setDirectory, 'linux-x64'), { root });
   assert(['initial', 'supported'].includes(completeCandidate.candidate.releaseTier),
     'Release sets can be created only for initial or supported candidates.');
-  const targets = completeCandidate.candidate.releaseTier === 'initial' ? ['linux-x64'] : RELEASE_TARGETS;
+  const flexible = completeCandidate.candidate.schemaVersion >= 8;
+  const targets = flexible ? (selectedTargets ?? ['linux-x64'])
+    : completeCandidate.candidate.releaseTier === 'initial' ? ['linux-x64'] : RELEASE_TARGETS;
+  assert(!selectedTargets || flexible, 'Explicit native targets require a schema-8 candidate.');
+  assert(targets.includes('linux-x64') && new Set(targets).size === targets.length && targets.every((target) => RELEASE_TARGETS.includes(target)), 'Select unique known native targets including linux-x64.');
   const members = [];
   let common;
   for (const target of targets) {
@@ -50,9 +54,10 @@ export async function createReleaseSet(directory, { root = repositoryRoot } = {}
   }
   assert(members.filter(({ complete }) => complete).length === 1, 'A release set requires exactly one complete scanned exact-artifact candidate.');
   const document = {
-    schemaVersion: 2,
+    schemaVersion: flexible ? 3 : 2,
+    ...(flexible ? { nativeTargets: targets } : {}),
     createdAt: new Date().toISOString(),
-    ...(completeCandidate.candidate.schemaVersion === 7 ? { qualificationStartedAt: new Date(completeCandidate.candidate.created).toISOString() } : {}),
+    ...(completeCandidate.candidate.schemaVersion >= 7 ? { qualificationStartedAt: new Date(completeCandidate.candidate.created).toISOString() } : {}),
     ...common,
     completeTarget: members.find(({ complete }) => complete).target,
     members,
@@ -70,7 +75,7 @@ export async function verifyReleaseSet(path, { root = repositoryRoot } = {}) {
   for (const member of document.members) {
     const candidateDirectory = join(setDirectory, member.directory);
     const { candidate } = await verifyCandidateDirectory(candidateDirectory, { root });
-    if (document.qualificationStartedAt !== undefined || candidate.schemaVersion === 7) {
+    if (document.qualificationStartedAt !== undefined || candidate.schemaVersion >= 7) {
       assert(document.qualificationStartedAt === new Date(candidate.created).toISOString(), 'Release-set qualification start must match the immutable source commit time.');
     }
     assert(candidate.host.target === member.target, `${member.target} release-set directory contains another target.`);
@@ -79,7 +84,7 @@ export async function verifyReleaseSet(path, { root = repositoryRoot } = {}) {
     `${member.target} candidate does not match the release-set identity.`);
     if (requiresReleaseImpact(candidate.version)) assert(candidate.releaseImpact?.sha256 === document.releaseImpactSha256 && candidate.releaseImpact?.profile === document.releaseImpactProfile, `${member.target} candidate does not match the release impact identity.`);
     if (document.imageInputsSha256 !== undefined) assert(candidate.imageInputs?.sha256 === document.imageInputsSha256, `${member.target} candidate does not match the image-input identity.`);
-    if (document.schemaVersion === 2) {
+    if (document.schemaVersion >= 2) {
       assert(candidate.releaseTier === document.releaseTier,
         `${member.target} candidate does not match the release-set tier.`);
     }
@@ -97,20 +102,20 @@ export async function verifyReleaseSet(path, { root = repositoryRoot } = {}) {
 }
 
 export function assertReleaseSetShape(document) {
-  assert([1, 2].includes(document?.schemaVersion), 'release-set.json schemaVersion must be 1 or 2.');
+  assert([1, 2, 3].includes(document?.schemaVersion), 'release-set.json schemaVersion must be 1, 2, or 3.');
   assert(iso(document.createdAt), 'release-set.json requires an ISO createdAt timestamp.');
   if (document.qualificationStartedAt !== undefined) assert(iso(document.qualificationStartedAt) && Date.parse(document.qualificationStartedAt) <= Date.parse(document.createdAt), 'Invalid release-set qualification start.');
   for (const field of ['version', 'revision', 'source']) assert(nonempty(document[field]), `release-set.json requires ${field}.`);
   assert(hash(document.imageCatalogSha256), 'release-set.json requires an image-catalog SHA-256.');
-  if (document.schemaVersion === 2) {
+  if (document.schemaVersion >= 2) {
     assert(['initial', 'supported'].includes(document.releaseTier),
       'release-set.json schemaVersion 2 requires an initial or supported release tier.');
   }
   if (requiresReleaseImpact(document.version)) assert(hash(document.releaseImpactSha256) && ['documentation', 'npm-presentation', 'cli', 'runtime-component', 'full'].includes(document.releaseImpactProfile), 'Qubicl 0.6 and later release sets require one exact release-impact identity.');
   if (document.imageInputsSha256 !== undefined) assert(hash(document.imageInputsSha256), 'release-set.json has an invalid image-input identity.');
-  const targets = document.schemaVersion === 2 && document.releaseTier === 'initial'
-    ? ['linux-x64']
-    : RELEASE_TARGETS;
+  const targets = document.schemaVersion === 3 ? document.nativeTargets
+    : document.schemaVersion === 2 && document.releaseTier === 'initial' ? ['linux-x64'] : RELEASE_TARGETS;
+  assert(Array.isArray(targets) && targets.includes('linux-x64') && new Set(targets).size === targets.length && targets.every((target) => RELEASE_TARGETS.includes(target)), 'Invalid native target selection.');
   assert(targets.includes(document.completeTarget), 'release-set.json has an invalid complete target.');
   assert(Array.isArray(document.members) && document.members.length === targets.length,
     `release-set.json requires exactly ${targets.length} native member${targets.length === 1 ? '' : 's'} for its release tier.`);
@@ -137,8 +142,8 @@ async function artifactIdentity(candidate, name) {
 
 async function main(args) {
   const [action, ...rest] = args;
-  if (action === 'create' && rest.length === 1) {
-    console.log(JSON.stringify(await createReleaseSet(rest[0]), null, 2));
+  if (action === 'create' && (rest.length === 1 || (rest.length === 3 && rest[1] === '--targets'))) {
+    console.log(JSON.stringify(await createReleaseSet(rest[0], { ...(rest[2] ? { targets: rest[2].split(',') } : {}) }), null, 2));
   } else if (action === 'verify' && rest.length === 1) {
     const result = await verifyReleaseSet(rest[0]);
     console.log(JSON.stringify({ ok: true, ...result, document: undefined }, null, 2));
@@ -150,7 +155,7 @@ async function main(args) {
     const publicKey = await readFile(resolve(rest[1]));
     console.log(JSON.stringify(await verifyEvidenceSignature('qubicl-release-set', { releaseSetSha256: result.sha256 }, publicKey, resolve(rest[2])), null, 2));
   } else {
-    console.log('Usage:\n  node scripts/release-set.mjs create RELEASE_SET_DIRECTORY\n  node scripts/release-set.mjs verify RELEASE_SET.json\n  node scripts/release-set.mjs sign RELEASE_SET.json PRIVATE_KEY SIGNATURE.json\n  node scripts/release-set.mjs verify-signature RELEASE_SET.json PUBLIC_KEY SIGNATURE.json');
+    console.log('Usage:\n  node scripts/release-set.mjs create RELEASE_SET_DIRECTORY [--targets linux-x64,linux-arm64,darwin-x64,darwin-arm64]\n  node scripts/release-set.mjs verify RELEASE_SET.json\n  node scripts/release-set.mjs sign RELEASE_SET.json PRIVATE_KEY SIGNATURE.json\n  node scripts/release-set.mjs verify-signature RELEASE_SET.json PUBLIC_KEY SIGNATURE.json');
     if (action !== '--help') process.exitCode = 1;
   }
 }

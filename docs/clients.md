@@ -248,7 +248,7 @@ Qubicl appear in Open WebUI.
 ## Requirements
 
 - Qubicl and the selected computer must be running.
-- Stdio adapters require the local `qubicl` executable.
+- Local stdio adapters require the local `qubicl` executable. With `--ssh`, the client uses OpenSSH and the remote account runs Qubicl.
 - Direct URLs require the computer's bearer token.
 - The gateway binds to localhost by default. A hosted service can use Qubicl's
   explicit TLS listener only after the operator configures the interface,
@@ -260,46 +260,34 @@ Run `qubicl doctor` for connection failures. Run `qubicl token rotate computer-n
 
 ## Release conformance evidence
 
-An adapter or reference-protocol test is not by itself evidence that a real
-client version works. For v0.2 and later release acceptance, the versioned
-[client conformance requirements](../conformance/client-conformance-v1.json)
-keep application and protocol results separately identified.
+An adapter or protocol test does not establish that a real client version works.
+Use [release qualification](../RELEASING.md#release-set-and-qualification) to
+record relevant application/protocol versions, exact artifacts, actual results,
+and hashed evidence. Failed or unavailable selected checks must be disclosed in
+the release notes. The historical [client matrix](../conformance/client-conformance-v1.json)
+and [remote matrix](../conformance/remote-access-v1.json) remain useful check
+inventories and validators for optional legacy schema-4 acceptance. They are
+not universal quotas for every release under the new qualification path.
 
-Application evidence covers Codex, Claude Code, OpenCode, OpenClaw, Hermes
-Agent, and Open WebUI. Claude Desktop, Cursor, and VS Code remain in the matrix
-so their existing adapter claims do not disappear when the six primary clients
-are added. Standards-level evidence separately covers MCP stdio, MCP HTTP,
-OpenAPI, and Open Terminal rather than treating a protocol probe as a named
-application run.
+## Clients on another machine
 
-Every required application or protocol row records an exact installed version, its
-transport, the required `workstation` preset, a tester identity, a UTC test
-time, and a SHA-256-bound local evidence file. It also records a passing result
-and hashed evidence for every applicable surface from this set: discovery, MCP
-stdio, MCP HTTP, OpenAPI, Open Terminal, result modes, screenshots, files,
-browser control, and human takeover. Non-applicable transport surfaces are
-omitted according to the versioned matrix; adding or removing a surface ad hoc
-fails validation.
+Run Qubicl and Docker on the always-on host. On the client machine, generate a
+normal client configuration over SSH:
 
-For schema-7 candidates, timestamps must be at or after the release set's
-`qualificationStartedAt` frozen-commit boundary. Older evidence uses the release
-set creation time. The acceptance bundle carries an exact copy and SHA-256 of
-the reviewed requirements file, and its detached signature binds the final
-acceptance JSON. Qubicl does not download clients, inspect online version feeds,
-or manufacture these results. Maintainers must supply the real-client
-binaries/accounts and retain the actual post-freeze evidence. A signed pre-1.0
-`initial` v0.2-v0.4 or v0.6 bundle requires Codex, Open WebUI, and all four
-protocol rows; v0.5 retains its legacy full-matrix rule. A `supported` bundle
-requires the full nine-application matrix; omitted rows cannot be presented as
-supported coverage.
+```sh
+qubicl connect research --client codex --ssh operator@qubicl-host
+qubicl connect research --client claude-code --ssh qubicl-host
+```
 
-Remote support is separately bound by the versioned
-[remote-access requirements](../conformance/remote-access-v1.json). Those rows
-exercise real remote MCP HTTP, OpenAPI, Open Terminal, viewer, and isolated
-preview traffic. The pre-1.0 `initial` profile requires the native-Linux path;
-the `supported` profile adds both Docker Desktop/NAT paths. Passing the local
-client matrix alone cannot satisfy either remote gate.
-
+The local command only prints configuration and does not need a local computer,
+state directory, or Docker daemon. It invokes `ssh -T` with batch authentication
+and a single remote `qubicl mcp` command. First authenticate interactively and
+verify the host key; provide the key through your SSH agent or SSH config. The
+remote account must own the computer and find Qubicl on its non-interactive
+PATH. Configure nondefault ports, IPv6, and jump hosts through an SSH alias.
+`--profile` and `--result-mode` still work. SSH is stdio-only and cannot combine
+with HTTP/OpenAPI, remote gateway access, bearer credentials, or WSL launchers.
+See [always-on hosting](remote-access.md#always-on-host-over-ssh) for the viewer.
 
 ## Dashboard and shared controller attribution
 

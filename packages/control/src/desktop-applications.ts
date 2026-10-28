@@ -2,9 +2,10 @@ import { randomBytes } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, chown, copyFile, lstat, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises';
-import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { DesktopApplicationName, Preset } from '@qubicl/core';
+import { workloadPath } from './environments.js';
 import { QubiclError } from './errors.js';
 
 const DEFAULT_ROOT = '/home/qubicl';
@@ -61,6 +62,7 @@ const BUILTIN_APPLICATIONS_BY_COMPATIBILITY: Readonly<Record<Preset, readonly st
 interface TrackedDesktopApplication {
   applicationId: string;
   application: DesktopApplicationName;
+  executable: string;
   child: ChildProcess;
   openedAt: string;
   finished: Promise<void>;
@@ -81,6 +83,7 @@ export interface DesktopApplicationManagerOptions {
 export interface DesktopApplicationRecord {
   applicationId: string;
   application: DesktopApplicationName;
+  executable: string;
   state: 'running';
   lifecycle: 'desktop_session';
   survivesHumanTakeover: true;
@@ -174,6 +177,7 @@ export class DesktopApplicationManager {
       const tracked: TrackedDesktopApplication = {
         applicationId,
         application,
+        executable: definition.executable,
         child,
         openedAt: new Date().toISOString(),
         finished,
@@ -292,14 +296,13 @@ export class DesktopApplicationManager {
 }
 
 async function installedApplicationDefinition(application: string, home: string): Promise<DesktopApplicationDefinition> {
-  const allowedDirectories = [resolve(home, '.local/bin'), '/usr/local/bin', '/usr/bin', '/bin'];
-  for (const directory of allowedDirectories) {
-    const candidate = resolve(directory, application);
+  const candidates = isAbsolute(application) ? [application] : workloadPath(home).split(':').map((directory) => resolve(directory, application));
+  for (const candidate of candidates) {
     try {
       await access(candidate, constants.X_OK);
       const executable = await realpath(candidate);
       const info = await lstat(executable);
-      if (!info.isFile() || !allowedDirectories.some((root) => isWithinOrEqual(root, executable))) continue;
+      if (!info.isFile()) continue;
       return { executable, fixedArguments: [], allowedPathKind: 'either' };
     } catch {
       // Try the next executable directory.
@@ -343,8 +346,9 @@ async function discoverDesktopApplications(
           if (fields.Hidden === 'true' || fields.NoDisplay === 'true' || !fields.Exec) continue;
           const executableToken = desktopExecutableToken(fields.Exec);
           if (!executableToken) continue;
-          const application = executableToken.split('/').pop() ?? '';
-          if (!/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u.test(application) || found.has(application)) continue;
+          const application = isAbsolute(executableToken) && workloadPath(home).split(':').includes(dirname(executableToken))
+            ? basename(executableToken) : executableToken;
+          if ((!isAbsolute(application) && !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u.test(application)) || /\p{Cc}/u.test(application) || found.has(application)) continue;
           await installedApplicationDefinition(application, home);
           const label = (fields.Name ?? application).replaceAll(/[\r\n\t]/gu, ' ').trim().slice(0, 120) || application;
           found.set(application, { application, label, source: directory.source });
@@ -388,6 +392,7 @@ function publicRecord(tracked: TrackedDesktopApplication): DesktopApplicationRec
   return {
     applicationId: tracked.applicationId,
     application: tracked.application,
+    executable: tracked.executable,
     state: 'running',
     lifecycle: 'desktop_session',
     survivesHumanTakeover: true,
@@ -401,7 +406,9 @@ function sanitizedDesktopEnvironment(root: string, source: NodeJS.ProcessEnv): N
     HOME: root,
     USER: 'qubicl',
     LOGNAME: 'qubicl',
-    PATH: `${resolve(root, '.local/bin')}:/usr/local/bin:/usr/bin:/bin`,
+    PATH: workloadPath(root),
+    VIRTUAL_ENV: resolve(root, '.local/share/qubicl/python/current'),
+    npm_config_prefix: resolve(root, '.local'),
     DISPLAY: display,
     LANG: 'C.UTF-8',
     LC_ALL: 'C.UTF-8',

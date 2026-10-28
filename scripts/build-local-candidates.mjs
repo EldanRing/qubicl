@@ -47,7 +47,7 @@ Build unpublished release candidates entirely on the current host.
   --execute           Execute the printed plan (default is read-only planning)
   --plan              Print the plan without constructing artifacts
   --reuse DIRECTORY   Reuse unchanged images and fresh scans from a prior
-                      candidate of this release version
+                      candidate from an ancestor revision
   --reuse-failed DIR  Recover verified image/scan bytes from failed staging;
                       build fresh CLI artifacts and rerun acceptance
   --binary-only       Build only the native archive for this host
@@ -211,7 +211,7 @@ try {
 
   if (buildImages) {
     if (donor) {
-      assert(donor.source === source && donor.version === version, 'Reuse candidate has another release identity.');
+      assert(donor.source === source, 'Reuse candidate has another release identity.');
     }
     const dashboardManifestPath = join(root, 'packages', 'cli', 'dist', 'assets', 'dashboard', 'asset-manifest.json');
     let dashboardAssetManifestSha256;
@@ -238,7 +238,7 @@ try {
     }
     await runWithConcurrency(imageSpecs.filter(({ name }) => buildPlan.images[name].action === 'build'), (spec) => buildImageCandidate(spec, dashboardAssetManifestSha256));
     const imageInputs = {
-      schemaVersion: 1, version, revision,
+      schemaVersion: 2, version, revision,
       images: Object.fromEntries(imageSpecs.map(({ name }) => [name, {
         ...buildPlan.images[name].origin,
         ...(buildPlan.images[name].action === 'build' ? { node: toolVersions.node, npm: toolVersions.npm, docker: toolVersions.docker, buildx: toolVersions.buildx } : {}),
@@ -246,17 +246,25 @@ try {
     };
     imageInputsPath = join(staging, IMAGE_INPUTS_NAME);
     await writeFile(imageInputsPath, `${JSON.stringify(imageInputs, null, 2)}\n`, { mode: 0o644 });
-    if (scanImages && !refreshScans) {
-      for (const name of ['trivy-bindings.json', ...IMAGE_NAMES.flatMap((image) => PLATFORMS.map((platform) => `trivy-${image}-${platform.replace('/', '-')}.json`))]) {
-        await copyFile(join(reuseSource, name), join(staging, name));
-        assert(await stagedSha256(join(staging, name)) === donor.artifacts.find((artifact) => artifact.name === name)?.sha256,
-          `Reused scan evidence ${name} changed while it was copied.`);
+    if (scanImages && donor && buildPlan.reuseImages.some((name) => buildPlan.images[name].scan === 'reuse')) {
+      const bindingPath = join(reuseSource, 'trivy-bindings.json');
+      assert(await sha256(bindingPath) === donor.artifacts.find(({ name }) => name === 'trivy-bindings.json')?.sha256, 'Donor scan binding changed.');
+      const saved = JSON.parse(await readFile(bindingPath, 'utf8'));
+      for (const image of buildPlan.reuseImages.filter((name) => buildPlan.images[name].scan === 'reuse')) {
+        for (const platform of PLATFORMS) {
+          const name = `trivy-${image}-${platform.replace('/', '-')}.json`;
+          await copyFile(join(reuseSource, name), join(staging, name));
+          assert(await stagedSha256(join(staging, name)) === donor.artifacts.find((artifact) => artifact.name === name)?.sha256, `Reused scan ${name} changed.`);
+          const binding = saved.scans.find((scan) => scan.report === name);
+          assert(binding, `Donor lacks scan binding ${name}.`);
+          scanBindings.push({ ...binding, createdAt: binding.createdAt ?? saved.createdAt, scanner: binding.scanner ?? saved.scanner });
+        }
       }
-      toolVersions.trivy = donor.tools.trivy;
+      if (!refreshScans) toolVersions.trivy = donor.tools.trivy;
     }
     if (refreshScans) {
-      console.log('Scanning image candidates serially against the shared local Trivy cache.');
-      for (const spec of imageSpecs) await scanImageCandidate(spec);
+      console.log('Scanning affected or expired image evidence serially.');
+      for (const spec of imageSpecs.filter(({ name }) => buildPlan.scanImages.includes(name))) await scanImageCandidate(spec);
     }
     if (requiresClientConformance(version)) {
       const reportPath = join(staging, OCI_EFFICIENCY_REPORT_NAME);
@@ -370,21 +378,11 @@ try {
       releaseTier,
     });
     await writeFile(join(staging, 'trivy-summary.json'), `${JSON.stringify(security, null, 2)}\n`, { mode: 0o644 });
-    if (refreshScans) {
-      const trivyDatabase = resolve(process.env.TRIVY_CACHE_DIR ?? join(homedir(), '.cache', 'trivy'), 'db', 'trivy.db');
-      await writeFile(join(staging, 'trivy-bindings.json'), `${JSON.stringify({
-        schemaVersion: 2,
-        createdAt: new Date().toISOString(),
-        scanner: {
-          name: 'trivy',
-          version: trivyDetails.Version,
-          versionOutputSha256: createHash('sha256').update(toolVersions.trivy).digest('hex'),
-          vulnerabilityDatabase: { ...trivyDetails.VulnerabilityDB, sha256: await sha256(trivyDatabase) },
-          checkBundle: trivyDetails.CheckBundle,
-        },
-        scans: scanBindings.sort((left, right) => left.report.localeCompare(right.report)),
-      }, null, 2)}\n`, { mode: 0o644 });
-    }
+    await writeFile(join(staging, 'trivy-bindings.json'), `${JSON.stringify({
+      schemaVersion: 3,
+      createdAt: new Date().toISOString(),
+      scans: scanBindings.sort((left, right) => left.report.localeCompare(right.report)),
+    }, null, 2)}\n`, { mode: 0o644 });
   }
 
   const preflightArgs = [
@@ -427,7 +425,7 @@ try {
   await assertSourceSnapshot('candidate manifest generation');
   const artifacts = await describeStagedFiles(staging);
   const manifest = {
-    schemaVersion: imageInputsPath && releaseImpact ? 7 : releaseImpact ? 6 : 5,
+    schemaVersion: imageInputsPath && releaseImpact ? 8 : releaseImpact ? 6 : 5,
     version,
     revision,
     created,
@@ -538,7 +536,15 @@ async function scanImageCandidate(spec) {
         const document = JSON.parse(await readFile(pendingReport, 'utf8'));
         assertTrivyReportPrivacy(document, scanName);
         const reportSha256 = await sha256(pendingReport);
+        const trivyDatabase = resolve(process.env.TRIVY_CACHE_DIR ?? join(homedir(), '.cache', 'trivy'), 'db', 'trivy.db');
         const binding = {
+          createdAt: new Date().toISOString(),
+          scanner: {
+            name: 'trivy', version: trivyDetails.Version,
+            versionOutputSha256: createHash('sha256').update(toolVersions.trivy).digest('hex'),
+            vulnerabilityDatabase: { ...trivyDetails.VulnerabilityDB, sha256: await sha256(trivyDatabase) },
+            checkBundle: trivyDetails.CheckBundle,
+          },
           report: reportName,
           reportSha256,
           image: spec.name,

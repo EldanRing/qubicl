@@ -1,5 +1,10 @@
 # Decision 0003: planned incremental release candidates
 
+Historical decision: the 0.7 [practical computers and releases decision](0004-practical-computers-and-releases.md)
+supersedes same-version image reuse and blanket qualification restrictions.
+Use the current [release procedure](../../RELEASING.md) for new releases.
+
+
 Status: accepted and implemented for Qubicl 0.6.
 
 ## Context

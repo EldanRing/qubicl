@@ -1,6 +1,56 @@
 # Custom computer images
 
-Root filesystem changes are disposable. A derived image is the supported way to make system packages or machine-wide configuration permanent.
+User-installed Python/npm tools persist in the home. System packages need an
+image; common apt additions now have a managed recipe, so you do not need to
+write a Dockerfile for them.
+
+## Install everyday software
+
+Inside the computer, use ordinary commands:
+
+```sh
+python -m pip install requests
+npm install --global typescript
+```
+
+The default Python environment is under
+`~/.local/share/qubicl/python/current`; npm installs under `~/.local`. Their
+executables are on the workload PATH. Normal recreation, upgrades, and home
+backups retain them. Python environments are separated by interpreter major/minor
+version. If an image changes that ABI, Qubicl creates a fresh environment, keeps
+the old one, and reports that its packages need reinstalling. Startup makes no
+network requests. Project-specific virtualenvs remain available as usual.
+
+For system packages, run this on the host that owns the computer:
+
+```sh
+qubicl software research --apt ripgrep,jq
+qubicl software research
+qubicl upgrade research
+```
+
+The first command adds to a saved package list, builds a derived image from the
+inspected base, validates its Qubicl contract, and replaces the runtime through
+the existing upgrade transaction. It preserves the home, ID, credentials,
+resources, policy, and running/stopped state. Named upgrades reapply the saved
+list to the current catalog base. A custom base follows its requested image
+reference. `--image` or `--preset` on a named upgrade intentionally rebases the
+recipe. `software --reset` returns to that base while preserving the home.
+
+`--offline` requires the matching derived image to already exist locally and
+never downloads or builds packages. The command is for compatible Debian apt
+bases with Qubicl's root entrypoint; it grants no guest sudo or host Docker
+access. Package repository access happens during the operator's image build,
+not through the running guest's egress policy. Package names may include exact
+versions; otherwise current repository versions are used and build caching may
+retain an earlier successful install. This is a setup recipe, not a lockfile.
+
+Recipe computers appear as custom images. `upgrade --all` leaves them for an
+explicit named upgrade. New recipe configuration requires the new CLI; older
+strict readers cannot load it. Full-installation backups include the recipe,
+but do not bundle Docker images. Secret-free manifest export carries the image
+identity and does not export the recipe. Keep custom images available or rebuild
+before restoring on another host. Use a Dockerfile for more complex setup.
 
 ## Choose a compatibility baseline
 

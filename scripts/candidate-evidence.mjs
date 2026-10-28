@@ -529,7 +529,7 @@ export async function verifyCandidateDirectory(directory, { root, inspectOci = t
         for (const image of IMAGE_NAMES) {
           const preset = PRESETS.includes(image) ? image : undefined;
           const measured = await inspectOciArchive(join(candidateDirectory, `qubicl-${image}.oci.tar`), {
-            expectedVersion: candidate.version,
+            expectedVersion: imageInputs?.images[image]?.version ?? candidate.version,
             expectedRevision: imageInputs?.images[image]?.revision ?? candidate.revision,
             expectedSource: candidate.source,
             expectedPreset: preset,
@@ -672,7 +672,7 @@ export function assertTrivyScanBinding(binding, report, expected) {
   const platform = expected.measured.platforms[expected.platform];
   assert(platform, `Trivy binding targets missing OCI platform ${expected.platform}.`);
   const bindingSchemaVersion = expected.bindingSchemaVersion ?? (binding.platformView ? 2 : 1);
-  assert([1, 2].includes(bindingSchemaVersion), `Unsupported Trivy binding schemaVersion ${bindingSchemaVersion}.`);
+  assert([1, 2, 3].includes(bindingSchemaVersion), `Unsupported Trivy binding schemaVersion ${bindingSchemaVersion}.`);
   assert(binding.report === expected.reportName && binding.reportSha256 === expected.reportSha256, 'Trivy binding does not identify the exact report bytes.');
   assert(binding.image === expected.image && binding.platform === expected.platform, 'Trivy binding has the wrong image or platform.');
   assert(binding.ociArchive === expected.archiveName && binding.ociArchiveSha256 === expected.archiveSha256, 'Trivy binding does not identify the exact OCI archive bytes.');
@@ -690,7 +690,7 @@ export function assertTrivyScanBinding(binding, report, expected) {
     : platformScanInput(expected.image, expected.platform);
   assert(canonicalJson(binding.options) === canonicalJson({ scanners: ['vuln', 'secret'], input: scanInput }), 'Trivy binding has unexpected scan options.');
   assertTrivyReportPrivacy(report, scanInput);
-  if (bindingSchemaVersion === 2) {
+  if (bindingSchemaVersion >= 2) {
     assert(canonicalJson(binding.platformView) === canonicalJson({
       input: scanInput,
       manifestDigest: platform.digest,
@@ -713,6 +713,15 @@ export function assertTrivyScanBinding(binding, report, expected) {
 }
 
 export function assertTrivyScannerIdentity(bindings, now, { requiredSchemaVersion, requiredVersion } = {}) {
+  if (bindings?.schemaVersion === 3) {
+    assert(isoDate(bindings.createdAt) && Date.parse(bindings.createdAt) <= Date.parse(now), 'Trivy binding creation time is invalid.');
+    assert(Array.isArray(bindings.scans) && bindings.scans.length > 0, 'Trivy bindings require scan provenance.');
+    for (const scan of bindings.scans) {
+      assert(Date.parse(scan.createdAt) <= Date.parse(bindings.createdAt), 'Scan provenance is newer than its binding.');
+      assertTrivyScannerIdentity({ schemaVersion: 2, createdAt: scan.createdAt, scanner: scan.scanner }, now, { requiredVersion });
+    }
+    return;
+  }
   const scanner = bindings?.scanner;
   const database = scanner?.vulnerabilityDatabase;
   assert([1, 2].includes(bindings?.schemaVersion) && isoDate(bindings.createdAt), 'trivy-bindings.json has an invalid schema or creation time.');
@@ -882,8 +891,8 @@ function normalizeScanTarget(value) {
 }
 
 function assertCandidateManifest(candidate) {
-  assert([5, 6, 7].includes(candidate?.schemaVersion), 'candidate.json schemaVersion must be 5, 6, or 7.');
-  if (candidate.schemaVersion === 7) assert(candidate.imageInputs?.name === IMAGE_INPUTS_NAME && /^[a-f0-9]{64}$/u.test(candidate.imageInputs.sha256), 'Candidate schema 7 requires image input provenance.');
+  assert([5, 6, 7, 8].includes(candidate?.schemaVersion), 'candidate.json schemaVersion must be 5, 6, 7, or 8.');
+  if (candidate.schemaVersion >= 7) assert(candidate.imageInputs?.name === IMAGE_INPUTS_NAME && /^[a-f0-9]{64}$/u.test(candidate.imageInputs.sha256), 'Candidate schema 7 requires image input provenance.');
   else assert(candidate.imageInputs === undefined, 'Image input provenance requires candidate schema 7.');
   for (const field of ['version', 'revision', 'created', 'source']) assert(nonemptyString(candidate[field]), `candidate.json requires ${field}.`);
   assert(/^[a-f0-9]{40}$/u.test(candidate.revision), 'candidate.json revision must be the exact reviewed Git commit.');
@@ -895,7 +904,7 @@ function assertCandidateManifest(candidate) {
   assert(candidate.tools && /^v[0-9]+[.][0-9]+[.][0-9]+$/.test(candidate.tools.node ?? ''), 'candidate.json requires the exact Node tool version.');
   assert(candidate.dependencies?.name === 'dependency-evidence.json' && /^[a-f0-9]{64}$/u.test(candidate.dependencies?.sha256 ?? ''), 'candidate.json requires exact dependency evidence.');
   if (requiresReleaseImpact(candidate.version)) {
-    assert([6, 7].includes(candidate.schemaVersion) && candidate.releaseImpact?.name === 'release-impact.json'
+    assert([6, 7, 8].includes(candidate.schemaVersion) && candidate.releaseImpact?.name === 'release-impact.json'
       && /^[a-f0-9]{64}$/u.test(candidate.releaseImpact?.sha256 ?? '')
       && ['documentation', 'npm-presentation', 'cli', 'runtime-component', 'full'].includes(candidate.releaseImpact?.profile)
       && /^[a-f0-9]{40}$/u.test(candidate.releaseImpact?.baseRevision ?? ''), 'Qubicl 0.6 and later candidates require exact release-impact evidence.');

@@ -58,6 +58,10 @@ fi
 # leaving all user-created contents and their modes untouched.
 chmod 0700 /home/qubicl
 
+# Never run home-controlled Python or package hooks as root. The initializer is
+# shipped in the image and all its writes and subprocesses use the workload UID.
+runuser -u qubicl -- env -i HOME=/home/qubicl PATH=/usr/local/bin:/usr/bin:/bin /bin/bash /opt/qubicl/setup-user-software.sh
+
 run_guest_hook() {
   local hook="$1" marker="$2" command workspace
   [[ -v QUBICL_DEVCONTAINER_GUEST_JSON ]] || return 0
@@ -65,7 +69,7 @@ run_guest_hook() {
   [[ -n "$command" ]] || return 0
   if [[ -n "$marker" ]] && [[ -e "$marker" ]]; then return 0; fi
   workspace="$(node -e 'const value=JSON.parse(process.env.QUBICL_DEVCONTAINER_GUEST_JSON); process.stdout.write(value.workspaceFolder??"/home/qubicl")')"
-  runuser -u qubicl -- env -i HOME=/home/qubicl USER=qubicl LOGNAME=qubicl SHELL=/bin/bash PATH=/home/qubicl/.local/bin:/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 QUBICL_GUEST_WORKSPACE="$workspace" QUBICL_GUEST_COMMAND="$command" bash -lc 'cd -- "$QUBICL_GUEST_WORKSPACE" && exec bash -lc "$QUBICL_GUEST_COMMAND"'
+  runuser -u qubicl -- env -i HOME=/home/qubicl USER=qubicl LOGNAME=qubicl SHELL=/bin/bash PATH=/home/qubicl/.local/bin:/home/qubicl/.local/share/qubicl/python/current/bin:/usr/local/bin:/usr/bin:/bin VIRTUAL_ENV=/home/qubicl/.local/share/qubicl/python/current npm_config_prefix=/home/qubicl/.local LANG=C.UTF-8 LC_ALL=C.UTF-8 QUBICL_GUEST_WORKSPACE="$workspace" QUBICL_GUEST_COMMAND="$command" bash -lc 'cd -- "$QUBICL_GUEST_WORKSPACE" && exec bash -lc "$QUBICL_GUEST_COMMAND"'
   if [[ -n "$marker" ]]; then runuser -u qubicl -- touch "$marker"; fi
 }
 
@@ -198,7 +202,9 @@ start_as_user() {
   fi
   runuser -u qubicl -- env -i \
     HOME=/home/qubicl USER=qubicl LOGNAME=qubicl SHELL=/bin/bash \
-    PATH=/opt/qubicl/skills-venv/bin:/home/qubicl/.local/bin:/usr/local/bin:/usr/bin:/bin \
+    PATH=/home/qubicl/.local/bin:/home/qubicl/.local/share/qubicl/python/current/bin:/opt/qubicl/skills-venv/bin:/usr/local/bin:/usr/bin:/bin \
+    VIRTUAL_ENV=/home/qubicl/.local/share/qubicl/python/current \
+    npm_config_prefix=/home/qubicl/.local \
     LANG=C.UTF-8 LC_ALL=C.UTF-8 \
     XDG_CONFIG_HOME=/home/qubicl/.config \
     XDG_DATA_HOME=/home/qubicl/.local/share \
@@ -221,7 +227,9 @@ start_as_viewer() {
 start_control_as_user() {
   control_env=(
     HOME=/home/qubicl USER=qubicl LOGNAME=qubicl SHELL=/bin/bash
-    PATH=/opt/qubicl/skills-venv/bin:/home/qubicl/.local/bin:/usr/local/bin:/usr/bin:/bin
+    PATH=/home/qubicl/.local/bin:/home/qubicl/.local/share/qubicl/python/current/bin:/opt/qubicl/skills-venv/bin:/usr/local/bin:/usr/bin:/bin
+    VIRTUAL_ENV=/home/qubicl/.local/share/qubicl/python/current
+    npm_config_prefix=/home/qubicl/.local
     LANG=C.UTF-8 LC_ALL=C.UTF-8
     XDG_CONFIG_HOME=/home/qubicl/.config
     XDG_DATA_HOME=/home/qubicl/.local/share

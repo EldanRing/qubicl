@@ -2,8 +2,7 @@
 
 This register records consequential limits, their owners, and the conditions
 for changing them. “Owner” means the product surface responsible for the rule,
-not a person to ask before every operation. Current mechanisms describe Qubicl
-0.6; candidate-specific results live in the signed release evidence. The
+not a person to ask before every operation. Current mechanisms include the unreleased 0.7 design; candidate-specific results live in the signed release evidence. The
 [0.6 decision record](decisions/0002-v0.6-capabilities-and-constraints.md)
 defines the intended behavior and its remaining evidence requirements.
 
@@ -24,12 +23,12 @@ boundary merely because it has an admission check.
 
 ## Workflow and resource limits
 
-| Rule and class | Owner and reason | Current cost or configurability | 0.6 disposition and acceptance |
+| Rule and class | Owner and reason | Current cost or configurability | Current disposition and verification |
 | --- | --- | --- | --- |
 | Interactive ownership — ownership mechanism | Control service and client adapters; serialize browser, desktop, and PTY input | Observation, file work, and retained tasks continue across client disconnects. Old-owner queued interactive work is fenced at takeover. | Keep resource-specific ownership and proof checks. Qualify queued-action fencing and compatibility adapters. |
 | Retained tasks — resource/lifecycle default | Process manager; tracked cleanup | Tasks retain records and logs across lease loss and reconnect. Runtime replacement interrupts ordinary jobs. | Expose stop, wait, output, input, and attachment. Restart declared services after runtime restart; never replay arbitrary jobs. |
 | Viewer reconnect grace — UX default | Gateway; recover human ownership after a dropped connection | Control releases after a visible, configurable grace of 5–300 seconds; the default is 10 seconds. | Keep connected-viewer ownership. Qualify disconnect, reconnect, takeover failure, and operator recovery. |
-| Installed application discovery — capability with resource bounds | Desktop service; controlled launch and handoff | A bounded catalog combines built-ins with user/system desktop entries whose executables resolve inside approved computer bin directories. Shell launch, unsafe document paths, and unbounded capacity remain rejected. | Keep observable executable identity, lifecycle, close warnings, and resource bounds; do not treat discovery as same-computer isolation. |
+| Installed application discovery — capability with resource bounds | Desktop service; controlled launch and handoff | A bounded catalog combines built-ins with user/system desktop entries with executable names or absolute paths, including symlinks to user-installed tools. Shell launch, unsafe document paths, and unbounded capacity remain rejected. | Keep observable executable identity, lifecycle, close warnings, and resource bounds; do not treat discovery as same-computer isolation. |
 | Browser tab budget — resource default | Browser controller; bound memory and retained handles | Agent-opened tabs have a visible 24-tab budget. Qubicl reports exhaustion instead of silently evicting browser state; human-opened state remains usable. | Keep a documented explicit budget until resource-aware admission has release evidence. Preserve bounded results and cancellation. |
 | Anonymous public extraction — security mechanism | Web/browser services; JavaScript rendering | Rendered public extraction uses an ephemeral context without persistent cookies, extensions, or service workers and enforces public-destination policy. | Retain separation from the normal profile and qualify redirect/request mediation before release. |
 | Scoped restricted egress — network scope | Gateway; explicit destination grants | `web-only` and `custom` use the authenticated proxy; custom rules support domains, CIDRs, and TCP ports. `developer` allows normal outbound access; `offline` denies it. | Preserve explicit restrictions during migration and terminate managed tunnels when their rule expires or is revoked. |
@@ -47,8 +46,8 @@ result. They should not silently discard useful work.
 | Rule and class | Owner and reason | Review condition |
 | --- | --- | --- |
 | Platform footprint — support limitation | Platform qualification; evidence for actual host behavior | Keep CLI support separate from dashboard support and historical tests separate from candidate results. A produced artifact does not establish tested support. See [platforms](platforms.md). |
-| Exact development npm version — current toolchain contract | Workspace manifests; lockfile/build consistency | The current `engines` and `devEngines` enforce the pin. Broaden the development range only with implementation and compatibility checks; do not tell contributors to bypass it. |
-| Impact-bound release evidence — release implementation | Release builder/verifier/publisher; immutable artifact provenance | The 0.6 builder binds an exact base/candidate diff and a per-image mapped-input identity. It can copy unchanged image, scan, and efficiency bytes while retaining their ancestor origin and toolchain. Stale scans rescan immutable images. Publication still requires one complete signed six-image candidate. | Keep unknown inputs fail-closed, require an explicit execution after the read-only plan, and rebuild only mapped inputs that changed. Review a separately versioned partial-publication mode only if artifact/version coupling changes. See [decision 0003](decisions/0003-incremental-release-candidates.md) and [releasing](../RELEASING.md). |
+| Compatible development npm range — toolchain policy | Workspace manifests; lockfile/build consistency | Development accepts npm `>=10.9.9 <13`; `packageManager` retains the default release pin. Record actual build versions and review compatibility before broadening to another major. |
+| Impact-bound release evidence — release implementation | Builder/verifier/publisher; immutable provenance and honest qualification | Schema-2 image inputs permit cross-version reuse, and schema-3 scans retain per-report freshness. Schema-3 release sets select native targets. Signed qualification accounts for selected checks and discloses gaps through the normal publisher. Preserve exact bytes and trust roots; see [decision 0004](decisions/0004-practical-computers-and-releases.md). |
 | Focused development checks — contributor workflow | Maintainers; useful regression evidence at reasonable cost | Select checks for affected behavior; broad integration and release gates remain separately applicable. Reuse a successful check only while its inputs and environment still match. |
 | Local release execution — maintainer policy | Maintainers; repository, machines, and public artifacts | Run release checks locally, reuse verified bytes, and publish the exact reviewed artifacts when the owner requests the release. Preserve durable data during live upgrades. |
 

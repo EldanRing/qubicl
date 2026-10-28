@@ -98,8 +98,8 @@ local value.
 `computer` and `workstation` contracts additionally expose
 `open_desktop_application`, `list_desktop_applications`, and
 `close_desktop_application`. Discovery returns a bounded catalog of safe
-built-ins and user/system desktop entries whose executable resolves inside an
-approved computer bin directory. Launch remains direct without a shell, uses a
+built-ins and user/system desktop entries. Executables may be resolved through
+the workload PATH, user-installed symlinks, or an absolute executable path. Launch remains direct without a shell, uses a
 sanitized environment, confines document paths below `/home/qubicl`, reserves
 bounded capacity before preparation, and records executable identity and
 lifecycle. LibreOffice uses a correctly owned isolated profile. Applications

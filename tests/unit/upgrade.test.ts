@@ -17,6 +17,7 @@ test('upgrading replaces only the image contract and preserves durable operator 
       fingerprint: 'SHA256:test-fingerprint',
     },
     environment: { PROJECT_MODE: 'test' },
+    software: { baseImage: 'qubicl/file-system:dev', basePreset: 'file-system', aptPackages: ['jq'] },
     ...presetDefaults('file-system'),
     cpus: 3,
     memory: '6g',
@@ -31,6 +32,7 @@ test('upgrading replaces only the image contract and preserves durable operator 
   assert.deepEqual(upgraded.network, current.network);
   assert.deepEqual(upgraded.ssh, current.ssh);
   assert.deepEqual(upgraded.environment, current.environment);
+  assert.deepEqual(upgraded.software, current.software);
   assert.equal(upgraded.cpus, 3);
   assert.equal(upgraded.memory, '6g');
   assert.equal(upgraded.preset, 'workstation');

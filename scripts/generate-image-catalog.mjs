@@ -15,11 +15,12 @@ const reuseCatalog = options['reuse-catalog']
   ? JSON.parse(await readFile(options['reuse-catalog'], 'utf8'))
   : undefined;
 if (imageInputs) {
-  assert(imageInputs.schemaVersion === 1 && imageInputs.version === options.version && imageInputs.revision === options.revision,
+  assert([1, 2].includes(imageInputs.schemaVersion) && imageInputs.version === options.version && imageInputs.revision === options.revision,
     'Image input evidence does not bind this catalog.');
   assert(JSON.stringify(Object.keys(imageInputs.images ?? {}).sort()) === JSON.stringify([...imageNames].sort()),
     'Image input evidence must contain exactly the catalog images.');
 }
+const imageVersion = (name) => imageInputs?.images?.[name]?.version ?? options.version;
 const imageRevision = (name) => imageInputs?.images?.[name]?.revision ?? options.revision;
 const dashboardAssetManifestSha256 = options.dashboardManifestSha256 ?? createHash('sha256')
   .update(await readFile(options.dashboardManifest))
@@ -28,7 +29,7 @@ const dashboardAssetManifestSha256 = options.dashboardManifestSha256 ?? createHa
 if (reuseCatalog) {
   assert(imageInputs, 'A reused catalog requires per-image input provenance.');
   assert(/^[a-f0-9]{40}$/u.test(reuseCatalog.revision ?? ''), 'Reusable catalog has no exact source revision.');
-  assertCatalogIdentity(reuseCatalog, { version: options.version, revision: reuseCatalog.revision, source: options.source });
+  assertCatalogIdentity(reuseCatalog, { version: reuseCatalog.releaseVersion, revision: reuseCatalog.revision, source: options.source });
   assert(reuseCatalog.dashboard.assetManifestSha256 === dashboardAssetManifestSha256,
     'Reusable dashboard image inputs do not match the current asset manifest.');
 }
@@ -37,7 +38,7 @@ for (const name of imageNames) {
   if (reuseCatalog) {
     const entry = catalogImage(reuseCatalog, name);
     const repository = `ghcr.io/${options.owner}/qubicl-${name}`;
-    assert(entry.requested === `${repository}:${options.version}`,
+    assert(entry.requested === `${repository}:${reuseCatalog.releaseVersion}`,
       `Reusable ${name} image has another versioned repository reference.`);
     measurements[name] = {
       indexDigest: entry.indexDigest,
@@ -50,11 +51,11 @@ for (const name of imageNames) {
   } else {
     const preset = CURATED_PRESETS.includes(name) ? name : undefined;
     measurements[name] = await inspectOciArchive(join(options.directory, `qubicl-${name}.oci.tar`), {
-      expectedVersion: options.version,
+      expectedVersion: imageVersion(name),
       expectedRevision: imageRevision(name),
       expectedSource: options.source,
       expectedPreset: preset,
-      expectedManifest: preset ? core.buildComputerManifest(preset, options.version, imageRevision(preset)) : undefined,
+      expectedManifest: preset ? core.buildComputerManifest(preset, imageVersion(preset), imageRevision(preset)) : undefined,
       expectedDashboardAssetManifestSha256: name === 'dashboard' ? dashboardAssetManifestSha256 : undefined,
       requireAttestations: true,
     });
@@ -83,7 +84,7 @@ const imageEntry = (name) => {
   };
 };
 
-const catalog = reuseCatalog ? { ...reuseCatalog, revision: options.revision } : core.ImageCatalogSchema.parse({
+const catalog = reuseCatalog ? { ...reuseCatalog, releaseVersion: options.version, revision: options.revision, gateway: imageEntry('gateway'), dashboard: { ...reuseCatalog.dashboard, image: imageEntry('dashboard') }, presets: Object.fromEntries(CURATED_PRESETS.map((preset) => [preset, { ...reuseCatalog.presets[preset], image: imageEntry(preset) }])) } : core.ImageCatalogSchema.parse({
   schemaVersion: 2,
   releaseVersion: options.version,
   development: false,
@@ -105,7 +106,7 @@ const catalog = reuseCatalog ? { ...reuseCatalog, revision: options.revision } :
       capabilities: definition.capabilities,
       viewer: definition.viewer,
       ...(definition.viewerAuthentication ? { viewerAuthentication: definition.viewerAuthentication } : {}),
-      manifestSha256: core.manifestSha256(core.buildComputerManifest(preset, options.version, imageRevision(preset))),
+      manifestSha256: core.manifestSha256(core.buildComputerManifest(preset, imageVersion(preset), imageRevision(preset))),
       image: imageEntry(preset),
       recommendedCpus: definition.cpus,
       recommendedMemory: definition.memory,

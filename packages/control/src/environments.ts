@@ -1,7 +1,9 @@
 import { resolve } from 'node:path';
 
 const DEFAULT_HOME = '/home/qubicl';
-const SAFE_PATH = '/home/qubicl/.local/bin:/usr/local/bin:/usr/bin:/bin';
+export function workloadPath(home = DEFAULT_HOME): string {
+  return `${resolve(home, '.local/bin')}:${resolve(home, '.local/share/qubicl/python/current/bin')}:/opt/qubicl/skills-venv/bin:/usr/local/bin:/usr/bin:/bin`;
+}
 
 /**
  * Environment passed to model-controlled commands. Control-plane variables,
@@ -14,7 +16,9 @@ export function workloadEnvironment(source: NodeJS.ProcessEnv, home = DEFAULT_HO
     USER: 'qubicl',
     LOGNAME: 'qubicl',
     SHELL: '/bin/bash',
-    PATH: SAFE_PATH,
+    PATH: workloadPath(home),
+    VIRTUAL_ENV: resolve(home, '.local/share/qubicl/python/current'),
+    npm_config_prefix: resolve(home, '.local'),
     LANG: safeLocale(source.LANG),
     LC_ALL: safeLocale(source.LC_ALL ?? source.LANG),
     XDG_CONFIG_HOME: resolve(home, '.config'),

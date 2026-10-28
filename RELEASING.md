@@ -1,401 +1,207 @@
 # Releasing Qubicl
 
-Qubicl releases are built and published from maintainer-controlled local
-hardware. Nothing uses GitHub Actions, and publication never rebuilds a tested
-artifact.
+This is the active release procedure for the 0.7 design. It supersedes the
+same-version image reuse and blanket qualification requirements of earlier
+release procedures. Historical candidates remain verifiable under their
+original schemas. See [decision 0004](docs/decisions/0004-practical-computers-and-releases.md).
 
-The instructions below describe the currently enforced candidate and publisher
-contract. The [0.6 design](docs/decisions/0002-v0.6-capabilities-and-constraints.md)
-adds exact change-impact analysis, representative affected clients, and
-identity/freshness-bound evidence reuse. Candidate, release-set, verifier, and
-publisher metadata enforce that impact identity. Publication still uses one
-complete immutable signed candidate containing all six images. Candidate
-construction may reuse an unchanged image archive, scan report, and efficiency
-report when their recorded inputs and freshness still satisfy the verifier.
+Build and publish on maintainer-controlled local hardware. Do not use GitHub
+Actions, repository runners, or paid build/test services. A request to ship a
+named version authorizes its required checks, commits, push, tag, and publication;
+it does not authorize deleting user data. Keep private keys and private worklogs
+outside the public repository.
 
-Before building, identify changed inputs and reusable evidence. Reuse verified
-artifacts when their inputs still match. A user request to ship a version covers
-the required local checks, commit, push, tag, and publication; report progress
-without stopping for permission at each step.
+## Select the work and verification
 
-## Qualification and urgent security patches
+Prepare a short plan of included commits, changelog entries, compatibility or
+migration impact, affected artifacts, and relevant checks. Accumulate changes
+under `Unreleased`; bump workspace manifests and the lockfile together only when
+preparing an approved release. Add dated notes in `release-notes/vVERSION.md`.
 
-Build one complete, signed candidate containing the CLI, native archive, six
-amd64/arm64 images, checksums, SBOMs, and twelve image scans. The scan policy
-rejects secrets and HIGH/CRITICAL findings for which a fix is available. Record
-remaining unfixed findings in the release evidence.
+Select focused source checks for the actual change. `release:check` is an
+available aggregate, not a mandatory sequence to repeat for every release.
+Use [development guidance](docs/development.md#choose-checks-for-the-change)
+and retain exact commands, outcomes, and input identities. Real-client or
+physical-platform claims require observations of those clients or machines.
+Mock tests and produced native archives do not establish that support.
 
-The standard publisher expects a signed schema-4 client and platform acceptance
-bundle selected by the release-impact document. Some checks require physical
-hardware or separate clients and may be unavailable during an urgent security
-patch. The owner may direct publication from a verified candidate with a
-separate signed qualification decision that lists exactly which checks passed
-and which did not. Release notes must disclose the gaps. No incomplete check is
-recorded as passing, and this exception does not claim new platform support.
+The supported publisher accepts a signed qualification decision. Every
+impact-selected check is recorded as **passed**, **failed**, or **unverified**,
+with an explanation. Passed and failed rows reference hashed evidence. An
+incomplete or failed row requires `publish-with-limitations` and an exact public
+release-note disclosure. Never change a failed result to passing or quietly
+remove a selected check. Maintainers decide whether the stated limitations are
+acceptable for the requested release; a new session does not invalidate useful
+evidence. This process does not bypass artifact, signature, vulnerability,
+source-history, or integrity verification.
 
-Reuse successful build, scan, and test evidence while the exact inputs and
-freshness still match. A failed late check does not force another full build;
-resume complete staging or recover verified archives from preserved staging.
-The [platform support matrix](conformance/platform-support-v1.json) records
-support classifications. Release-specific signed evidence records what was
-actually tested.
+## Build and reuse exact artifacts
 
-## Public source identity
+Use a patched Node version from the declared engine range. Development accepts
+npm `>=10.9.9 <13`; `packageManager` retains the default release toolchain pin.
+The candidate records actual Node/npm/Docker/Buildx versions. Use the reviewed
+Trivy version enforced by `scripts/candidate-evidence.mjs` and a locally
+checksum-verified Gitleaks build. Check source/privacy with `npm run public:check`.
 
-Release only from the privacy-checked root history of the official repository.
-The maintained project identity is
-`Qubicl Maintainers <contact@qubicl.org>`. Before building a candidate, run:
-
-```sh
-npm run public:check
-```
-
-`npm run public:export` is a recovery tool if the public source root ever needs to
-be recreated. Its output contains only the committed tree: no `.git`, old
-refs, local state, ignored artifacts, candidate output, or Git identity. Any
-new public root must use the maintained identity above and pass the same source
-and secret checks before it is pushed.
-
-`PUBLIC_HISTORY_POLICY.json` makes that boundary executable. The guarded
-publisher requires a linear `main` history descended from the exact reviewed
-public root, verifies that `HEAD` and `origin` match the candidate, rejects
-merge-connected or alternate-root ancestry, and reruns the public-source
-privacy check before any publication action.
-
-### npm identity and tags
-
-npm adds the publishing account's email address to public package metadata,
-and changing the account later does not rewrite metadata for an already
-published version. Before publishing the stable candidate, set **Account
-Settings → Email address added to package metadata** to a project-specific
-public address and verify it with `npm profile get`. See npm's
-[profile guidance](https://docs.npmjs.com/managing-your-profile-settings/) and
-[threat model](https://docs.npmjs.com/threats-and-mitigations/).
-
-Inspect `npm dist-tag ls qubicl-cli` before announcing a release.
-Prereleases belong on `dev` or `next`; `latest` must identify the stable
-release. The guarded publisher verifies the candidate under `next` and moves
-`latest` only after the npm, GHCR, Git tag, and GitHub Release checks succeed.
-
-## Build the exact candidate
-
-Prerequisites on the Linux x64 release host:
-
-- the Node/npm versions pinned by this repository;
-- Docker Engine/Desktop, Compose, and a multi-platform Buildx builder;
-- checksum-verified Gitleaks 8.30.1, or a separately reviewed compatible build;
-- Trivy 0.74.0, which the candidate tooling enforces; and
-- a clean checkout of the new public repository at the release revision.
-
-Run the source gates once after the intended source is stable:
+Freeze the reviewed source commit before generating its impact document:
 
 ```sh
-gitleaks version
-trivy --version
-npm ci
-npm run release:check
+npm run release:impact -- --base vPREVIOUS --output /secure/release-impact.json
+npm run candidate:release -- --impact /secure/release-impact.json \
+  --reuse /path/to/previous-candidate/linux-x64
 ```
 
-`release:check` owns source-level checks, including source Docker E2E. Candidate
-construction later runs the exact npm and native artifacts against the selected
-image catalog; it does not repeat the source E2E. The artifact harness owns one
-explicit temporary Qubicl home and removes its exact Compose project and image
-namespace after success or failure. A cleanup failure is reported and preserves
-the temporary home for diagnosis instead of silently leaking Docker resources.
-The home is created under the maintainer's home directory so Docker Desktop can
-bind-mount it through the same shared filesystem required by a normal Qubicl
-installation.
-
-When a gate fails, fix the cause and resume the missing checks. Use
-`QUBICL_E2E_SKIP_IMAGE_BUILD=1` when the exact development images are still
-available and their inputs have not changed. Rebuild only changed image inputs.
-
-For a suspected lifecycle or
-migration problem, inspect the bounded diagnostic plan and then run that exact
-scenario before freezing source:
+The first command binds the exact Git range. The second is read-only and prints
+`buildImages`, `reuseImages`, and `scanImages`. Omit `--reuse` for the first build.
+After reviewing that plan, construct once:
 
 ```sh
-npm run release:diagnose -- --candidate /path/to/last-complete-candidate
-npm run release:diagnose -- --candidate /path/to/last-complete-candidate --execute
-# For an upgrade-specific check, also pass --upgrade-from /path/to/old/qubicl.
+npm run candidate:release -- --impact /secure/release-impact.json \
+  --reuse /path/to/previous-candidate/linux-x64 --execute
 ```
 
-The diagnostic command never creates release evidence or builds images, scans,
-native archives, or signatures. Its default is read-only; `--execute` runs one
-scenario once. Diagnose a failure before deciding what to rerun.
+`candidate:release` selects the pre-1.0 initial tier. `candidate:local` selects
+the supported tier; it uses the same qualification path described below.
 
-Commit the frozen source, generate its impact document, and ask the candidate
-builder for a read-only plan. Add `--reuse /path/to/previous-candidate/linux-x64` when an earlier
-complete candidate for this version exists:
+Candidate schema 8 carries image-input schema 2. The CLI/catalog release version
+is independent of image origin versions. Root/workspace version-only changes do
+not rebuild images. Runtime sources, external dependency versions and integrity,
+Dockerfiles, and mapped build inputs remain significant. The lockfile identity
+includes the relevant runtime dependency closure and build tools. An unclassified
+input invalidates every image. An origin must be an ancestor of the candidate,
+reproduce its per-image input identity, and retain its actual version and build
+toolchain. Legacy provenance is verified before conversion to the new map.
 
-```sh
-BASE="$(git describe --tags --abbrev=0 --match 'v[0-9]*')"
-VERSION="$(node -p "require('./package.json').version")"
-IMPACT="/secure/release-impact-v${VERSION}.json"
-npm run release:impact -- --base "$BASE" --output "$IMPACT"
-npm run candidate:release -- --impact "$IMPACT"
-```
+The catalog uses the current release tags with exact immutable image digests.
+Unchanged bytes retain their original embedded version, revision, manifests,
+SBOMs, and attestations; publication adds current-version aliases. Do not rebuild
+an image just to make its embedded version match the CLI. Native/npm packages
+carry preset manifests matching those actual image origins.
 
-Review `buildImages`, `reuseImages`, `scanImages`, and the recorded reasons. Only
-the explicit execution form performs expensive work:
+The builder copies and verifies unchanged archives, builds only changed images,
+and refreshes only affected or stale image scans. Scan-binding schema 3 records
+scanner/database provenance per report; each image still has amd64 and arm64
+reports bound to its exact OCI platform bytes. Expired advisory data requires a
+rescan, not a rebuild. The efficiency report is reused when its archives are
+unchanged and verified from those bytes. A complete publication still contains
+six image references and the exact npm/Linux x64 artifacts; this is not a
+partial or unsigned publication mode.
 
-```sh
-npm run candidate:release -- --impact "$IMPACT" --execute
-```
+The builder uses an isolated source checkout, clean dependency installation,
+SBOMs, audit/signature evidence, exact npm/native artifact acceptance, and final
+candidate verification. It never publishes. If the advisory endpoint is down,
+`QUBICL_AUDIT_REUSE_PATH` may supply the existing bounded audit-reuse mechanism;
+the verifier still checks identity and freshness. Security exceptions and
+applicability statements remain explicit, scoped, dated records in `security/`.
 
-Generate the impact document only after the release commit is frozen. The
-command resolves both revisions and refuses to overwrite an existing output.
-The candidate verifier recomputes the Git name-only diff and classifier, then
-checks the embedded document's hash and exact base/candidate identity.
+## Recover a failed construction
 
-If a late candidate check fails, Qubicl preserves staging under
-`release/candidates/.failed-*`. For a complete staging directory, correct the
-external condition and verify the unchanged bytes:
+Diagnose the specific failed step. Do not start another full candidate because a
+process is quiet or a late check failed. Preserve completed bytes and their logs.
 
 ```sh
 npm run candidate:resume -- release/candidates/.failed-VERSION-REVISION-TARGET.PID
 ```
 
-Resume runs only the complete candidate verifier. When failure happened before
-the manifest and checksums were written, use `--reuse-failed` with the
-preserved staging directory. That path verifies image origins, archive hashes,
-scan bindings, scanner freshness, and policy; it then builds fresh CLI artifacts
-and runs exact artifact acceptance. The failed directory itself is never
-promoted or edited. The read-only plan identifies any images or scans whose
-inputs actually changed.
+Resume verifies a complete preserved candidate without rebuilding or repeating
+acceptance. For incomplete staging, plan with `--reuse-failed DIRECTORY`, then
+append `--execute`. That recovery path currently requires the same release
+version. A complete candidate can donate unchanged images across versions.
+Source changes require a new commit and plan; never edit an immutable candidate.
 
-`candidate:release` first exports the reviewed commit into a disposable clean
-worktree, runs a fresh `npm ci`, and retains lockfile, registry, installed-tree,
-audit, and registry-signature evidence. Candidate schema 7 adds
-`image-inputs.json`: every image records its originating commit, a hash of the
-mapped Git-tree entries and image-relevant root manifest fields, the release
-version, and its original build toolchain. An origin must be an ancestor of the
-candidate and reproduce the same versioned input hash. Unknown input paths
-invalidate every image.
-Current host tool versions do not invalidate already immutable image bytes;
-their original toolchain remains recorded.
+## Release set and qualification
 
-If npm's advisory endpoint is unavailable, a recent successful audit for the
-same release dependency graph can be supplied through
-`QUBICL_AUDIT_REUSE_PATH=/path/to/dependency-evidence.json`. The builder still
-runs fresh `npm ci --no-audit` and signature checks. It embeds the original
-audit in the new dependency evidence; the verifier accepts it only when it is
-under 24 hours old, has no blocking findings, and both committed lockfiles
-match apart from the root and CLI Node/npm engine declarations.
+Place the complete member under `RELEASE_DIRECTORY/linux-x64`. Optional native
+members must be built on the actual target hardware with `--binary-only`, the
+same `--impact`, the same tier (`--initial` for initial releases), and `--catalog`
+pointing to the complete member's catalog. Keep its adjacent `image-inputs.json`
+so native packaging preserves the image origins. Copy each verified member to
+its named target directory.
 
-The builder copies only archives selected for reuse and checks each copy against
-the donor manifest. Changed image inputs rebuild only their mapped image group.
-A candidate that reuses every image also carries forward the verified dashboard
-asset identity and skips the preliminary image-context build; final candidate
-verification still requires the npm/native build to reproduce that identity.
-A fresh scan set can be copied when its scanner/database identity is still
-valid; stale scan evidence causes a rescan of the selected immutable archives,
-not an image rebuild. When all images are unchanged, the exact efficiency report
-is copied and the final verifier regenerates it from the archives. The catalog
-and final candidate still contain all six images.
-
-For newly required scans, the builder refreshes the Trivy vulnerability database
-and rejects metadata whose next-update time has already passed or whose scan,
-database, or check-bundle time is in the future. Each amd64/arm64 Trivy run
-receives its own one-manifest OCI view;
-the builder verifies the selected index, manifest, configuration, compressed
-layers, rootfs diff IDs, and report identity before retaining the report. It
-writes `oci-efficiency.json` for v0.2 and later from those exact archives and
-their embedded SPDX attestations, recording shared/unique compressed and expanded
-layers plus normalized package overlap. Candidate verification regenerates the
-report from the retained bytes using the OCI inspections already performed by
-that verification call. The builder generates the exact catalog, builds the npm
-and native artifacts once against it, and runs their exact-artifact acceptance
-serially. Publication includes the retained evidence.
-The builder writes an ignored candidate beneath:
-
-```text
-release/candidates/VERSION-<revision>/linux-x64/
-```
-
-From the same clean reviewed revision, verify it without rebuilding or rerunning
-acceptance:
+Schema-3 release sets select native targets explicitly, defaulting to Linux x64:
 
 ```sh
-node scripts/verify-candidate.mjs /path/to/candidate
+npm run candidate:release-set -- /path/to/RELEASE_DIRECTORY
+# Or select only the native archives being shipped:
+npm run candidate:release-set -- /path/to/RELEASE_DIRECTORY \
+  --targets linux-x64,linux-arm64,darwin-arm64
 ```
 
-If source or dependencies change, commit the fix and generate a new plan against
-the last complete candidate or preserved failed staging. Rebuild only the
-inputs that plan invalidates. Never edit candidate contents in place.
+Do not run both examples against the same existing output. A native target's
+presence is an artifact declaration, not a claim that its hardware acceptance
+passed. Broader 1.0 support policy must be an explicit product decision, not an
+inherited four-platform or nine-client quota.
 
-## Mandatory detached signature
-
-The publisher requires an offline Ed25519 signature over the exact candidate
-manifests. It can be added without changing the candidate:
+Create a release key only if one does not already exist. Sign the candidate and
+release set, then create the qualification template:
 
 ```sh
-npm run candidate:sign -- keygen /secure/offline/qubicl-release
-npm run candidate:sign -- sign /path/to/candidate \
-  /secure/offline/qubicl-release.private.pem /path/to/candidate.signature.json
-npm run candidate:sign -- verify /path/to/candidate \
-  /secure/offline/qubicl-release.public.pem /path/to/candidate.signature.json
+npm run candidate:sign -- sign /path/to/RELEASE_DIRECTORY/linux-x64 \
+  /secure/release.private.pem /path/to/candidate-signature.json
+node scripts/release-set.mjs sign /path/to/RELEASE_DIRECTORY/release-set.json \
+  /secure/release.private.pem /path/to/release-set-signature.json
+npm run candidate:qualification -- plan /path/to/RELEASE_DIRECTORY/release-set.json \
+  /path/to/qualification.json
 ```
 
-Keep the private key outside the repository and backups intended for public
-distribution.
+Fill the template's exact selected rows. Set the maintainer identity, approval
+time, and publication decision. Evidence files must be regular files beneath
+the qualification directory, at most 16 MiB each, with SHA-256 hashes. Retain
+commands, target versions, tested artifact identities, and actual results in
+those files; reuse is justified by matching relevant inputs, not by editing a
+timestamp. Use distinct filenames because GitHub release assets share a flat
+namespace. Remove secrets and personal/host data from evidence before hashing.
+
+For every gap, release notes must contain the literal line text
+`CHECK_ID: STATUS — REASON` from qualification. Then sign:
+
+```sh
+npm run candidate:qualification -- sign /path/to/RELEASE_DIRECTORY/release-set.json \
+  /path/to/qualification.json /secure/release.private.pem \
+  /path/to/qualification-signature.json
+```
+
+Legacy signed schema-4 `--acceptance` / `--acceptance-signature` bundles remain
+supported with their original release-set and matrix rules. They are an optional
+strict path for historical workflows, not additional requirements on the new
+qualification path.
 
 ## Preview and publish
 
-Install Skopeo on the release host before publication; it copies the exact
-multi-platform OCI archives to GHCR without rebuilding them. Authenticate npm
-and `gh`. The publisher dry run is local and does not require `origin/main` to
-have moved. It verifies the candidate, signatures, acceptance bundle, release
-notes, and local checkout, then prints the exact publication plan.
-
-Inspect the publication plan before any push:
+Install Skopeo and authenticate npm and GitHub CLI. Use the project identity
+`Qubicl Maintainers <contact@qubicl.org>` for commits and public metadata. Keep
+npm's public metadata email set to the project address. For agent-driven npm
+authentication use `npm_config_browser=false` and the printed authentication URL.
 
 ```sh
-npm run release:publish -- --candidate /path/to/candidate \
-  --public-key /secure/offline/qubicl-release.public.pem \
-  --signature /path/to/candidate.signature.json \
-  --release-set /path/to/release-set.json \
+npm run release:publish -- --candidate /path/to/RELEASE_DIRECTORY/linux-x64 \
+  --public-key /secure/release.public.pem --signature /path/to/candidate-signature.json \
+  --release-set /path/to/RELEASE_DIRECTORY/release-set.json \
   --release-set-signature /path/to/release-set-signature.json \
-  --acceptance /path/to/acceptance.json \
-  --acceptance-signature /path/to/acceptance-signature.json
+  --qualification /path/to/qualification.json \
+  --qualification-signature /path/to/qualification-signature.json
 ```
 
-The dry run verifies the full candidate and the exact checkout without remote
-mutation. When shipping the release, push only the reviewed commit and confirm
-the remote-tracking branch resolves to it:
+This dry run verifies the exact checkout, candidate, release set, signatures,
+evidence hashes, and release-note disclosures. It prints limitations and exact
+publication objects without remote mutation. Notes also need the release-key
+trust anchor enforced by the publisher. Review the plan, push the reviewed
+commit to `main`, verify `origin/main` matches it, then repeat the command with
+`QUBICL_RELEASE_APPROVAL=VERSION` and `--publish --yes`.
 
-```sh
-git fetch origin main
-git merge-base --is-ancestor origin/main HEAD
-git push origin HEAD:main
-git fetch origin main
-test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
-```
-
-Publish the requested release:
-
-```sh
-QUBICL_RELEASE_APPROVAL="$(node -p "require('./package.json').version")" npm run release:publish -- \
-  --candidate /path/to/candidate \
-  --public-key /secure/offline/qubicl-release.public.pem \
-  --signature /path/to/candidate.signature.json \
-  --release-set /path/to/release-set.json \
-  --release-set-signature /path/to/release-set-signature.json \
-  --acceptance /path/to/acceptance.json \
-  --acceptance-signature /path/to/acceptance-signature.json \
-  --publish --yes
-```
-
-The guarded publisher:
-
-1. logs Skopeo into GHCR using the active GitHub CLI token without printing it;
-2. copies and verifies all six exact versioned OCI indexes;
-3. verifies that all six GHCR packages permit anonymous pulls;
-4. publishes the exact npm tarball under a temporary `next` tag and verifies its
-   registry integrity;
-5. creates and pushes the annotated tag for the candidate version;
-6. creates the GitHub release with the native archive, checksums, catalog,
-   candidate manifest, SBOMs, and vulnerability summary; and
-7. includes the exact release-impact document in the GitHub release; and
-8. only after those checks pass, moves the GHCR and npm `latest` tags.
-
-If a new GHCR package is private, make that exact package public and rerun
-the publisher against the same immutable candidate. The npm package is not
-published until all six image packages report public visibility, so `qubicl setup` cannot be stranded behind
-private images.
-
-Publication is retry-safe when existing versioned npm/image objects match the
-candidate and fails if they do not. Existing GitHub releases must also match
-the exact commit, title, notes, state, asset set, sizes, and SHA-256 values. It
-never changes repository or package visibility.
+The publisher preserves the reviewed public root and linear history. It copies
+exact OCI bytes, verifies versioned digests and anonymous GHCR access, publishes
+the retained npm tarball under `next`, verifies npm integrity, tags the exact
+source commit, uploads release artifacts and signed evidence, and only then
+moves `latest`. Existing versioned objects must match; it never rewrites them
+or changes package visibility. An npm HTTP 202 is an accepted upload still being
+processed: wait for metadata and verify integrity rather than rebuilding or
+republishing it.
 
 ## After publication
 
-From a clean user environment:
-
-```sh
-npm install -g qubicl-cli@latest
-qubicl setup
-qubicl doctor
-```
-
-Create one computer, connect one real client, open the viewer, and verify an
-upgrade while preserving the computer's home. If that smoke fails, do not move
-or advertise additional mutable tags; document and fix the release.
-
-## Current supported-tier requirements
-
-The full cross-platform/reboot matrix, complete real-client evidence,
-independent security review, and individually reviewed remaining
-HIGH/CRITICAL findings are requirements of the current `supported` tier. The
-`initial` tier has its own enforced requirements described above. Future 1.0
-qualification must be reviewed against the implemented product and release
-policy rather than inferred from a historical candidate checklist.
-
-The current release-set format, introduced in v0.2, is schema 2. An `initial` set contains the one
-complete Linux x64 candidate. A `supported` set additionally aggregates the
-Linux ARM64 and both macOS native candidates. Create and sign either tier from
-its exact candidate directory:
-
-```sh
-npm run candidate:release-set -- release/candidates/VERSION-REVISION
-node scripts/release-set.mjs sign release/candidates/VERSION-REVISION/release-set.json \
-  /secure/offline/qubicl-release.private.pem /path/to/release-set-signature.json
-node scripts/acceptance-evidence.mjs sign \
-  release/candidates/VERSION-REVISION/release-set.json /path/to/acceptance.json \
-  /secure/offline/qubicl-release.public.pem /path/to/release-set-signature.json \
-  /secure/offline/qubicl-release.private.pem /path/to/acceptance-signature.json
-```
-
-The publisher requires all four extra paths through `--release-set`,
-`--release-set-signature`, `--acceptance`, and `--acceptance-signature` for a
-supported release or any v0.2-or-later publication. The versioned acceptance
-schema hashes every referenced report and records concrete tool/platform
-versions and UTC timestamps. The signed release-set tier and the acceptance
-`profile` must match exactly; a supported candidate cannot use the initial
-profile.
-
-For v0.2 and later release sets, acceptance schema 4 is mandatory; schema-3
-evidence remains readable only for v0.1. Schema 4 hash-binds the reviewed
-`client-conformance-v1.json` requirements and requires exact installed versions
-plus post-freeze evidence for every applicable surface in each required row.
-For v0.2 through v0.4, the initial profile requires Codex, Open WebUI, MCP
-stdio, MCP HTTP, OpenAPI, and Open Terminal. The supported profile requires all
-nine named applications and all four protocol probes. v0.5 requires the complete
-nine-application and four-protocol matrix for both tiers. For v0.6 and later,
-the release-impact document selects the affected protocol surfaces; adapters
-whose inputs changed require their real client rows. Adding this gate does not
-produce evidence: required real-client runs must still be performed against the
-frozen candidate before acceptance is signed.
-
-For schema-7 candidates, `qualificationStartedAt` is the immutable candidate
-commit time. Evidence may be collected after that boundary and before all native
-members are assembled into `release-set.json`; creating the release set no
-longer invalidates work already performed against the same frozen candidate.
-
-Schema 4 also hash-binds `platform-support-v1.json`. The initial profile
-requires the exact Linux x64 host/runtime versions plus minimum-version and
-restart results. It requires upgrade, crash-safe backup, restart,
-full-topology performance, multi-computer, and remote-gateway workflows. The
-supported profile requires all five platform rows, every reviewed restart and
-reboot check, sustained dogfooding, and independent owner/reviewer/approver
-identities. Its Windows row remains constrained to Windows 11 x64 and Ubuntu
-24.04 WSL 2; macOS rows require Docker Desktop restart evidence. Native Windows
-and WSL 1 remain unsupported. Every row actually required by the selected
-profile needs post-freeze, hash-bound evidence from the frozen candidate.
-
-Remote gateway support adds a third immutable contract:
-`remote-access-v1.json`. The initial profile requires the native Linux x64
-direct-network row. The supported profile additionally requires Apple Silicon
-Docker Desktop and Windows 11 x64 through WSL 2/Docker Desktop. Each row records
-non-loopback source and container-observed address
-families plus an exact same/different comparison for direct or NAT-translated
-behavior, exact client/browser versions, TLS identity,
-and passing results for remote MCP HTTP, OpenAPI, Open Terminal, viewer static
-and WebSocket traffic, and isolated HTTP/WebSocket previews. The exact security,
-lifecycle, local-loopback preservation, revoke, doctor/status, mTLS, CIDR,
-origin, bearer-isolation, and durable-data checks are mandatory, as is the
-top-level `remoteGateway` workflow and `remoteExposure` security-review topic.
-Focused source tests cannot substitute for these physical-host and real-client
-records. Raw source and observed network addresses are excluded from published
-evidence so the release record does not disclose local network topology.
+Verify published artifact identities and perform the small user-facing smoke
+selected by the release plan. Record actual outcomes, limitations, commit/tag,
+artifact hashes, and follow-up in the private worklog. A release does not
+silently upgrade existing computers. Upgrade a named live installation only
+when requested, preserving its durable data and runtime state.

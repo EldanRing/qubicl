@@ -33,6 +33,7 @@ export interface ConnectionSnippetOptions {
   clientHost?: string;
   stdioLauncher?: { command: string; argsPrefix: string[] };
   credentialId?: string;
+  sshHost?: string;
 }
 
 export interface ConnectionSnippet {
@@ -72,6 +73,7 @@ export function connectionSnippet(options: ConnectionSnippetOptions): Connection
   }
   if (clientHost === 'windows' && transport !== 'stdio') throw new Error('--client-host windows is available only for stdio connections. Windows clients can use the printed localhost HTTP/OpenAPI URL directly.');
   if (clientHost === 'windows' && !options.stdioLauncher) throw new Error('--client-host windows requires a WSL stdio launcher.');
+  if (options.sshHost && (transport !== 'stdio' || options.stdioLauncher || clientHost === 'windows' || options.credentialId)) throw new Error('--ssh requires stdio without a WSL launcher or bearer credential.');
   const serverName = `qubicl-${options.computerName}`;
   const stdioArgs = [
     'mcp',
@@ -79,7 +81,7 @@ export function connectionSnippet(options: ConnectionSnippetOptions): Connection
     ...(options.profile ? ['--profile', options.profile] : []),
     ...(options.resultMode ? ['--result-mode', options.resultMode] : []),
   ];
-  const stdio = options.stdioLauncher
+  const stdio = options.sshHost ? sshStdioLauncher(options.sshHost, stdioArgs) : options.stdioLauncher
     ? { command: options.stdioLauncher.command, args: [...options.stdioLauncher.argsPrefix, ...stdioArgs] }
     : { command: 'qubicl', args: stdioArgs };
   const windowsHint = clientHost === 'windows'
@@ -231,4 +233,11 @@ function openWebUiContainerUrl(value: string): string {
 
 function powerShellArgument(value: string): string {
   return /^[A-Za-z0-9_./:@=+,-]+$/.test(value) ? value : `'${value.replaceAll("'", "''")}'`;
+}
+
+/** OpenSSH invokes a remote shell: validate every token before joining the command. */
+export function sshStdioLauncher(host: string, args: string[]): { command: string; args: string[] } {
+  if (!/^(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9_][A-Za-z0-9_.-]*$/u.test(host)) throw new Error('Use an SSH config alias or user@hostname for --ssh. Configure ports and IPv6 addresses in ~/.ssh/config.');
+  if (args.some((value) => !/^[A-Za-z0-9][A-Za-z0-9_.-]*$|^--[a-z][a-z-]*$/u.test(value))) throw new Error('Unsafe remote Qubicl command argument.');
+  return { command: 'ssh', args: ['-T', '-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=30', '--', host, ['qubicl', ...args].join(' ')] };
 }

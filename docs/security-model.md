@@ -71,9 +71,9 @@ Do not place secrets in a Qubicl home that you would not give to container-root 
   release requires the internal operator key; the computer bearer is insufficient.
 - Managed desktop applications survive takeover alongside the persistent
   browser, retained tasks, services, and operator-owned SSH sessions. A bounded
-  catalog combines safe built-ins with user and system desktop entries whose
-  executables resolve inside approved computer bin directories; launch avoids a
-  shell, sanitizes the environment, confines document
+  catalog combines built-ins with user and system desktop entries. Executables
+  may resolve outside bin directories or be supplied as absolute paths; launch
+  runs directly as the workload user without a shell, sanitizes the environment, confines document
   paths below `/home/qubicl`, reserves bounded capacity, and records executable
   identity. Programmatic close requires explicit acknowledgement of possible
   unsaved work. Human control belongs to the live viewer connection, permits a
@@ -246,3 +246,27 @@ labels supplied by clients are untrusted display data, not identity or authority
 Shared Open Terminal connections retain one fenced lease; per-chat folders do
 not create isolation or a scheduler. See [dashboard](dashboard.md) for limits and
 recovery, and [decision 0001](decisions/0001-host-owned-dashboard.md).
+
+
+## Software installation and dependency maintenance
+
+Python and npm tools installed in the workload home need no administrator
+privilege. The managed Python environment and npm prefix are durable user data;
+they do not receive host secrets. The host-side `software` command builds a
+saved apt recipe into a derived Qubicl image, then uses the existing upgrade
+transaction. Package maintainer scripts run in the image build, not on the host;
+this command does not grant guest sudo or a Docker socket. The operator trusts
+the selected repositories and packages just as with a custom Dockerfile.
+
+Use supported upstream dependency releases and verify compatibility. The image
+pins upstream npm 12.2.1; it no longer replaces npm's private nested packages.
+Prefer compatible fixed versions, remove genuinely unused dependencies, and use
+the existing scoped, expiring exception/applicability mechanism when a finding
+cannot safely be fixed immediately. A scanner result alone is not a reason to
+install an incompatible dependency. Current advisory evidence and artifact
+integrity remain enforced by candidate verification.
+
+SSH client transport authenticates the remote OS account and retains normal
+host-key verification. That account owns the remote Qubicl installation; it is
+not a scoped computer bearer credential. Use a separate host account when that
+broader authority is inappropriate. Docker stays local to the remote host.

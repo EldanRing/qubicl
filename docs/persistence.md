@@ -12,7 +12,9 @@ Qubicl has one durable computer boundary: the bind-mounted `/home`.
 | Named client credentials/internal keys | Until selective rotation/delete | Raw values exist only in mode-`0600` host state; client IDs, scopes, and last use are separately attributable. |
 | Retained task records and output | Bounded | Stored in the durable home for the configured retention period; a runtime restart interrupts the process but preserves its terminal record without replay. |
 | Optional remote-gateway exposure | Until revoked | Host-local bind, TLS identity metadata, trusted origins, and network policy are durable; copied certificate and key material remain in protected host state. |
-| Runtime roots and system packages | No guarantee | Recreation discards them. Use a custom image. |
+| Python/npm tools in the home | Yes | Default environment/prefix stays under `/home`; a Python ABI change retains the old environment for explicit reinstallation. |
+| Saved system-package recipe | Yes | Host configuration retains apt additions. Named upgrades rebuild the recipe; installation backups retain it. |
+| Ad hoc root filesystem changes | No guarantee | Recreation discards them. Use a saved software recipe or custom image. |
 | `/tmp`, display state, live process state | No | Runtime-only. Declared services may restart; arbitrary jobs do not replay. |
 | Compose, routes, networks, containers | No | Rebuilt from durable intent. |
 
@@ -59,7 +61,7 @@ first mutation, then rolls forward gateway-first. Stored defaults change only
 future computers. Existing computer IDs, credentials, operator settings,
 resources, homes, and prior runtime state are preserved. Missing local content
 IDs in migrated curated state are repaired through the same explicit boundary;
-custom image identities are never advanced automatically.
+custom image identities are never advanced by this aggregate command. Recipe-bearing computers use `qubicl upgrade NAME` to rebuild their saved packages on the new base. See [software installation](custom-images.md#install-everyday-software).
 
 ## Protected host state
 

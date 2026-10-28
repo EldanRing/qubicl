@@ -53,6 +53,15 @@ your model or agent
         └── live viewer + human takeover
 ```
 
+
+Everyday Python/npm tools install into the durable home. Use `qubicl software
+NAME --apt ripgrep,jq` for saved system-package additions and named upgrades to
+reapply them. Desktop tools can launch user-installed executables by name or
+absolute path. Qubicl can also live on an always-on host: `qubicl connect NAME
+--client codex --ssh user@host` prints a connection over your existing SSH setup.
+See [software setup](docs/custom-images.md) and
+[remote hosting](docs/remote-access.md).
+
 ## Why Qubicl
 
 | Capability | What it gives you |

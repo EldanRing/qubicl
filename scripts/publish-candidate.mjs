@@ -12,6 +12,7 @@ import { OCI_EFFICIENCY_REPORT_NAME } from './oci-efficiency.mjs';
 import { verifyCandidateSignature } from './sign-candidate.mjs';
 import { verifyAcceptanceBundle } from './acceptance-evidence.mjs';
 import { requiresReleaseImpact } from './release-impact.mjs';
+import { verifyQualificationBundle, assertQualificationDisclosure } from './release-qualification.mjs';
 
 const exec = promisify(execFile);
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -22,9 +23,9 @@ export function buildPublishPlan(candidate, catalog, candidateDirectory, release
   assert(candidate.modes?.binaryOnly === false, 'Publishing requires the npm artifact from a complete candidate.');
   if (requiresReleaseImpact(candidate.version)) assert(candidate.releaseImpact?.name === 'release-impact.json', 'Qubicl 0.6 and later publication requires validated release-impact evidence.');
   const acceptanceRequired = candidate.releaseTier === 'supported' || requiresClientConformance(candidate.version);
-  assert(!acceptanceRequired || releaseEvidence, 'Supported releases and v0.2 or later publication require a signed release set and signed acceptance evidence.');
+  assert(!acceptanceRequired || releaseEvidence, 'Supported releases and v0.2 or later publication require a signed release set and signed qualification or acceptance evidence.');
   if (releaseEvidence?.set?.document?.releaseTier !== undefined || requiresClientConformance(candidate.version)) {
-    assert(releaseEvidence?.set?.document?.schemaVersion === 2
+    assert(releaseEvidence?.set?.document?.schemaVersion >= 2
       && releaseEvidence.set.document.releaseTier === candidate.releaseTier,
     'Signed release evidence must match the candidate release tier.');
   }
@@ -59,13 +60,16 @@ export function buildPublishPlan(candidate, catalog, candidateDirectory, release
       join(candidateDirectory, `qubicl-${candidate.version}-${candidate.host.target}.spdx.json`),
     ];
   const trustAssets = releaseEvidence
-    ? [releaseEvidence.set.path, releaseEvidence.releaseSetSignature, releaseEvidence.acceptance, releaseEvidence.acceptanceSignature, ...releaseEvidence.evidenceFiles]
+    ? [releaseEvidence.set.path, releaseEvidence.releaseSetSignature,
+      ...(releaseEvidence.qualification ? [releaseEvidence.qualification, releaseEvidence.qualificationSignaturePath] : [releaseEvidence.acceptance, releaseEvidence.acceptanceSignature]),
+      ...releaseEvidence.evidenceFiles]
     : [];
   return {
     version: candidate.version,
     revision: candidate.revision,
     source: candidate.source,
     tag: `v${candidate.version}`,
+    ...(releaseEvidence?.summary ? { qualificationLimitations: releaseEvidence.summary.limitations } : {}),
     npmArchive: join(candidateDirectory, `qubicl-cli-${candidate.version}.tgz`),
     nativeArchive: join(candidateDirectory, `qubicl-${candidate.version}-${candidate.host.target}.tar.gz`),
     images,
@@ -87,19 +91,19 @@ async function main(args) {
     console.log(`Usage:
   npm run release:publish -- --candidate /path/to/candidate --public-key KEY --signature SIGNATURE.json \\
     --release-set RELEASE_SET.json --release-set-signature RELEASE_SET_SIGNATURE.json \\
-    --acceptance ACCEPTANCE.json --acceptance-signature ACCEPTANCE_SIGNATURE.json
+    --qualification QUALIFICATION.json --qualification-signature QUALIFICATION_SIGNATURE.json
   QUBICL_RELEASE_APPROVAL=VERSION npm run release:publish -- \\
     --candidate /path/to/candidate --public-key KEY --signature SIGNATURE.json \\
     --release-set RELEASE_SET.json --release-set-signature RELEASE_SET_SIGNATURE.json \\
-    --acceptance ACCEPTANCE.json --acceptance-signature ACCEPTANCE_SIGNATURE.json \\
+    --qualification QUALIFICATION.json --qualification-signature QUALIFICATION_SIGNATURE.json \\
     --publish --yes
 
 Without --publish, verify the candidate and print the exact publication plan.
 Publishing requires a clean checkout at the candidate revision, npm and GitHub
 authentication, Skopeo, and an explicit version-matching approval variable.
 Supported releases and every v0.2-or-later publication additionally require
---release-set, --release-set-signature, --acceptance, and
---acceptance-signature. Only the documented v0.1 initial series retains its
+--release-set, --release-set-signature and signed --qualification evidence.
+Legacy --acceptance with --acceptance-signature remains supported. Only the documented v0.1 initial series retains its
 acceptance exemption.
 It copies tested OCI archives, publishes the tested npm tarball, verifies remote
 digests, creates vVERSION and an immutable GitHub release, then moves latest.`);
@@ -112,11 +116,15 @@ digests, creates vVERSION and an immutable GitHub release, then moves latest.`);
   const signatureDocument = await verifyCandidateSignature(candidateDirectory, candidate, publicKey, resolve(options.signature));
   let releaseEvidence;
   if (candidate.releaseTier === 'supported' || requiresClientConformance(candidate.version)) {
-    for (const [option, value] of [['--release-set', options.releaseSet], ['--release-set-signature', options.releaseSetSignature], ['--acceptance', options.acceptance], ['--acceptance-signature', options.acceptanceSignature]]) assert(value, `${option} is required for supported releases and v0.2 or later publication.`);
-    const verified = await verifyAcceptanceBundle(options.releaseSet, options.acceptance, options.publicKey, options.releaseSetSignature, options.acceptanceSignature);
+    const qualification = Boolean(options.qualification);
+    for (const [option, value] of [['--release-set', options.releaseSet], ['--release-set-signature', options.releaseSetSignature],
+      ...(qualification ? [['--qualification-signature', options.qualificationSignature]] : [['--acceptance', options.acceptance], ['--acceptance-signature', options.acceptanceSignature]])]) assert(value, `${option} is required for publication.`);
+    const verified = qualification
+      ? await verifyQualificationBundle(options.releaseSet, options.qualification, options.publicKey, options.releaseSetSignature, options.qualificationSignature)
+      : await verifyAcceptanceBundle(options.releaseSet, options.acceptance, options.publicKey, options.releaseSetSignature, options.acceptanceSignature);
     assert(verified.set.document.version === candidate.version && verified.set.document.revision === candidate.revision, 'Release evidence targets another candidate.');
     if (requiresClientConformance(candidate.version)) {
-      assert(verified.set.document.schemaVersion === 2 && verified.set.document.releaseTier === candidate.releaseTier,
+      assert(verified.set.document.schemaVersion >= 2 && verified.set.document.releaseTier === candidate.releaseTier,
         'Release evidence targets another candidate tier.');
     }
     const complete = verified.set.document.members.find(({ complete }) => complete);
@@ -125,8 +133,8 @@ digests, creates vVERSION and an immutable GitHub release, then moves latest.`);
     releaseEvidence = {
       ...verified,
       releaseSetSignature: resolve(options.releaseSetSignature),
-      acceptance: resolve(options.acceptance),
-      acceptanceSignature: resolve(options.acceptanceSignature),
+      ...(qualification ? { qualification: resolve(options.qualification), qualificationSignaturePath: resolve(options.qualificationSignature) }
+        : { acceptance: resolve(options.acceptance), acceptanceSignature: resolve(options.acceptanceSignature) }),
     };
   }
   const plan = buildPublishPlan(candidate, catalog, candidateDirectory, releaseEvidence);
@@ -134,6 +142,7 @@ digests, creates vVERSION and an immutable GitHub release, then moves latest.`);
   assert(new Set(plan.releaseAssets.map((path) => basename(path))).size === plan.releaseAssets.length, 'Release evidence and artifact filenames must be unique.');
   const notes = resolve(root, 'release-notes', `${plan.tag}.md`);
   const notesBody = await readFile(notes, 'utf8');
+  if (releaseEvidence?.qualification) assertQualificationDisclosure(notesBody, releaseEvidence.summary);
   if (requiresReleaseNotesTrustAnchor(candidate.version)) {
     assertReleaseNotesTrustAnchor(notesBody, signatureDocument.publicKeyFingerprint);
   }
@@ -191,7 +200,7 @@ digests, creates vVERSION and an immutable GitHub release, then moves latest.`);
 }
 
 export function parseOptions(args) {
-  const options = { candidate: undefined, publicKey: undefined, signature: undefined, releaseSet: undefined, releaseSetSignature: undefined, acceptance: undefined, acceptanceSignature: undefined, publish: false, yes: false };
+  const options = { candidate: undefined, publicKey: undefined, signature: undefined, releaseSet: undefined, releaseSetSignature: undefined, acceptance: undefined, acceptanceSignature: undefined, qualification: undefined, qualificationSignature: undefined, publish: false, yes: false };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === '--candidate') options.candidate = args[++index];
@@ -201,6 +210,8 @@ export function parseOptions(args) {
     else if (arg === '--release-set-signature') options.releaseSetSignature = args[++index];
     else if (arg === '--acceptance') options.acceptance = args[++index];
     else if (arg === '--acceptance-signature') options.acceptanceSignature = args[++index];
+    else if (arg === '--qualification') options.qualification = args[++index];
+    else if (arg === '--qualification-signature') options.qualificationSignature = args[++index];
     else if (arg === '--publish') options.publish = true;
     else if (arg === '--yes') options.yes = true;
     else throw new Error(`Unknown option ${arg}.`);
@@ -208,6 +219,8 @@ export function parseOptions(args) {
   assert(options.candidate, '--candidate is required.');
   assert(options.publicKey, '--public-key is required.');
   assert(options.signature, '--signature is required.');
+  assert(!(options.qualification && (options.acceptance || options.acceptanceSignature)), 'Choose qualification or legacy acceptance evidence, not both.');
+  assert(Boolean(options.qualification) === Boolean(options.qualificationSignature), 'Qualification and its signature must be supplied together.');
   return options;
 }
 

@@ -181,6 +181,13 @@ export const StoragePolicySchema = z.strictObject({
 });
 export type StoragePolicy = z.infer<typeof StoragePolicySchema>;
 
+export const SoftwareRecipeSchema = z.strictObject({
+  baseImage: z.string().min(1).max(1024),
+  basePreset: PresetSchema.optional(),
+  aptPackages: z.array(z.string().regex(/^[a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)?(?:=[A-Za-z0-9.+:~_-]+)?$/u).max(256)).min(1).max(128),
+});
+export type SoftwareRecipe = z.infer<typeof SoftwareRecipeSchema>;
+
 export const ComputerConfigSchema = z.strictObject({
   id: z.uuid(),
   name: z.string().regex(NAME_PATTERN, 'must be a lowercase Docker-safe name'),
@@ -199,6 +206,7 @@ export const ComputerConfigSchema = z.strictObject({
       postStartCommand: z.string().min(1).max(32_768).optional(),
     }).optional(),
   }).optional(),
+  software: SoftwareRecipeSchema.optional(),
   network: NetworkPolicySchema.optional(),
   ssh: SshAccessSchema.optional(),
   environment: z.record(

@@ -4,6 +4,36 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
+### Added
+
+- Durable default Python/npm installation locations, plus saved apt package
+  recipes through `qubicl software NAME --apt pkg,pkg`. Named upgrades rebuild
+  recipes while preserving homes, identities, credentials, and runtime state.
+- SSH stdio client connections with `qubicl connect NAME --ssh user@host`,
+  including always-on host and loopback viewer-tunnel documentation.
+- Signed impact-selected release qualification through the normal publisher,
+  with hashed evidence, explicit failed/unverified outcomes, public limitation
+  disclosures, and explicitly selected native release targets.
+
+### Changed
+
+- Decouple CLI/catalog versions from image origins. New candidates reuse
+  unchanged runtime images across versions and refresh scans per image while
+  retaining exact archive, dependency, and original build provenance.
+- Allow desktop application executables outside the former bin-directory
+  restriction, including symlinks and absolute paths; retain direct unprivileged
+  launch, document-path checks, bounded lifecycle, and executable identity.
+- Allow compatible development npm versions (`>=10.9.9 <13`) while retaining the
+  default release toolchain pin and recording actual tool versions.
+- Replace obsolete release-wide matrix mandates with the documented
+  qualification workflow. Legacy signed acceptance remains verifiable under
+  its original rules. No new platform support is implied.
+
+### Security
+
+- Use upstream npm 12.2.1 in computer images instead of modifying its private
+  dependency tree; document compatibility-aware remediation and scoped review.
+
 ## 0.6.1 - 2026-10-21
 
 ### Security

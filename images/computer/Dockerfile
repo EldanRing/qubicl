@@ -40,25 +40,9 @@ RUN apt-get update \
  && ln -s /usr/bin/fdfind /usr/local/bin/fd \
  && rm -rf /var/lib/apt/lists/*
 
-ARG NPM_VERSION=12.0.2
+ARG NPM_VERSION=12.2.1
+# Use npm's supported upstream dependency graph, without replacing private internals.
 RUN npm install --global "npm@$NPM_VERSION" \
- && npm install --prefix /tmp/npm-security-patches \
-      --ignore-scripts --no-audit --no-fund --package-lock=false \
-      brace-expansion@5.0.12 ip-address@10.3.1 tar@7.5.21 undici@6.28.1 \
- && rm -rf \
-      /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
-      /usr/local/lib/node_modules/npm/node_modules/ip-address \
-      /usr/local/lib/node_modules/npm/node_modules/tar \
-      /usr/local/lib/node_modules/npm/node_modules/undici \
- && cp -a /tmp/npm-security-patches/node_modules/brace-expansion \
-      /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
- && cp -a /tmp/npm-security-patches/node_modules/ip-address \
-      /usr/local/lib/node_modules/npm/node_modules/ip-address \
- && cp -a /tmp/npm-security-patches/node_modules/tar \
-      /usr/local/lib/node_modules/npm/node_modules/tar \
- && cp -a /tmp/npm-security-patches/node_modules/undici \
-      /usr/local/lib/node_modules/npm/node_modules/undici \
- && rm -rf /tmp/npm-security-patches \
  && npm cache clean --force
 
 RUN groupmod --new-name qubicl node \
@@ -73,6 +57,8 @@ COPY web-requirements.txt /opt/qubicl/web-requirements.txt
 COPY --chown=qubicl:qubicl skills /opt/qubicl/skills
 COPY LICENSE THIRD_PARTY_NOTICES.txt WEB_THIRD_PARTY_NOTICES.txt /usr/share/doc/qubicl/
 COPY entrypoint.sh /usr/local/bin/qubicl-entrypoint
+COPY setup-user-software.sh /opt/qubicl/setup-user-software.sh
+COPY user-software-profile.sh /etc/profile.d/qubicl-user-software.sh
 RUN python3 -m venv /opt/qubicl/web-venv \
  && /opt/qubicl/web-venv/bin/pip install --no-cache-dir --requirement /opt/qubicl/web-requirements.txt \
  && install -d /usr/share/doc/qubicl/web-python-licenses \

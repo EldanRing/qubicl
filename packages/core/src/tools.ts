@@ -34,8 +34,11 @@ const editOperation = z.strictObject({
 const targetWindowId = z.number().int().positive().max(0xffff_ffff).optional().describe(
   'Optional X11 window ID to activate and confirm immediately before focused-window XTEST input. This verifies the input target, not the application effect.',
 );
-export const DesktopApplicationNameSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._+-]*$/).describe(
-  'A built-in application alias or installed executable name without a path.',
+export const DesktopApplicationNameSchema = z.string().min(1).max(4096).refine(
+  (value) => /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u.test(value) || (value.startsWith('/') && !/\p{Cc}/u.test(value)),
+  'must be an executable name or absolute executable path',
+).describe(
+  'A built-in alias, installed executable name, or absolute executable path. Runs directly as the workload user.',
 );
 export type DesktopApplicationName = z.infer<typeof DesktopApplicationNameSchema>;
 const desktopApplicationPath = z.string().min(1).max(4096).describe(

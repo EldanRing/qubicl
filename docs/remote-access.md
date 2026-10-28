@@ -6,6 +6,53 @@ manifest. It uses a second TLS listener in the existing shared gateway process
 and container. It does not add a sidecar, expose a computer container directly,
 or replace the local HTTP listener.
 
+## Always-on host over SSH
+
+Qubicl can run on a Linux workstation, home server, or VM that stays on. Install
+Docker locally on that host and install Qubicl under the account that will own
+its state. Configure Docker to start at boot, then run `qubicl setup --create
+research` on that host. Managed containers use `unless-stopped`: running
+computers return when Docker restarts; an explicitly stopped computer stays
+stopped. Avoid host sleep if background work must remain available. Protect and
+back up the host's Qubicl state just as on a laptop.
+
+Use an existing OpenSSH server and a normal SSH account/key. Qubicl does not
+install SSH, change a firewall, or create a cloud control plane. From the client:
+
+```sh
+ssh operator@qubicl-host
+# Verify the host key and that the remote account can run qubicl.
+qubicl connect research --client codex --ssh operator@qubicl-host
+```
+
+The `connect` command above is run locally after leaving the SSH session. Its
+snippet runs the remote stdio bridge without exposing a gateway listener or
+copying a computer bearer token. Batch authentication requires a usable key or
+SSH agent. The remote non-interactive PATH must include `qubicl`.
+
+For the viewer, forward the configured loopback gateway port (3211 by default):
+
+```sh
+ssh -N -L 127.0.0.1:3211:127.0.0.1:3211 operator@qubicl-host
+```
+
+In another terminal, obtain a fresh viewer link from the host:
+
+```sh
+ssh operator@qubicl-host qubicl view research --no-open
+```
+
+Open that private link locally while the tunnel is running. Forward the same
+port so its origin remains correct; choose a free configured port if 3211 is
+already occupied. Viewer tickets still expire normally. HTTP/OpenAPI clients
+can also use a deliberately configured tunnel with their normal scoped bearer
+credential. Use the direct TLS path below when an SSH tunnel does not fit.
+
+Docker administration and all data stay on the server. Remote Docker contexts
+remain unsupported because Qubicl's mounts and loopback routing belong to the
+host running Qubicl. The SSH OS account has that installation's operator
+authority; it is not a substitute for a limited per-computer credential.
+
 ## Expose one host interface
 
 An existing installation must first use a gateway image whose immutable

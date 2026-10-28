@@ -4,6 +4,7 @@ export interface ParsedArgs {
 }
 
 const booleanOptions = new Set([
+  'reset',
   'empty',
   'foreground',
   'dry-run',
@@ -30,6 +31,8 @@ const booleanOptions = new Set([
 ]);
 const optionalValueOptions = new Set(['enable']);
 const stringOptions = new Set([
+  'apt',
+  'ssh',
   'asset-port',
   'image',
   'cpus',

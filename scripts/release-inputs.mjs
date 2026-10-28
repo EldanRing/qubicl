@@ -1,16 +1,23 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { posix } from 'node:path';
 
 const exec = promisify(execFile);
 export const RELEASE_IMAGES = ['gateway', 'dashboard', 'file-system', 'browser', 'computer', 'workstation'];
 export const IMAGE_INPUTS_NAME = 'image-inputs.json';
 const computers = RELEASE_IMAGES.slice(2);
+const workspaceNames = new Set(['@qubicl/core', '@qubicl/control', '@qubicl/gateway', '@qubicl/dashboard', '@qubicl/cli']);
 
 // This is a build-input map, separate from the release-wide acceptance map.
 // Unknown paths deliberately affect every image. Keep build helpers here even
 // when changing them might produce identical output: equivalence is not assumed.
-export function imageInputsForPath(path) {
+export function imageInputsForPath(path, schemaVersion = 1) {
+  if (schemaVersion >= 2) {
+    if (path === 'images/computer/libreoffice-registrymodifications.xcu') return ['workstation'];
+    if (/^images\/computer\/(?:skills-requirements\.txt|SKILLS_THIRD_PARTY_NOTICES\.txt)$/u.test(path)) return ['computer', 'workstation'];
+    if (/^images\/computer\/(?:browser-skills-requirements\.txt|BROWSER_SKILLS_THIRD_PARTY_NOTICES\.txt|chromium-wrapper\.sh|qubicl_viewer_auth\.py|x11vnc-relay\.sh)$/u.test(path)) return computers.slice(1);
+  }
   if (/^(?:packages\/core\/|package-lock\.json$|tsconfig[^/]*\.json$|LICENSE$)/u.test(path)) return RELEASE_IMAGES;
   if (path === 'package.json') return [];
   if (/^(?:packages\/gateway\/|images\/gateway\/)/u.test(path)) return ['gateway'];
@@ -27,8 +34,9 @@ export function imageInputsForPath(path) {
   return RELEASE_IMAGES;
 }
 
-export async function imageInputIdentities(root, revision) {
+export async function imageInputIdentities(root, revision, schemaVersion = 1) {
   assert(/^[a-f0-9]{40}$/u.test(revision), 'Image inputs require an exact Git commit.');
+  assert([1, 2].includes(schemaVersion), 'Unknown image input schema.');
   const [{ stdout }, { stdout: packageText }] = await Promise.all([
     exec('git', ['ls-tree', '-r', '-z', revision], { cwd: root, maxBuffer: 20_000_000 }),
     exec('git', ['show', `${revision}:package.json`], { cwd: root, maxBuffer: 2_000_000 }),
@@ -41,7 +49,7 @@ export async function imageInputIdentities(root, revision) {
   const workspace = JSON.parse(packageText);
   const semanticWorkspace = canonicalJson({
     name: workspace.name,
-    version: workspace.version,
+    ...(schemaVersion === 1 ? { version: workspace.version } : {}),
     type: workspace.type,
     license: workspace.license,
     repository: workspace.repository,
@@ -50,7 +58,8 @@ export async function imageInputIdentities(root, revision) {
     engines: workspace.engines,
     devEngines: workspace.devEngines,
     dependencies: workspace.dependencies,
-    devDependencies: workspace.devDependencies,
+    devDependencies: schemaVersion === 1 ? workspace.devDependencies
+      : Object.fromEntries(Object.entries(workspace.devDependencies ?? {}).filter(([name]) => ['esbuild', 'typescript'].includes(name))),
     optionalDependencies: workspace.optionalDependencies,
     peerDependencies: workspace.peerDependencies,
     overrides: workspace.overrides,
@@ -58,23 +67,35 @@ export async function imageInputIdentities(root, revision) {
       .filter((name) => workspace.scripts?.[name] !== undefined)
       .map((name) => [name, workspace.scripts[name]])),
   });
+  const normalized = new Map();
+  if (schemaVersion >= 2) {
+    for (const { path } of entries.filter(({ path }) => /^(?:packages\/[^/]+\/package\.json|package-lock\.json)$/u.test(path))) {
+      const document = JSON.parse((await exec('git', ['show', `${revision}:${path}`], { cwd: root, maxBuffer: 20_000_000 })).stdout);
+      normalized.set(path, document);
+    }
+  }
   return Object.fromEntries(RELEASE_IMAGES.map((image) => [image, createHash('sha256')
     .update(`package.json\0${semanticWorkspace}\0`)
-    .update(entries.filter(({ path }) => imageInputsForPath(path).includes(image)).map(({ entry }) => entry).join('\0'))
+    .update(entries.filter(({ path }) => imageInputsForPath(path, schemaVersion).includes(image)).map(({ entry, path }) => {
+      if (!normalized.has(path)) return entry;
+      const value = path === 'package-lock.json' ? imageLockInputs(normalized.get(path), image) : withoutReleaseVersion(normalized.get(path));
+      return `${path}\0${canonicalJson(value)}`;
+    }).join('\0'))
     .digest('hex')]));
 }
 
 export async function verifyImageInputs(document, candidate, root) {
-  assert(document?.schemaVersion === 1 && document.revision === candidate.revision && document.version === candidate.version,
+  assert([1, 2].includes(document?.schemaVersion) && document.revision === candidate.revision && document.version === candidate.version,
     'Image input evidence does not bind the candidate.');
   assert(JSON.stringify(Object.keys(document.images ?? {}).sort()) === JSON.stringify([...RELEASE_IMAGES].sort()),
     'Image input evidence requires exactly six images.');
-  const current = await imageInputIdentities(root, candidate.revision);
+  const current = await imageInputIdentities(root, candidate.revision, document.schemaVersion);
   const origins = new Map([[candidate.revision, current]]);
+  const versions = new Map([[candidate.revision, candidate.version]]);
   for (const name of RELEASE_IMAGES) {
     const entry = document.images[name];
-    assert(entry?.version === candidate.version && /^[a-f0-9]{40}$/u.test(entry?.revision ?? ''),
-      `${name} image reuse requires the same release version and an exact source commit.`);
+    assert(typeof entry?.version === 'string' && (document.schemaVersion >= 2 || entry.version === candidate.version) && /^[a-f0-9]{40}$/u.test(entry?.revision ?? ''),
+      `${name} image reuse requires an exact version and source commit.`);
     assert(/^[a-f0-9]{64}$/u.test(entry?.inputSha256 ?? '') && entry.inputSha256 === current[name],
       `${name} image build inputs changed.`);
     assert(typeof entry.node === 'string' && typeof entry.npm === 'string' && typeof entry.docker === 'string' && typeof entry.buildx === 'string',
@@ -82,9 +103,10 @@ export async function verifyImageInputs(document, candidate, root) {
     if (!origins.has(entry.revision)) {
       await exec('git', ['merge-base', '--is-ancestor', entry.revision, candidate.revision], { cwd: root });
       const workspace = JSON.parse((await exec('git', ['show', `${entry.revision}:package.json`], { cwd: root })).stdout);
-      assert(workspace.version === entry.version, `${name} image origin has a different release version.`);
-      origins.set(entry.revision, await imageInputIdentities(root, entry.revision));
+      versions.set(entry.revision, workspace.version);
+      origins.set(entry.revision, await imageInputIdentities(root, entry.revision, document.schemaVersion));
     }
+    assert(entry.version === versions.get(entry.revision), `${name} image version differs from its origin.`);
     assert(origins.get(entry.revision)[name] === entry.inputSha256, `${name} image origin does not reproduce its build-input identity.`);
   }
   return document;
@@ -94,15 +116,58 @@ export function selectImageActions({ current, previous, version, revision, tools
   const images = {};
   for (const name of RELEASE_IMAGES) {
     const old = previous?.images?.[name];
-    const reusable = old?.version === version && old.inputSha256 === current[name];
+    const reusable = old && (previous.schemaVersion >= 2 || old.version === version) && old.inputSha256 === current[name];
     images[name] = {
       action: reusable ? 'reuse' : 'build',
-      scan: reusable && scansFresh ? 'reuse' : 'scan',
-      reason: reusable ? 'unchanged versioned image inputs' : 'new or changed versioned image inputs',
+      scan: reusable && (typeof scansFresh === 'object' ? scansFresh[name] : scansFresh) ? 'reuse' : 'scan',
+      reason: reusable ? 'unchanged image inputs; retain original version and provenance' : 'new or changed image inputs',
       origin: reusable ? old : { version, revision, inputSha256: current[name], ...tools },
     };
   }
   return images;
+}
+
+// A release version describes the CLI/catalog, not the installed runtime bytes.
+// Workspace dependency versions move together and are represented by their
+// source inputs. External dependency versions and integrity remain significant.
+export function withoutReleaseVersion(value) {
+  const result = structuredClone(value);
+  delete result.version;
+  for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+    for (const name of Object.keys(result[field] ?? {})) if (workspaceNames.has(name)) result[field][name] = 'workspace';
+  }
+  return result;
+}
+
+function imageLockInputs(lock, image) {
+  if (!lock.packages) return withoutReleaseVersion(lock);
+  const packages = lock.packages;
+  const selected = new Map();
+  const visit = (path) => {
+    if (selected.has(path)) return;
+    const item = packages[path];
+    assert(item, `Lockfile lacks runtime dependency ${path}.`);
+    selected.set(path, path.startsWith('packages/') || path === '' ? withoutReleaseVersion(item) : item);
+    if (item.link) { visit(item.resolved); return; }
+    for (const name of new Set([...Object.keys(item.dependencies ?? {}), ...Object.keys(item.optionalDependencies ?? {}), ...Object.keys(item.peerDependencies ?? {})])) {
+      let directory = path;
+      let found;
+      while (true) {
+        const candidate = posix.join(directory, 'node_modules', name);
+        if (packages[candidate]) { found = candidate; break; }
+        if (!directory || directory === '.') break;
+        directory = posix.dirname(directory);
+        if (directory === '.') directory = '';
+      }
+      if (found) visit(found);
+      else assert(item.optionalDependencies?.[name] || item.peerDependencies?.[name], `Lockfile lacks ${name} required by ${path}.`);
+    }
+  };
+  const member = image === 'gateway' || image === 'dashboard' ? image : 'control';
+  for (const path of [`packages/${member}`, 'packages/core']) if (packages[path]) visit(path);
+  // These tools produce the bundled runtime; test-only tooling is not an image input.
+  for (const name of ['esbuild', 'typescript']) if (packages[`node_modules/${name}`]) visit(`node_modules/${name}`);
+  return { lockfileVersion: lock.lockfileVersion, packages: Object.fromEntries([...selected].sort(([a], [b]) => a.localeCompare(b))) };
 }
 
 function assert(condition, message) { if (!condition) throw new Error(message); }

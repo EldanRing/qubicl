@@ -64,6 +64,8 @@ test('publisher always requires a trusted candidate signature', async () => {
     releaseSetSignature: undefined,
     acceptance: undefined,
     acceptanceSignature: undefined,
+    qualification: undefined,
+    qualificationSignature: undefined,
     publish: false,
     yes: false,
   });
@@ -200,4 +202,22 @@ test('publisher accepts linear descendants of the trusted public root and reject
     branch: 'main', head: revision, commitCount: 19, roots: [trustedRootCommit], mergeCommits: [],
     origin: 'https://github.com/example/qubicl.git', remoteMain: 'c'.repeat(40),
   }, candidate, policy), /Remote main must already point/);
+});
+
+
+test('new publisher path includes signed qualification and its disclosed gaps', async () => {
+  const { buildPublishPlan } = await import(moduleUrl);
+  const image = (name: string) => ({ requested: `ghcr.io/example/qubicl-${name}:0.7.0`, indexDigest: `sha256:${'a'.repeat(64)}` });
+  const summary = { limitations: [{ id: 'platform:darwin-arm64', status: 'unverified', reason: 'No hardware run.' }] };
+  const plan = buildPublishPlan({ version: '0.7.0', revision: 'b'.repeat(40), releaseTier: 'initial', host: { target: 'linux-x64' },
+    modes: { images: true, scans: true, exactArtifactAcceptance: true, binaryOnly: false },
+    releaseImpact: { name: 'release-impact.json' }, imageEfficiency: { name: 'oci-efficiency.json', sha256: 'c'.repeat(64) },
+  }, { gateway: image('gateway'), dashboard: { image: image('dashboard') }, presets: Object.fromEntries(['file-system', 'browser', 'computer', 'workstation'].map((name) => [name, { image: image(name) }])) }, '/candidate', {
+    set: { document: { schemaVersion: 3, releaseTier: 'initial', members: [] }, path: '/set.json', directory: '/' },
+    releaseSetSignature: '/set-signature.json', qualification: '/qualification.json', qualificationSignaturePath: '/qualification-signature.json', evidenceFiles: ['/check.log'], summary,
+  });
+  assert.deepEqual(plan.qualificationLimitations, summary.limitations);
+  assert(plan.releaseAssets.includes('/qualification.json'));
+  assert(plan.releaseAssets.includes('/qualification-signature.json'));
+  assert(plan.releaseAssets.every((path: unknown) => typeof path === 'string'));
 });

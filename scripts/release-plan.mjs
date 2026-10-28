@@ -16,10 +16,10 @@ export async function createReleasePlan(root, { reuse, reuseFailed, now = new Da
   const workspace = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   const { version } = workspace;
   const tools = { node: process.version, npm: (await exec('npm', ['--version'], { cwd: root })).stdout.trim() };
-  const current = await imageInputIdentities(root, revision);
+  const current = await imageInputIdentities(root, revision, 2);
   let previous;
   let baseline;
-  let scansFresh = false;
+  const scansFresh = Object.fromEntries(RELEASE_IMAGES.map((name) => [name, false]));
   let scanReason = 'no reusable scan reports';
   if (reuse || reuseFailed) {
     const directory = resolve(reuse ?? reuseFailed);
@@ -27,7 +27,7 @@ export async function createReleasePlan(root, { reuse, reuseFailed, now = new Da
       ? await inspectFailedCandidateDonor(root, directory, { version, revision, now })
       : undefined;
     baseline = failedDonor?.baseline ?? JSON.parse(await readFile(join(directory, 'candidate.json'), 'utf8'));
-    if (!/^[a-f0-9]{40}$/u.test(baseline.revision ?? '') || baseline.version !== version) throw new Error('--reuse requires a candidate from the same release version.');
+    if (!/^[a-f0-9]{40}$/u.test(baseline.revision ?? '')) throw new Error('--reuse requires an exact candidate source revision.');
     const repository = typeof workspace.repository === 'string' ? workspace.repository : workspace.repository?.url;
     if (baseline.source !== normalizeRepository(repository)) throw new Error('--reuse requires a candidate from the same source repository.');
     await git('merge-base', '--is-ancestor', baseline.revision, revision);
@@ -52,30 +52,39 @@ export async function createReleasePlan(root, { reuse, reuseFailed, now = new Da
       for (const name of ['node', 'npm', 'docker', 'buildx']) {
         if (typeof baseline.tools?.[name] !== 'string') throw new Error(`Reusable candidate lacks its ${name} image toolchain identity.`);
       }
-      const inputs = await imageInputIdentities(root, baseline.revision);
-      previous = { schemaVersion: 1, version, revision: baseline.revision, images: Object.fromEntries(RELEASE_IMAGES.map((name) => [name, {
-        version, revision: baseline.revision, inputSha256: inputs[name],
+      const inputs = await imageInputIdentities(root, baseline.revision, 2);
+      previous = { schemaVersion: 2, version: baseline.version, revision: baseline.revision, images: Object.fromEntries(RELEASE_IMAGES.map((name) => [name, {
+        version: baseline.version, revision: baseline.revision, inputSha256: inputs[name],
         node: baseline.tools.node, npm: baseline.tools.npm, docker: baseline.tools.docker, buildx: baseline.tools.buildx,
       }])) };
     }
+    // Verify legacy evidence with its original rules, then calculate the new
+    // version-independent identity at each actual image origin.
+    if (previous.schemaVersion === 1) {
+      const identities = new Map();
+      for (const name of RELEASE_IMAGES) {
+        const origin = previous.images[name];
+        if (!identities.has(origin.revision)) identities.set(origin.revision, await imageInputIdentities(root, origin.revision, 2));
+        origin.inputSha256 = identities.get(origin.revision)[name];
+      }
+      previous.schemaVersion = 2;
+    }
     try {
-      if (failedDonor && !failedDonor.scansFresh) throw new Error(failedDonor.scanReason);
       const evidence = await readFile(join(directory, 'trivy-bindings.json'));
-      const expected = artifacts.get('trivy-bindings.json').sha256;
-      if (digest(evidence) !== expected) throw new Error('Reusable Trivy binding does not match its candidate manifest.');
+      if (digest(evidence) !== artifacts.get('trivy-bindings.json').sha256) throw new Error('Reusable Trivy binding does not match its candidate manifest.');
       const bindings = JSON.parse(evidence.toString('utf8'));
-      assertTrivyScannerIdentity(bindings, now, { requiredSchemaVersion: 2, requiredVersion: REQUIRED_TRIVY_VERSION });
-      scansFresh = true;
-      scanReason = 'existing scan database is within the enforced freshness window';
+      for (const name of RELEASE_IMAGES) {
+        try {
+          const scoped = bindings.schemaVersion === 3 ? { ...bindings, scans: bindings.scans.filter((scan) => scan.image === name) } : bindings;
+          if (scoped.schemaVersion === 3 && scoped.scans.length !== 2) throw new Error(`Missing platform scans for ${name}.`);
+          assertTrivyScannerIdentity(scoped, now, { requiredSchemaVersion: 2, requiredVersion: REQUIRED_TRIVY_VERSION });
+          scansFresh[name] = true;
+        } catch (error) { scanReason = error.message; }
+      }
     } catch (error) { scanReason = error.message; }
+    if (Object.values(scansFresh).every(Boolean)) scanReason = 'existing per-image scans are fresh';
   }
   const images = selectImageActions({ current, previous, version, revision, tools, scansFresh });
-  // A scan batch has one scanner/database identity. If any image needs scanning,
-  // refresh the reports as one batch; this never invalidates the OCI archives.
-  if (Object.values(images).some(({ scan }) => scan === 'scan')) {
-    for (const image of Object.values(images)) image.scan = 'scan';
-    scanReason = `scan batch refresh required: ${scanReason}`;
-  }
   const clean = await git('status', '--porcelain') === '';
   return {
     schemaVersion: 1, version, revision, clean, readyToExecute: clean,
