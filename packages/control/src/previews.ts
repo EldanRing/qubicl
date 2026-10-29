@@ -442,7 +442,8 @@ export class PreviewManager {
       incoming.on('error', (error) => response.destroy(error));
       incoming.once('close', () => {
         if (!incoming.complete) response.destroy(new Error('Preview upstream transfer ended before completion.'));
-        releaseResponse();
+        // A complete upstream can close while the client is still draining
+        // buffered output. Keep that response revocable until finish/close.
       });
       response.once('close', () => { if (!response.writableFinished) incoming.destroy(); releaseResponse(); });
       response.once('finish', releaseResponse);

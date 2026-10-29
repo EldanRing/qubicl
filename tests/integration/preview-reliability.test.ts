@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createServer, get, type IncomingMessage, type Server } from 'node:http';
+import { createServer, get, IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import type { Duplex } from 'node:stream';
 import test from 'node:test';
@@ -125,6 +125,57 @@ test('interrupted upstream HTTP responses close the downstream client; complete 
   });
   assert.equal(result.body,'partial'); assert.equal(result.complete,false);
   assert.equal(await (await fetch(`http://127.0.0.1:${proxyPort}/complete`)).text(),'complete');
+});
+
+test('a completed upstream remains revocable while its downstream response is buffered', { timeout: 10_000 }, async (context) => {
+  const body = Buffer.alloc(16 * 1024 * 1024, 'x');
+  const target = createServer((_request, response) => {
+    response.writeHead(200, { 'content-length': body.length });
+    response.end(body);
+  });
+  const port = await listen(target);
+  const manager = new PreviewManager({ listPorts: async () => [{ port, address: 'loopback', protocol: 'tcp' }] }, '127.0.0.1', base, base, 'https://remote.test/previews');
+  const publication = await manager.publish(port);
+  const id = publication.id as string;
+  const internal = manager as unknown as Internal;
+  const track = internal.trackConnections.bind(manager);
+  let observedUpstreamClose!: (complete: boolean) => void;
+  const upstreamClosed = new Promise<boolean>(resolve => { observedUpstreamClose = resolve; });
+  internal.trackConnections = (publicationId, scope, ...connections) => {
+    for (const connection of connections) {
+      if (connection instanceof IncomingMessage) connection.once('close', () => observedUpstreamClose(connection.complete));
+    }
+    return track(publicationId, scope, ...connections);
+  };
+  let downstream: ServerResponse | undefined;
+  // Allow the proxy to consume the finite upstream while a paused client
+  // applies real socket backpressure to the buffered outgoing response.
+  const proxy = createServer({ highWaterMark: body.length * 2 }, (request, response) => {
+    downstream = response;
+    manager.handle(request, response, new URL(request.url!, base));
+  });
+  const proxyPort = await listen(proxy);
+  context.after(async () => { manager.clear(); await close(proxy); await close(target); });
+  const share = manager.share(id, 60);
+  const token = new URL(share.remoteUrl).searchParams.get('token')!;
+  const client = await new Promise<IncomingMessage>((resolve, reject) => {
+    get(`http://127.0.0.1:${proxyPort}/_qubicl/previews/${id}/?token=${token}`, {
+      headers: { 'x-qubicl-access-surface': 'external' },
+    }, response => {
+      response.pause();
+      response.on('error', () => undefined);
+      resolve(response);
+    }).once('error', reject);
+  });
+  const clientClosed = new Promise<void>(resolve => client.once('close', resolve));
+  assert.equal(await upstreamClosed, true);
+  assert.equal(downstream!.writableFinished, false);
+  assert.ok(downstream!.writableLength > 0);
+  manager.share(id, 3600);
+  assert.equal(downstream!.destroyed, true);
+  client.resume();
+  await clientClosed;
+  assert.equal(client.complete, false);
 });
 async function listen(server:Server):Promise<number>{await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));return (server.address() as {port:number}).port;}
 async function close(server:Server):Promise<void>{await new Promise<void>(resolve=>{server.close(()=>resolve());server.closeAllConnections();});}
