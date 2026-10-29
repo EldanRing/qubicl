@@ -5,10 +5,9 @@ interfaces and the state format may still evolve. The roadmap
 below describes product direction rather than a promise of dates or a hidden
 release checklist.
 
-## Qubicl 0.7 — in development
+## Qubicl 0.7
 
-The current published release is 0.6.1. The unreleased
-[0.7 design](docs/decisions/0004-practical-computers-and-releases.md) focuses on
+The [0.7 design](docs/decisions/0004-practical-computers-and-releases.md) focuses on
 ordinary computer use and simpler maintenance:
 
 - Durable Python/npm installations and managed apt recipes with removal,
@@ -19,8 +18,8 @@ ordinary computer use and simpler maintenance:
   signed qualification with explicit results and limitations.
 - Focused offline source checks and optional coverage/performance measurements.
 
-These capabilities are implemented in the development branch. Release
-qualification and publication remain separate work. The
+See the [0.7.0 release notes](release-notes/v0.7.0.md) for upgrade behavior
+and qualification limitations. The
 [constraint register](docs/constraints.md) records retained limits and their
 reasons; it is not a hidden release checklist.
 

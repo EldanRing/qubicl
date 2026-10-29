@@ -4,6 +4,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
+## 0.7.0 - 2026-10-28
+
 ### Added
 
 - Durable default Python/npm installation locations, plus saved apt package
