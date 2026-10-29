@@ -21,6 +21,14 @@ Read `references/restructuring.md` before inserting or deleting rows or columns 
 
 Inspect workbook structure and formulas before editing. Preserve formulas unless replacement is intentional, use a new output for risky transformations, and read the result back afterward. LibreOffice recalculation is available only on workstation computers; explain that limitation rather than manufacturing cached formula values.
 
+`xlsx_read.py --formulas` includes normal, array and what-if data-table formulas.
+Typed entries include `formula_type` and their result `ref`; array entries include
+the expression in `formula`, while data-table entries include all input references
+and flags in `attributes`. JSON/CSV sheet dumps represent typed formulas as JSON
+objects rather than Python object names. Elapsed-time values such as `[h]:mm`
+use signed ISO 8601 durations (`P1DT3H15M` for 27 hours 15 minutes), preserving
+days and fractional seconds. Dates and times retain their ISO date/time format.
+
 Use the common rendering receipt for PDF, DOCX, XLSX and PPTX:
 `/opt/qubicl/skills-venv/bin/python /opt/qubicl/artifact-render.py FILE --outdir DIR`.
 Each invocation captures its source, uses an isolated Office profile, and writes a unique
@@ -48,3 +56,22 @@ replace only their corresponding columns. Totals, filters and chart series spann
 expand with the table. Fixed named ranges and row-local calculations retain
 their intended scope; structured table references include the new data. Use `--out` to retain the
 original while reviewing a structural edit.
+
+`xlsx_edit.py --copy-sheet SRC:NEW` copies cells, rich-text runs and typed
+formulas, native charts and images, tables and pivot tables, validation and
+conditional formatting, filters,
+worksheet views, protection, print settings, headers/footers and sheet-local
+names. Copies have independent objects and image data. Tables receive unique
+names such as `Sales_Copy` (with a numeric suffix when needed), and copied
+formulas/chart sources refer to the copied sheet and tables. Workbook-global
+names, other-sheet references, external workbook links, 3D sheet intervals and
+formula string literals retain their original meaning. Chart caches are retained
+because copying does not change the source values. Existing sheet names are
+rejected instead of silently choosing a different destination. Inspect table
+names and saved chart references before making subsequent edits.
+
+Copied pivots receive unique names. Pivots reading the copied sheet or its tables
+receive independent cache definitions and records with new cache IDs and remapped
+sources. Pivots reading unchanged external data, other worksheets or global names
+retain their existing shared cache identity. Both `xlsx_edit.py` and
+`xlsx_restructure.py` preserve mixed-run cell formatting when loading and saving.

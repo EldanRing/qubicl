@@ -124,7 +124,7 @@
         "scripts/docx_template.py",
         "scripts/docx_validate.py"
       ],
-      "sha256": "4a2ef832185b0d000b45306822bf01ea6e8f1114b22622f10e9d72518565dd51",
+      "sha256": "5bee4469bad2f540aa52e409c4097e37be4755d007af84c99663543a524f7651",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",
@@ -158,13 +158,14 @@
         "scripts/csv_to_xlsx.py",
         "scripts/xlsx_create.py",
         "scripts/xlsx_edit.py",
+        "scripts/xlsx_formula_values.py",
         "scripts/xlsx_read.py",
         "scripts/xlsx_recalc.py",
         "scripts/xlsx_restructure.py",
         "scripts/xlsx_restructure_dependents.py",
         "scripts/xlsx_to_csv.py"
       ],
-      "sha256": "e942402c97503da34f85cba9de798c54cb31fa9c63339f9fbf1222f8d9afd69f",
+      "sha256": "ae93cca18db6ad2ab8234a174294084f62f775026f09d00ba68524f58b270a6d",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",

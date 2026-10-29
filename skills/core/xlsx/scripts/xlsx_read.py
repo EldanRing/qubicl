@@ -5,7 +5,9 @@ Modes (pick one):
   --sheets     JSON inventory: sheet names, dimensions, row/col counts
   --json       dump one sheet's rows as a JSON array of arrays
   --csv        dump one sheet as CSV to stdout or --out
-  --formulas   JSON list of formula cells {"cell", "formula", "cached"}
+  --formulas   JSON list of formula cells {"cell", "formula", "cached"};
+               array/data-table entries also include formula_type, ref and
+               data-table attributes (inputs and boolean flags)
   --notes      JSON list of cell notes/comments across sheets
   --names      JSON map of workbook defined names
 
@@ -16,6 +18,9 @@ Options:
                    exist only if the file was last saved by Excel/LibreOffice.
   --encoding ENC   encoding for --csv --out files (default utf-8)
   --out PATH       write --csv output to a file instead of stdout
+
+Elapsed-time cells export as signed ISO 8601 durations. JSON/CSV sheet dumps
+represent array/data-table formulas as JSON objects with explicit metadata.
 
 Usage:
   xlsx_read.py book.xlsx --sheets
@@ -31,12 +36,28 @@ import argparse
 import csv
 import json
 import sys
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 from openpyxl import load_workbook
+from xlsx_formula_values import formula_payload, is_typed_formula
 
 
 def jsonable(value):
+    if isinstance(value, timedelta):
+        # ISO 8601 duration, including negative values and subsecond precision;
+        # elapsed hours must not wrap at midnight like a time-of-day value.
+        micros = (value.days * 86400 + value.seconds) * 1000000 + value.microseconds
+        sign = "-" if micros < 0 else ""
+        seconds, fraction = divmod(abs(micros), 1000000)
+        days, seconds = divmod(seconds, 86400)
+        hours, seconds = divmod(seconds, 3600)
+        minutes, seconds = divmod(seconds, 60)
+        fractional = f"{seconds}.{fraction:06d}".rstrip("0") if fraction else str(seconds)
+        clock = (f"{hours}H" if hours else "") + (f"{minutes}M" if minutes else "")
+        if seconds or fraction or (not days and not clock): clock += fractional + "S"
+        return sign + "P" + (f"{days}D" if days else "") + ("T" + clock if clock else "")
+    if is_typed_formula(value):
+        return formula_payload(value)
     if isinstance(value, (datetime, date, time)):
         return value.isoformat()
     return value
@@ -93,11 +114,13 @@ def cmd_formulas(path, sheet):
         ws_f, ws_v = wb_f[name], wb_v[name]
         for row in ws_f.iter_rows():
             for cell in row:
-                if isinstance(cell.value, str) and cell.value.startswith("="):
+                typed = formula_payload(cell.value)
+                if typed or (isinstance(cell.value, str) and cell.value.startswith("=")):
                     out.append({
                         "sheet": name,
                         "cell": cell.coordinate,
-                        "formula": cell.value,
+                        "formula": typed.get("text") if typed else cell.value,
+                        **({key: value for key, value in typed.items() if key not in {"type", "text"}} if typed else {}),
                         "cached": jsonable(ws_v[cell.coordinate].value),
                     })
     print(json.dumps({"formulas": out}, ensure_ascii=False, indent=2))
@@ -140,6 +163,8 @@ def main(argv=None):
     if args.json:
         print(json.dumps({"sheet": ws.title, "rows": rows}, ensure_ascii=False))
     else:  # --csv
+        rows = [[json.dumps(value, ensure_ascii=False) if isinstance(value, dict)
+                 else value for value in row] for row in rows]
         if args.out:
             with open(args.out, "w", newline="", encoding=args.encoding) as fh:
                 csv.writer(fh).writerows(

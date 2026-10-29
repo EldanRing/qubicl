@@ -41,7 +41,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
-from copy import copy
+from copy import copy, deepcopy
+from io import BytesIO
 import json
 import re
 import sys
@@ -54,6 +55,7 @@ from openpyxl.utils import get_column_letter, range_boundaries, quote_sheetname
 from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.workbook.properties import CalcProperties
 from openpyxl.worksheet.table import Table, TableStyleInfo
+from xlsx_formula_values import is_typed_formula, rewrite_typed_formula
 
 
 def infer(text):
@@ -108,8 +110,8 @@ def rewrite_workbook_references(wb, ws, rewrite, snapshots=None):
             for cell in row:
                 if isinstance(cell.value, str) and cell.value.startswith("="):
                     cell.value = rewrite(cell.value, sheet.title)
-                elif getattr(cell.value, "text", None):
-                    cell.value.text = rewrite(cell.value.text, sheet.title)
+                elif is_typed_formula(cell.value):
+                    cell.value = rewrite_typed_formula(cell.value, rewrite, sheet.title)
                 if cell.hyperlink and cell.hyperlink.location:
                     cell.hyperlink.location = rewrite(cell.hyperlink.location, sheet.title)
         for table in sheet.tables.values():
@@ -166,6 +168,172 @@ def rename_sheet(wb, old, new):
 
     rewrite_workbook_references(wb, ws, rewrite, snapshots)
     return actual
+
+
+def copy_sheet(wb, source_title, new_title):
+    """Copy the sheet's independently editable objects and local references."""
+    from xlsx_restructure import shift_point, shift_range
+    from xlsx_restructure_dependents import snapshot_dependents, apply_dependents, _walk_objects
+    from openpyxl.chart.data_source import NumRef, StrRef, MultiLevelStrRef
+    from openpyxl.chart.pivot import PivotSource
+    source = wb[source_title]
+    if any(sheet.title.casefold() == new_title.casefold() for sheet in wb):
+        raise ValueError(f"A worksheet named {new_title!r} already exists")
+    target = wb.copy_worksheet(source)
+    try:
+        target.title = new_title
+        for name in ("sheet_state", "sheet_format", "sheet_properties", "merged_cells",
+                     "page_margins", "print_options", "protection", "views",
+                     "row_breaks", "col_breaks", "HeaderFooter", "scenarios",
+                     "auto_filter", "data_validations", "conditional_formatting"):
+            setattr(target, name, deepcopy(getattr(source, name)))
+        target.page_setup = copy(source.page_setup)
+        target.page_setup._parent = target
+        target.print_area = source.print_area
+        target.print_title_rows = source.print_title_rows
+        target.print_title_cols = source.print_title_cols
+        for name, definition in source.defined_names.items():
+            clone = deepcopy(definition)
+            clone.localSheetId = wb.index(target)
+            target.defined_names[name] = clone
+
+        # Table identities are workbook-wide. Column IDs and filters belong to
+        # their table and can retain their values inside an independent clone.
+        occupied = {name.casefold() for sheet in wb for name in sheet.tables}
+        occupied.update(name.casefold() for name in wb.defined_names)
+        occupied.update(name.casefold() for sheet in wb for name in sheet.defined_names)
+        table_names = {}
+        for table in source.tables.values():
+            base = table.displayName[:240] + "_Copy"
+            candidate, suffix = base, 2
+            while candidate.casefold() in occupied:
+                candidate = f"{base}{suffix}"
+                suffix += 1
+            occupied.add(candidate.casefold())
+            clone = deepcopy(table)
+            table_names[table.name.casefold()] = candidate
+            table_names[table.displayName.casefold()] = candidate
+            clone.name = clone.displayName = candidate
+            target.add_table(clone)
+
+        def rewrite(text, _home):
+            def token(value):
+                qualified = re.fullmatch(r"('(?:[^']|'')+'|[^!\[\]]+)!(.*)", value)
+                prefix, coordinate = "", value
+                if qualified:
+                    qualifier, coordinate = qualified.groups()
+                    name = qualifier[1:-1].replace("''", "'") if qualifier.startswith("'") else qualifier
+                    # External workbook references retain their original scope.
+                    if "[" in name or "]" in name or ":" in name:
+                        return value
+                    if name.casefold() != source.title.casefold():
+                        return value
+                    prefix = quote_sheetname(target.title) + "!"
+                table_name, bracket, selectors = coordinate.partition("[")
+                mapped = table_names.get(table_name.casefold())
+                if mapped:
+                    coordinate = mapped + (bracket + selectors if bracket else "")
+                return prefix + coordinate
+            return rewrite_range_tokens(text, token)
+
+        for cell in target._cells.values():
+            # Rich-text runs and other supported mutable values must not remain
+            # shared through WorksheetCopy's shallow _value assignment.
+            cell._value = deepcopy(cell._value)
+            if is_typed_formula(cell.value):
+                cell.value = rewrite_typed_formula(cell.value, rewrite, target.title)
+            elif isinstance(cell.value, str) and cell.value.startswith("="):
+                cell.value = rewrite(cell.value, target.title)
+            if cell.hyperlink:
+                if cell.hyperlink.location:
+                    cell.hyperlink.location = rewrite(cell.hyperlink.location, target.title)
+                if cell.hyperlink.target and cell.hyperlink.target.startswith("#"):
+                    cell.hyperlink.target = "#" + rewrite(cell.hyperlink.target[1:], target.title)
+        for table in target.tables.values():
+            for column in table.tableColumns:
+                for attribute in ("calculatedColumnFormula", "totalsRowFormula"):
+                    formula = getattr(column, attribute)
+                    if formula is not None and formula.attr_text:
+                        formula.attr_text = rewrite(formula.attr_text, target.title)
+
+        pivot_names = {pivot.name.casefold() for sheet in wb for pivot in sheet._pivots}
+        cache_ids = {pivot.cacheId for sheet in wb for pivot in sheet._pivots}
+        next_cache_id = max(cache_ids, default=-1) + 1
+        copied_caches = {}
+        pivot_renames = {}
+        for pivot in source._pivots:
+            cache = pivot.cache
+            if cache is not None and id(cache) not in copied_caches:
+                cache_source = cache.cacheSource
+                worksheet_source = cache_source.worksheetSource if cache_source is not None else None
+                mapped_sheet = worksheet_source.sheet if worksheet_source is not None else None
+                mapped_name = worksheet_source.name if worksheet_source is not None else None
+                if mapped_sheet and mapped_sheet.casefold() == source.title.casefold():
+                    mapped_sheet = target.title
+                if mapped_name:
+                    mapped_name = rewrite(mapped_name, target.title)
+                if worksheet_source is not None and (mapped_sheet != worksheet_source.sheet or mapped_name != worksheet_source.name):
+                    clone_cache = deepcopy(cache)
+                    clone_cache.cacheSource.worksheetSource.sheet = mapped_sheet
+                    clone_cache.cacheSource.worksheetSource.name = mapped_name
+                    copied_caches[id(cache)] = (clone_cache, next_cache_id)
+                    next_cache_id += 1
+                else:
+                    # A pivot reading unchanged external/other-sheet/global
+                    # data intentionally uses the existing cache. Internal copy
+                    # sources get separate cache definitions AND record parts.
+                    copied_caches[id(cache)] = (cache, pivot.cacheId)
+            selected_cache, cache_id = copied_caches.get(id(cache), (None, pivot.cacheId))
+            clone = deepcopy(pivot, {id(cache): selected_cache} if cache is not None else {})
+            clone.cacheId = cache_id
+            base = pivot.name[:240] + "_Copy"
+            candidate, suffix = base, 2
+            while candidate.casefold() in pivot_names:
+                candidate = f"{base}{suffix}"
+                suffix += 1
+            pivot_names.add(candidate.casefold())
+            clone.name = candidate
+            pivot_renames[pivot.name.casefold()] = candidate
+            target.add_pivot(clone)
+
+        target._charts = deepcopy(source._charts)
+        for chart in target._charts:
+            for reference in _walk_objects(chart):
+                if isinstance(reference, (NumRef, StrRef, MultiLevelStrRef)) and reference.f:
+                    reference.f = rewrite(reference.f, target.title)
+                elif isinstance(reference, PivotSource) and reference.name:
+                    qualifier, separator, name = reference.name.rpartition("!")
+                    mapped = pivot_renames.get(name.casefold())
+                    if not mapped:
+                        continue
+                    if not separator:
+                        reference.name = mapped
+                        continue
+                    decoded = qualifier[1:-1].replace("''", "'") if qualifier.startswith("'") and qualifier.endswith("'") else qualifier
+                    workbook, closing_bracket, sheet = decoded.rpartition("]")
+                    workbook = workbook + "]" if closing_bracket else ""
+                    if sheet.casefold() == source.title.casefold():
+                        reference.name = quote_sheetname(workbook + target.title) + "!" + mapped
+        # Cell values do not change during copying. Retain the chart's original
+        # caches, including external/dynamic sources unavailable to this process.
+        # Structural edits refresh caches separately when their data changes.
+        # _data closes a loaded image's backing stream. Give the source and copy
+        # separate fresh streams so saving both sheets cannot consume either one.
+        for image in source._images:
+            data = image._data()
+            image.ref = BytesIO(data)
+            clone = copy(image)
+            clone.ref = BytesIO(data)
+            clone.anchor = deepcopy(image.anchor)
+            target.add_image(clone)
+        snapshots = [snapshot for snapshot in snapshot_dependents(wb) if snapshot["sheet"] is target]
+        for snapshot in snapshots: snapshot["drawings"] = []
+        apply_dependents(wb, snapshots, target, "rows", 1, 0, False,
+                         rewrite, shift_point, shift_range)
+        return target
+    except Exception:
+        wb.remove(target)
+        raise
 
 
 def table_append(ws, name, row_values):
@@ -245,6 +413,7 @@ def table_append(ws, name, row_values):
     # chart titles must remain single-cell references.
     from openpyxl.chart.series import Series
     from openpyxl.chart.data_source import NumRef, StrRef, MultiLevelStrRef
+    from openpyxl.chart.pivot import PivotSource
     from xlsx_restructure_dependents import _walk_objects, _refresh_cache, _cells_for_reference
     for sheet in ws.parent.worksheets:
         for chart in sheet._charts:
@@ -315,7 +484,7 @@ def main(argv=None):
                     help="force full recalculation when the file is opened")
     args = ap.parse_args(argv)
 
-    wb = load_workbook(args.file)
+    wb = load_workbook(args.file, rich_text=True)
     selected_ws = wb[args.sheet] if args.sheet and args.sheet in wb.sheetnames else None
     changes = []
 
@@ -325,9 +494,8 @@ def main(argv=None):
         changes.append(f"rename {old}->{actual}")
     for pair in args.copy_sheet:
         src, new = pair.split(":", 1)
-        copy = wb.copy_worksheet(wb[src])
-        copy.title = new
-        changes.append(f"copy {src}->{new}")
+        copied = copy_sheet(wb, src, new)
+        changes.append(f"copy {src}->{copied.title}")
 
     ws = selected_ws or (wb[args.sheet] if args.sheet else wb.active)
 

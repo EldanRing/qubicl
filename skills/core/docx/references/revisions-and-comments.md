@@ -106,11 +106,15 @@ Three cooperating pieces:
 
 - **list / delete** always work at the XML level, so they handle files
   from any producer. `anchored_text` is reconstructed by walking each
-  part root in document order and collecting `w:t` text between the
-  start and end markers for each id.
+  part root in document order and collecting visible run content between the
+  start and end markers for each id. Tabs (including position tabs), line
+  breaks/carriage returns and nonbreaking hyphens use the same text offsets
+  as `Run.text`; page/column breaks and drawings are preserved without adding
+  text characters. Comment body reads preserve tabs and line breaks too.
 - **add** first isolates the target text into whole runs. If the match
   starts or ends mid-run, the run is split at the boundary (the split
-  copies `w:rPr`, so formatting is preserved). Then:
+  copies `w:rPr`, so formatting is preserved). Splitting uses those same
+  visible-text offsets and moves original inline objects without duplication. Then:
   - python-docx >= 1.2: the native `document.add_comment(runs, ...)`
     API is used (it creates the comments part, markers, and reference
     run itself).

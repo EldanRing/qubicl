@@ -47,6 +47,17 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Worksheet copies preserve independently editable charts, images, native tables,
+  validation and formatting rules, sheet-local names and layout settings, with
+  copied references targeting the new sheet and unique table names. Pivot tables
+  and their local data caches are retained, and edits preserve rich-text cell
+  formatting without sharing mutable runs between copied sheets.
+- Spreadsheet inspection and restructuring handle array and data-table formula
+  objects, including their result ranges and input references. Elapsed durations
+  export as signed ISO 8601 strings instead of breaking JSON output.
+- Word comments retain tabs, line breaks, position tabs and nonbreaking hyphens
+  in their anchors and text. Saved/reopened regressions verify tracked row
+  deletion and comment targeting after tabs.
 - Web-provider startup and pipe failures return tool errors without crashing the
   hosting service. Timeout classification and response-size enforcement remain
   correct when process termination races with stream completion.

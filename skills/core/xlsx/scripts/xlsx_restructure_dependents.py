@@ -9,6 +9,7 @@ from datetime import date, datetime, time, timedelta
 from numbers import Number
 import re
 
+from openpyxl.cell.rich_text import CellRichText
 from openpyxl.chart.data_source import (AxDataSource, NumRef, NumData, NumVal, StrRef, StrData,
                                       StrVal, MultiLevelStrRef, MultiLevelStrData, Level)
 from openpyxl.drawing.spreadsheet_drawing import AbsoluteAnchor, TwoCellAnchor
@@ -351,7 +352,7 @@ def apply_dependents(wb, snapshots, target_ws, axis, idx, n, delete,
                 if isinstance(ref, AxDataSource) and ref.numRef is not None and ref.numRef.f:
                     cells = _cells_for_reference(wb, ws.title, rewrite(ref.numRef.f, ws.title))
                     flat = [cell for row in cells for cell in row] if cells is not None else []
-                    if (any(isinstance(cell.value, str) for cell in flat)
+                    if (any(isinstance(cell.value, (str, CellRichText)) for cell in flat)
                             and not any(cell.data_type in {"f", "e"} for cell in flat)):
                         # openpyxl creates numRef even for literal text labels;
                         # use the corresponding string source to cache them.

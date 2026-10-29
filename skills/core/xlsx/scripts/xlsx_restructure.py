@@ -487,9 +487,11 @@ def shift_dimensions(dims, idx, n, delete, is_row):
 def restructure_workbook(wb, ws, axis, idx, n, delete):
     """Apply a structural edit in memory; shared by both spreadsheet CLIs."""
     from xlsx_restructure_dependents import snapshot_dependents, apply_dependents
+    from xlsx_formula_values import snapshot_typed_formulas, restore_typed_formulas
     if axis not in ("rows", "cols") or idx < 1 or n < 1:
         raise ValueError("Structural axis, index and count must be valid and positive")
     dependents = snapshot_dependents(wb)
+    typed_formulas = snapshot_typed_formulas(wb)
     table_changes = plan_table_changes(ws, axis, idx, n, delete)
     rewriter = RefRewriter(ws.title, axis, idx, n, delete, table_changes)
     report = {"ok": True, "sheet": ws.title, "axis": axis,
@@ -516,6 +518,10 @@ def restructure_workbook(wb, ws, axis, idx, n, delete):
                             {"sheet": sheet.title, "cell": cell.coordinate,
                              "from": cell.value, "to": new})
                         cell.value = new
+
+    report["formulas"].extend(restore_typed_formulas(
+        typed_formulas, ws, axis, idx, n, delete, rewriter.rewrite,
+        shift_point, shift_range))
 
     # 4. merges back, shifted
     for rng in old_merges:
@@ -636,7 +642,7 @@ def main(argv=None):
     if idx < 1 or n < 1:
         raise ValueError("Structural index and count must be positive")
 
-    wb = load_workbook(args.file)
+    wb = load_workbook(args.file, rich_text=True)
     ws = wb[args.sheet] if args.sheet else wb.active
     report = restructure_workbook(wb, ws, axis, idx, n, delete)
 

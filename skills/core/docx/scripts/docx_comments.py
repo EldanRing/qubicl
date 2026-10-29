@@ -43,6 +43,21 @@ def q(tag: str) -> str:
     return f"{{{W}}}{tag}"
 
 
+# Keep offsets and extracted text aligned with the pinned python-docx Run.text
+# contract. Page/column breaks and inline objects occupy no text positions;
+# moving their original XML while splitting preserves them without duplication.
+def _inline_text_piece(element):
+    if element.tag == q("t"):
+        return element.text or ""
+    if element.tag in (q("tab"), q("ptab")):
+        return "\t"
+    if element.tag == q("cr") or (element.tag == q("br") and element.get(q("type"), "textWrapping") == "textWrapping"):
+        return "\n"
+    if element.tag == q("noBreakHyphen"):
+        return "-"
+    return ""
+
+
 # ---------------------------------------------------------------- reading
 
 def _comments_root(doc):
@@ -69,9 +84,11 @@ def _anchored_texts(doc) -> dict:
                 anchored.setdefault(cid, [])
             elif el.tag == q("commentRangeEnd"):
                 active.discard(el.get(q("id")))
-            elif el.tag == q("t") and active:
-                for cid in active:
-                    anchored[cid].append(el.text or "")
+            elif active:
+                text = _inline_text_piece(el)
+                if text:
+                    for cid in active:
+                        anchored[cid].append(text)
     return {cid: "".join(parts) for cid, parts in anchored.items()}
 
 
@@ -84,7 +101,7 @@ def list_comments(doc) -> list:
     for c in root.iter(q("comment")):
         cid = c.get(q("id"))
         text = "\n".join(
-            "".join(t.text or "" for t in p.iter(q("t")))
+            "".join(_inline_text_piece(element) for element in p.iter())
             for p in c.iter(q("p")))
         out.append({"id": cid, "author": c.get(q("author")),
                     "initials": c.get(q("initials")),
@@ -121,8 +138,7 @@ def _split_run(para, run_el, offset: int):
         else:
             if position >= offset:
                 right.append(child)
-            if child.tag in (q("tab"), q("cr")) or (child.tag == q("br") and child.get(q("type"), "textWrapping") == "textWrapping"):
-                position += 1
+            position += len(_inline_text_piece(child))
     run_el.addnext(right)
     return right
 

@@ -9,6 +9,7 @@ gives the rewrite rules and the role of recalculation.
 | Artifact | Scope | Behavior |
 |---|---|---|
 | Formula references | ALL sheets | A1 refs into the edited sheet are shifted; refs into a fully deleted region become `#REF!` |
+| Array and what-if data-table formulas | ALL sheets | expressions/input refs update; result ranges and anchors move on the edited sheet, including promotion of a surviving anchor when the original is deleted |
 | Merged-cell ranges | edited sheet | shifted; expanded when they span the insertion point; dropped (reported `to: null`) when fully deleted |
 | Autofilter | edited sheet | range, relative filter-column IDs and sort ranges shift together; deleted criteria are removed |
 | Freeze panes | edited sheet | anchor cell shifted (never below row/col of the pane's own minimum) |
@@ -53,6 +54,17 @@ same); a range entirely inside the block becomes `#REF!` (formulas) or
 is removed (merges/validations).
 
 ## Dependent formulas, charts and drawings
+
+Array formulas retain their typed OOXML representation: the anchor, result
+`ref` and expression move together. If deletion removes an anchor but leaves
+part of the result range, the first surviving cell becomes the anchor; deleting
+the entire range removes the formula. Array expressions on other worksheets
+also update their references into the edited worksheet. What-if data tables
+retain their result range, input references and flags; deleted input references
+set the corresponding `del1`/`del2` flag. Typed formulas appear with their
+metadata in both the transformation report and `xlsx_read.py --formulas`.
+The workbook is marked for recalculation; these structural operations do not
+invent formula results.
 
 Validation and conditional-format formulas retain their relative origin when an
 edit removes the first cells of an applied range. This includes formula-based
@@ -125,3 +137,33 @@ after moved references are updated. Calculated-column templates and row-local
 formulas stay row-local; structured table references naturally include new data.
 Chart series with a single-cell data source also expand when that cell was the
 entire table data range; ordinary scalar references stay scalar.
+
+## Copying a worksheet
+
+`xlsx_edit.py FILE --copy-sheet SRC:NEW --out COPY.xlsx` preserves the worksheet's
+cells, styles, dimensions and merged ranges plus independently editable charts,
+images, native tables, data validation, conditional formatting, auto-filter,
+views/freeze panes, protection, page breaks, print areas/titles, page setup,
+headers/footers and sheet-local defined names. Image streams and chart graphs are
+independent; saving the workbook does not consume an image shared with its copy.
+Array/data-table formula objects and rich-text runs/inline formatting are copied
+independently too. Both native workbook-editing helpers load rich text without
+flattening its formatting; rich-text chart category labels remain readable.
+
+Table names are workbook-wide, so copied tables use a unique `_Copy` suffix.
+Structured references and explicit references to the source sheet are rewritten
+inside copied cells, tables, chart sources, rules, internal hyperlinks and local
+names. Existing worksheets and workbook-global names are not rewritten.
+Other-sheet and external workbook references remain unchanged; 3D references
+keep their original interval instead of expanding it to include the newly
+appended sheet. Chart data caches are preserved, including external data that is
+not available locally. A duplicate destination sheet name is an error.
+
+Pivot tables receive unique names. A cache sourced from the copied worksheet or
+one of its copied tables gets an independent definition, independent record part,
+and new workbook cache ID; its worksheet/table source points at the copy. Multiple
+pivots sharing that internal cache share the corresponding new cache within the
+copy. Caches referring to unchanged external data, another worksheet or a global
+named source intentionally keep their original cache identity, matching the
+unchanged data source. Pivot-chart source metadata names the copied pivot and
+sheet. Pivot fields, layout and cached values are preserved.
