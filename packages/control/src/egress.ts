@@ -1,14 +1,19 @@
 import { timingSafeEqual } from 'node:crypto';
+import { isUtf8 } from 'node:buffer';
 import { lookup } from 'node:dns/promises';
 import { readFile } from 'node:fs/promises';
 import { request as httpRequest, createServer, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { BlockList, isIP, connect as netConnect } from 'node:net';
+import { promisify } from 'node:util';
+import { brotliDecompress, gunzip, inflate } from 'node:zlib';
 import { QubiclError } from './errors.js';
 import { AuditLog } from './audit.js';
 import { isGloballyRoutableIp } from './network-address.js';
 
 const egressAudits = new Map<string, AuditLog>();
+const MAX_BROKER_RESPONSE_BYTES = 2_000_000;
+const decompressors = { gzip: promisify(gunzip), 'x-gzip': promisify(gunzip), deflate: promisify(inflate), br: promisify(brotliDecompress) };
 
 export interface EgressNetworkPolicy {
   profile: 'developer' | 'web-only' | 'offline' | 'custom';
@@ -119,14 +124,27 @@ async function forwardHttp(request: IncomingMessage, response: ServerResponse, c
   const target = new URL(request.url ?? '');
   if (target.protocol !== 'http:' && target.protocol !== 'https:') throw new QubiclError('network_policy_denied', 'Only HTTP and HTTPS proxy requests are supported.', 403);
   const port = Number(target.port || (target.protocol === 'https:' ? 443 : 80));
-  const authorization = await authorizeTarget(target.hostname, port, policy);
+  const hostname = normalizeEgressHostname(target.hostname);
+  const authorization = await authorizeTarget(hostname, port, policy);
   const headers = sanitizedForwardHeaders(request.headers, target.host);
   const factory = target.protocol === 'https:' ? httpsRequest : httpRequest;
-  const upstream = factory({ hostname: authorization.address, servername: target.hostname, port, method: request.method, path: `${target.pathname}${target.search}`, headers }, (incoming) => {
-    response.writeHead(incoming.statusCode ?? 502, sanitizedResponseHeaders(incoming.headers));
+  const upstream = factory({ hostname: authorization.address, servername: isIP(hostname) ? '' : hostname, port, method: request.method, path: `${target.pathname}${target.search}`, headers }, (incoming) => {
+    response.writeHead(incoming.statusCode ?? 502, sanitizedResponseHeaders(incoming.headers, false));
     incoming.pipe(response);
+    incoming.once('aborted', () => response.destroy(new Error('Outbound HTTP response was interrupted.')));
+    incoming.on('error', (error) => response.destroy(error));
+    incoming.once('close', () => { if (!incoming.complete) response.destroy(new Error('Outbound HTTP response ended before completion.')); });
+    response.once('close', () => { if (!response.writableFinished) incoming.destroy(); });
   });
-  upstream.on('error', (error) => response.destroy(error));
+  upstream.on('error', (error) => {
+    if (response.destroyed) return;
+    if (response.headersSent) response.destroy(error);
+    else json(response, 502, { error: { code: 'egress_unavailable', message: `Outbound HTTP request failed: ${error.message}` } });
+  });
+  response.on('error', () => upstream.destroy());
+  response.once('close', () => { if (!response.writableFinished) upstream.destroy(); });
+  request.once('aborted', () => upstream.destroy());
+  request.once('error', () => upstream.destroy());
   if (authorization.expiresAt !== undefined) {
     const timer = setTimeout(() => upstream.destroy(new Error('Temporary network approval expired.')), Math.max(1, authorization.expiresAt - Date.now() + 1));
     timer.unref();
@@ -149,20 +167,21 @@ async function brokerRequest(request: IncomingMessage, response: ServerResponse,
   if (!credential.methods.includes(method)) throw new QubiclError('credential_scope_denied', `Credential ${id} does not allow ${method}.`, 403);
   const target = canonicalBrokerTarget(credential.baseUrl, string(body.path ?? '/', 'path'), credential.pathPrefix, id);
   const targetPort = Number(target.port || 443);
-  const targetAuthorization = await authorizeTarget(target.hostname, targetPort, policy);
+  const hostname = normalizeEgressHostname(target.hostname);
+  const targetAuthorization = await authorizeTarget(hostname, targetPort, policy);
   const extraHeaders = stringRecord(body.headers);
   for (const name of ['authorization', 'cookie', 'host', 'connection', 'proxy-authorization', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade', credential.header.toLowerCase()]) delete extraHeaders[name];
   const payload = typeof body.body === 'string' ? Buffer.from(body.body, body.bodyEncoding === 'base64' ? 'base64' : 'utf8') : undefined;
   const result = await new Promise<{ status: number; headers: Record<string, string | string[]>; data: Buffer }>((resolve, reject) => {
-    const outgoing = httpsRequest({ hostname: targetAuthorization.address, servername: target.hostname, port: targetPort, method, path: `${target.pathname}${target.search}`, headers: { ...extraHeaders, host: target.host, [credential.header]: credential.value, ...(payload ? { 'content-length': `${payload.length}` } : {}) } }, (incoming) => {
+    const outgoing = httpsRequest({ hostname: targetAuthorization.address, servername: isIP(hostname) ? '' : hostname, port: targetPort, method, path: `${target.pathname}${target.search}`, headers: { ...extraHeaders, host: target.host, [credential.header]: credential.value, ...(payload ? { 'content-length': `${payload.length}` } : {}) } }, (incoming) => {
       const chunks: Buffer[] = [];
       let bytes = 0;
       incoming.on('data', (chunk: Buffer) => {
         bytes += chunk.length;
-        if (bytes > 2_000_000) incoming.destroy(new Error('Broker response exceeds 2 MB.'));
+        if (bytes > MAX_BROKER_RESPONSE_BYTES) incoming.destroy(new QubiclError('broker_response_too_large', 'Broker response exceeds 2 MB.', 502));
         else chunks.push(chunk);
       });
-      incoming.on('end', () => resolve({ status: incoming.statusCode ?? 502, headers: sanitizedResponseHeaders(incoming.headers), data: Buffer.concat(chunks) }));
+      incoming.on('end', () => resolve({ status: incoming.statusCode ?? 502, headers: sanitizedResponseHeaders(incoming.headers, true), data: Buffer.concat(chunks) }));
       incoming.on('error', reject);
     });
     outgoing.on('error', reject);
@@ -174,19 +193,14 @@ async function brokerRequest(request: IncomingMessage, response: ServerResponse,
     outgoing.end(payload);
   });
   audit(configuration, 'credential_broker_use', { credentialId: id, host: target.hostname, method });
-  const textResponse = textual(result.headers['content-type']);
-  const safeHeaders = redactCredentialValue(result.headers, credential.value) as Record<string, string | string[]>;
-  const safeData = redactCredentialBuffer(result.data, credential.value);
   json(response, 200, {
     status: result.status,
-    headers: safeHeaders,
-    body: textResponse ? redactCredentialText(safeData.toString('utf8'), credential.value) : safeData.toString('base64'),
-    bodyEncoding: textResponse ? 'utf8' : 'base64',
+    ...await decodeBrokerResponse(result.headers, result.data, credential.value),
   });
 }
 
-async function authorizeTarget(host: string, port: number, policy: EgressNetworkPolicy): Promise<{ address: string; expiresAt?: number }> {
-  const normalized = host.toLowerCase().replace(/\.$/u, '');
+export async function authorizeTarget(host: string, port: number, policy: EgressNetworkPolicy): Promise<{ address: string; expiresAt?: number }> {
+  const normalized = normalizeEgressHostname(host);
   const policyResult = policyAllows(normalized, port, policy);
   if (!policyResult.allowed) throw new QubiclError('network_policy_denied', policyResult.reason, 403);
   const addresses = isIP(normalized) ? [{ address: normalized }] : await lookup(normalized, { all: true, verbatim: true });
@@ -197,7 +211,7 @@ async function authorizeTarget(host: string, port: number, policy: EgressNetwork
 }
 
 function policyAllows(host: string, port: number, policy: EgressNetworkPolicy): { allowed: true; expiresAt?: number } | { allowed: false; reason: string } {
-  const normalized = host.toLowerCase().replace(/\.$/u, '');
+  const normalized = normalizeEgressHostname(host);
   if (policy.profile === 'offline') return { allowed: false, reason: 'Outbound access is disabled by the offline network profile.' };
   if (policy.profile === 'web-only' && port !== 80 && port !== 443) return { allowed: false, reason: `Port ${port} is not allowed by web-only.` };
   if (policy.profile === 'custom' && port !== 80 && port !== 443 && !policy.allowTcpPorts.includes(port)) return { allowed: false, reason: `Port ${port} is not in the custom TCP-port allowlist.` };
@@ -262,9 +276,14 @@ function connectTarget(value: string): { host: string; port: number } {
   if (!host || !Number.isInteger(port) || port < 1 || port > 65_535) throw new QubiclError('network_policy_denied', 'Invalid CONNECT target.', 403);
   return { host, port };
 }
-function domainMatches(host: string, pattern: string): boolean { const normalized = pattern.toLowerCase(); return normalized.startsWith('*.') ? host.endsWith(normalized.slice(1)) && host !== normalized.slice(2) : host === normalized; }
+function normalizeEgressHostname(host: string): string {
+  const normalized = host.toLowerCase().replace(/\.$/u, '');
+  const bare = normalized.startsWith('[') && normalized.endsWith(']') && isIP(normalized.slice(1, -1)) === 6 ? normalized.slice(1, -1) : normalized;
+  return isIP(bare) === 6 && !bare.includes('%') ? new URL(`http://[${bare}]/`).hostname.slice(1, -1) : bare;
+}
+function domainMatches(host: string, pattern: string): boolean { const normalized = normalizeEgressHostname(pattern); return normalized.startsWith('*.') ? host.endsWith(normalized.slice(1)) && host !== normalized.slice(2) : host === normalized; }
 function sanitizedForwardHeaders(headers: IncomingHttpHeaders, host: string): IncomingHttpHeaders { const result: Record<string, string | string[] | undefined> = { ...headers, host }; delete result['proxy-authorization']; delete result['proxy-connection']; return result; }
-function sanitizedResponseHeaders(headers: IncomingHttpHeaders): Record<string, string | string[]> { const result: Record<string, string | string[]> = {}; for (const [name, value] of Object.entries(headers)) if (value !== undefined && !['set-cookie', 'proxy-authenticate'].includes(name)) result[name] = value; return result; }
+function sanitizedResponseHeaders(headers: IncomingHttpHeaders, broker: boolean): Record<string, string | string[]> { const result: Record<string, string | string[]> = {}; for (const [name, value] of Object.entries(headers)) if (value !== undefined && name !== 'proxy-authenticate' && (!broker || name !== 'set-cookie')) result[name] = value; return result; }
 async function readJson(request: IncomingMessage, limit: number): Promise<Record<string, unknown>> { const chunks: Buffer[] = []; let size = 0; for await (const chunk of request) { const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); size += data.length; if (size > limit) throw new QubiclError('request_too_large', 'Request is too large.', 413); chunks.push(data); } const value = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as unknown; if (!value || typeof value !== 'object' || Array.isArray(value)) throw new QubiclError('invalid_arguments', 'Request must be an object.'); return value as Record<string, unknown>; }
 function string(value: unknown, name: string): string { if (typeof value !== 'string') throw new QubiclError('invalid_arguments', `${name} must be a string.`); return value; }
 function stringRecord(value: unknown): Record<string, string> { if (value === undefined) return {}; if (!value || typeof value !== 'object' || Array.isArray(value)) throw new QubiclError('invalid_arguments', 'headers must be an object.'); const result: Record<string, string> = {}; for (const [key, entry] of Object.entries(value)) { if (typeof entry !== 'string' || !/^[A-Za-z0-9-]{1,80}$/u.test(key)) throw new QubiclError('invalid_arguments', 'headers must contain string HTTP header values.'); result[key.toLowerCase()] = entry; } return result; }
@@ -273,10 +292,11 @@ export function canonicalBrokerTarget(baseUrl: string, requestedPath: string, co
   try { base = new URL(baseUrl); } catch { throw new QubiclError('credential_scope_denied', `Credential ${credentialId} has an invalid base URL.`, 403); }
   if (base.protocol !== 'https:' || base.username || base.password || base.search || base.hash) throw new QubiclError('credential_scope_denied', `Credential ${credentialId} must use a credential-free HTTPS base URL.`, 403);
   for (const [value, label] of [[requestedPath, 'path'], [configuredPrefix, 'path prefix']] as const) {
-    if (!value.startsWith('/') || value.includes('\\') || value.includes('#') || /\/\//u.test(value) || /%(?:2e|2f|5c)/iu.test(value)) {
+    const rawPath = value.split('?')[0]!;
+    const controls = [...rawPath].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
+    if (!rawPath.startsWith('/') || rawPath.includes('\\') || value.includes('#') || controls || /\/\//u.test(rawPath) || /%(?:2e|2f|5c)/iu.test(rawPath)) {
       throw new QubiclError('credential_scope_denied', `Credential ${credentialId} ${label} is ambiguous or non-canonical.`, 403);
     }
-    const rawPath = value.split('?')[0]!;
     if (rawPath.split('/').some((segment) => segment === '.' || segment === '..')) throw new QubiclError('credential_scope_denied', `Credential ${credentialId} ${label} contains a dot segment.`, 403);
   }
   const target = new URL(requestedPath, base);
@@ -286,10 +306,59 @@ export function canonicalBrokerTarget(baseUrl: string, requestedPath: string, co
   return target;
 }
 function pathWithinPrefix(path: string, prefix: string): boolean { const normalized = prefix.endsWith('/') ? prefix : `${prefix}/`; return path === prefix || path.startsWith(normalized); }
+export async function decodeBrokerResponse(headers: Record<string, string | string[]>, data: Buffer, credential: string): Promise<{
+  headers: Record<string, string | string[]>; body: string; bodyEncoding: 'utf8' | 'base64'; sourceContentEncoding?: string;
+}> {
+  if (data.length > MAX_BROKER_RESPONSE_BYTES) throw new QubiclError('broker_response_too_large', 'Broker response exceeds 2 MB.', 502);
+  const header = headers['content-encoding'];
+  const sourceEncoding = (Array.isArray(header) ? header.join(',') : header ?? '').trim().toLowerCase();
+  const encodings = sourceEncoding.split(',').map(value => value.trim()).filter(value => value && value !== 'identity');
+  let decoded: Buffer = data;
+  for (const encoding of encodings.toReversed()) {
+    if (!Object.hasOwn(decompressors, encoding)) throw new QubiclError('broker_encoding_unsupported', 'Unsupported broker response content encoding.', 502);
+    try {
+      decoded = await decompressors[encoding as keyof typeof decompressors](decoded, { maxOutputLength: MAX_BROKER_RESPONSE_BYTES });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ERR_BUFFER_TOO_LARGE') throw new QubiclError('broker_response_too_large', 'Decoded broker response exceeds 2 MB.', 502);
+      throw new QubiclError('broker_invalid_encoding', 'Broker response has invalid compressed content.', 502);
+    }
+  }
+  // Decode before redaction so compressed reflections cannot expose the
+  // injected credential. Binary redaction preserves every unrelated byte.
+  const safeData = redactCredentialBuffer(decoded, credential);
+  const textResponse = textual(headers['content-type']) && isUtf8(safeData);
+  const safeHeaders = redactCredentialValue(sanitizedResponseHeaders(headers, true), credential) as Record<string, string | string[]>;
+  delete safeHeaders['content-encoding'];
+  delete safeHeaders['transfer-encoding'];
+  if (encodings.length || !safeData.equals(data)) {
+    for (const name of ['etag', 'content-md5', 'digest', 'content-digest', 'repr-digest']) delete safeHeaders[name];
+  }
+  safeHeaders['content-length'] = String(safeData.length);
+  return {
+    headers: safeHeaders,
+    body: textResponse ? safeData.toString('utf8') : safeData.toString('base64'),
+    bodyEncoding: textResponse ? 'utf8' : 'base64',
+    ...(encodings.length ? { sourceContentEncoding: redactCredentialText(sourceEncoding, credential) } : {}),
+  };
+}
 export function redactCredentialText(value: string, credential: string): string { return credential ? value.replaceAll(credential, '[REDACTED]') : value; }
 function redactCredentialValue(value: unknown, credential: string): unknown { if (typeof value === 'string') return redactCredentialText(value, credential); if (Array.isArray(value)) return value.map((entry) => redactCredentialValue(entry, credential)); if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactCredentialValue(entry, credential)])); return value; }
-function redactCredentialBuffer(value: Buffer, credential: string): Buffer { const needle = Buffer.from(credential); if (!needle.length || !value.includes(needle)) return value; return Buffer.from(redactCredentialText(value.toString('utf8'), credential)); }
-function textual(value: string | string[] | undefined): boolean { const type = Array.isArray(value) ? value[0] : value; return type === undefined || /^(?:text\/|application\/(?:json|xml|javascript|x-www-form-urlencoded))/iu.test(type); }
+function redactCredentialBuffer(value: Buffer, credential: string): Buffer {
+  const needle = Buffer.from(credential);
+  if (!needle.length || !value.includes(needle)) return value;
+  const replacement = Buffer.from('[REDACTED]');
+  const chunks: Buffer[] = [];
+  let offset = 0; let size = value.length;
+  for (let index = value.indexOf(needle); index !== -1; index = value.indexOf(needle, offset)) {
+    size += replacement.length - needle.length;
+    if (size > MAX_BROKER_RESPONSE_BYTES) throw new QubiclError('broker_response_too_large', 'Redacted broker response exceeds 2 MB.', 502);
+    chunks.push(value.subarray(offset, index), replacement);
+    offset = index + needle.length;
+  }
+  chunks.push(value.subarray(offset));
+  return Buffer.concat(chunks, size);
+}
+function textual(value: string | string[] | undefined): boolean { const type = Array.isArray(value) ? value[0] : value; return type === undefined || /^(?:text\/|application\/(?:json|xml|javascript|x-www-form-urlencoded|[^;\s]+\+(?:json|xml))(?:\s*;|$))/iu.test(type); }
 function json(response: ServerResponse, status: number, value: unknown): void { const body = JSON.stringify(value); response.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store', ...(status === 407 ? { 'proxy-authenticate': 'Basic realm="Qubicl"' } : {}) }); response.end(body); }
 function audit(configuration: EgressConfiguration, event: string, details: Record<string, unknown>): void {
   let log = egressAudits.get(configuration.id);

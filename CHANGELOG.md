@@ -47,6 +47,12 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Outbound HTTP forwarding preserves website session cookies. Credential broker
+  requests allow URL and escaped-path query values within their scoped pathname,
+  decode compressed responses with bounded expansion and accurate body encoding,
+  and preserve non-secret binary bytes during redaction. IPv6 literal destinations
+  use address authorization directly instead of a failing bracketed DNS lookup.
+  Interrupted forwarded transfers and client disconnects close both connections.
 - Temporary listener-inspection failures preserve active app previews. Share
   rotation closes the previous share's streams and WebSockets while preserving
   owner access, including responses buffered for slow clients after the upstream

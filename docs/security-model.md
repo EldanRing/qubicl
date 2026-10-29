@@ -128,6 +128,12 @@ Do not place secrets in a Qubicl home that you would not give to container-root 
 - Web, browser, screenshot, and clipboard results carry compact Qubicl-owned `contentTrust` provenance. MCP text also places those results in a collision-resistant untrusted-data frame; native screenshots remain binary images with equivalent metadata. A bounded advisory scanner records finding IDs—not captured content—in the local audit log. A clean scan is reported as `no-known-patterns`, never as a claim that content is safe. These signals reinforce the model boundary but do not replace container, credential, egress, lease, or takeover enforcement.
 - Qubicl's core skill baselines are file-list locked, fully scanned, SHA-256 verified during every build, and reviewed against declared tool/preset requirements. Qubicl does not distribute the bulk Hermes catalog or jailbreak-oriented packages. Explicit local or immutable-commit Git imports reject symlinks, hard links, nested repositories, traversal, excessive packages, and blocking content patterns. Imported and core working copies are deliberately agent-editable inside the durable home; bounded host and control inspection rejects substituted store/discovery parents and reports drift or corruption without following agent-created links. Operator activation, import, reset, and removal remain outside `skill_manage` authority.
 - Broker credentials are resolved by the host from protected state, environment/file references, Linux Secret Service, or macOS Keychain and injected only into an allowed HTTPS origin/path/method by the shared gateway egress service. Values are absent from computer and workload environments and results.
+- Broker pathname validation is separate from query values and retains origin,
+  prefix and traversal checks. Compressed responses are bounded before and after
+  decompression, then redacted; unsupported or invalid encodings fail explicitly.
+  Broker response cookies remain omitted, while ordinary outbound HTTP proxy
+  responses preserve website cookies. IPv6 literals are normalized before
+  policy and CIDR checks, without a DNS lookup for bracketed addresses.
 
 ## Setup/privacy behavior
 

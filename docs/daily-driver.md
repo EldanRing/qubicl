@@ -171,6 +171,16 @@ references use an environment variable, private host file, Linux Secret
 Service (`secret-tool`), or macOS Keychain (`macos-keychain`). Only the gateway
 egress service receives the resolved value.
 
+Ordinary HTTP forwarding preserves website session cookies. Broker responses
+keep their separate secret-handling contract: cookies are omitted and reflected
+credential values are redacted. Broker path scope applies to the pathname, so
+query values can contain URLs or encoded paths. Gzip, deflate and Brotli responses
+are decoded within the existing 2 MB response budget before redaction. Text uses
+`bodyEncoding: "utf8"`; binary or invalid UTF-8 uses lossless `base64`.
+`sourceContentEncoding` records removed compression, and returned headers describe
+the decoded body. IPv6 literal URLs follow the same domain/CIDR/port policy as
+other destinations.
+
 `qubicl secret add research NAME --template openai` starts from a reviewed
 provider template. `qubicl secret explain research NAME` reports destination,
 methods, expiry, and provider kind without revealing the secret.
