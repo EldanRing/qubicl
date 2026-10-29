@@ -4,12 +4,6 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
-### Fixed
-
-- Release artifact validation accounts for the first-party workstation skills
-  separately from third-party notices while preserving exact dependency checks
-  and historical candidate compatibility.
-
 ## 0.8.0 - 2026-10-29
 
 ### Added
@@ -54,6 +48,10 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   published runtime images retain their original protocol and identities.
 
 ### Fixed
+
+- Release artifact validation accounts for the first-party workstation skills
+  separately from third-party notices while preserving exact dependency checks
+  and historical candidate compatibility.
 
 - Agent-facing instructions and architecture docs describe retained browser refs
   and the tasks, services and previews preserved by an ordinary lease release.
