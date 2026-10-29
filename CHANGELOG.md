@@ -58,6 +58,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   configured environment values and paths instead of expanding them on the host.
 - Completed task history remains readable through agent and operator process
   lists; private retained-log metadata no longer causes internal response errors.
+- Restored browser profiles use the workload user's ownership view during
+  startup, avoiding false ownership failures on Docker Desktop bind mounts.
 - Standalone Excel-to-CSV exports use the same typed-formula metadata and ISO
   duration values as workbook inspection instead of Python object representations.
 - Worksheet copies preserve independently editable charts, images, native tables,

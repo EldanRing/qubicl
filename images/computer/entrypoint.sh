@@ -112,7 +112,9 @@ prepare_browser_parent_directory() {
   if [[ ! -e "$path" ]]; then
     runuser -u qubicl -- install -d -m 0700 "$path"
   fi
-  owner="$(stat -c '%u:%g' -- "$path")"
+  # VirtioFS can report host-extracted data as root-owned to root while the
+  # workload user sees the actual host UID/GID. Validate Chromium's own view.
+  owner="$(runuser -u qubicl -- stat -c '%u:%g' -- "$path")" || browser_home_ownership_error "$path"
   if [[ "$owner" == 0:0 && "$owner" != "$expected_owner" ]]; then
     # v0.2 prerelease session supervisors could create this exact managed
     # ancestry as root before dropping Chromium to the computer user. Repair
@@ -132,7 +134,7 @@ prepare_browser_leaf_directory() {
   if [[ ! -e "$path" ]]; then
     runuser -u qubicl -- install -d -m 0700 "$path"
   fi
-  owner="$(stat -c '%u:%g' -- "$path")"
+  owner="$(runuser -u qubicl -- stat -c '%u:%g' -- "$path")" || browser_home_ownership_error "$path"
   if [[ "$owner" == 0:0 && "$owner" != "$expected_owner" ]]; then
     if find "$path" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
       browser_home_ownership_error "$path"
@@ -153,8 +155,8 @@ prepare_browser_keyring_password() {
   if [[ ! -e "$path" ]]; then
     runuser -u qubicl -- sh -ceu 'umask 077; head -c 32 /dev/urandom | base64 >"$1"' qubicl-keyring "$path"
   fi
-  owner="$(stat -c '%u:%g' -- "$path")"
-  if [[ "$owner" != "$expected_owner" && "$owner" != 0:0 ]]; then
+  owner="$(runuser -u qubicl -- stat -c '%u:%g' -- "$path")" || browser_home_ownership_error "$path"
+  if [[ "$owner" != "$expected_owner" ]]; then
     browser_home_ownership_error "$path"
   fi
   runuser -u qubicl -- chmod 0600 "$path"
