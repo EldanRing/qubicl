@@ -170,9 +170,25 @@ try {
   assert.equal(Object.hasOwn(filesStdioToolDefinitions.find(({ name }) => name === 'exec_command').inputSchema.properties, 'lease'), false);
   const filesActiveSkills = mcpValue(await filesStdioClient.callTool({ name: 'skills_list', arguments: { scope: 'active', limit: 100 } }));
   const filesCatalogSkills = mcpValue(await filesStdioClient.callTool({ name: 'skills_list', arguments: { scope: 'catalog', limit: 100 } }));
-  assert.equal(filesActiveSkills.total, 1);
-  assert.equal(filesCatalogSkills.total, 6);
+  const expectedFileSkills = defaultCatalogSkillsForCompatibility('file-system');
+  assert.equal(filesActiveSkills.total, expectedFileSkills.length);
+  assert.deepEqual(filesActiveSkills.skills.map(({ id }) => id).toSorted(), expectedFileSkills.toSorted());
+  assert.equal(filesCatalogSkills.total, CORE_SKILL_IDS.length);
+  assert.deepEqual(filesCatalogSkills.skills.map(({ id }) => id).toSorted(), [...CORE_SKILL_IDS].sort());
+  for (const skill of filesCatalogSkills.skills) {
+    assert.equal(skill.availableOnPreset, expectedFileSkills.includes(skill.id));
+    assert.equal(skill.supported, expectedFileSkills.includes(skill.id));
+  }
   await filesStdioClient.close();
+  const installedCatalog = await exec('docker', ['exec', computerRuntime(filesContract), 'node', '-e', `
+    const fs = require('node:fs');
+    const catalog = require('/opt/qubicl/skills/core-catalog.json');
+    for (const skill of catalog.skills) {
+      fs.accessSync('/home/qubicl/.local/share/qubicl/skills/installed/' + skill.name + '/SKILL.md');
+    }
+    process.stdout.write(JSON.stringify(catalog.skills.map(({ id }) => id)));
+  `]);
+  assert.deepEqual(JSON.parse(installedCatalog.stdout).sort(), [...CORE_SKILL_IDS].sort());
   for (const path of ['/view-ticket', '/view/vnc.html']) {
     const response = await fetch(`${filesBase}${path}`, { method: path === '/view-ticket' ? 'POST' : 'GET', headers: { authorization: `Bearer ${filesToken}` } });
     assert.equal(response.status, 404);
@@ -185,10 +201,6 @@ try {
     ! command -v x11vnc
     test ! -e /opt/qubicl/node_modules/playwright-core
     test ! -e /opt/qubicl/skills-venv
-    test "$(node -e "process.stdout.write(String(require('/opt/qubicl/skills/core-catalog.json').skills.length))")" = 6
-    for skill in plan pdf docx xlsx powerpoint ocr-and-documents; do
-      test -f "/home/qubicl/.local/share/qubicl/skills/installed/$skill/SKILL.md"
-    done
     for root in .agents .claude .hermes .codex; do
       test -L "/home/qubicl/$root/skills/plan"
       case "$(readlink "/home/qubicl/$root/skills/plan")" in /*) exit 1;; esac
