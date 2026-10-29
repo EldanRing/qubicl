@@ -76,7 +76,7 @@ const THREAT_PATTERNS: readonly ThreatPattern[] = [
 
 const UNTRUSTED_TOOLS = new Set<ToolName>([
   'web_search', 'web_extract', 'read_clipboard', 'take_screenshot',
-  'browser_navigate', 'browser_snapshot', 'browser_screenshot', 'browser_click', 'browser_type',
+  'browser_navigate', 'browser_snapshot', 'browser_read', 'browser_screenshot', 'browser_click', 'browser_type',
   'browser_select', 'browser_press', 'browser_scroll', 'browser_history', 'browser_wait', 'browser_tabs',
   'browser_use_tab', 'browser_new_tab', 'browser_close_tab', 'browser_reset', 'browser_click_at',
   'browser_double_click_at', 'browser_hover_at', 'browser_drag', 'browser_scroll_at', 'browser_type_focused',

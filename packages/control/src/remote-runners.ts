@@ -186,7 +186,8 @@ export class RemoteBrowserManager extends BrowserManager {
   override count(): number { return this.active ? 1 : 0; }
   override health(): ReturnType<BrowserManager['health']> { return this.invoke('health', []); }
   override navigate(url: string): ReturnType<BrowserManager['navigate']> { return this.invoke('navigate', [url]); }
-  override snapshot(cursor = 0, limit = 200, frameIndex = 0): ReturnType<BrowserManager['snapshot']> { return this.invoke('snapshot', [cursor, limit, frameIndex]); }
+  override read(input: Parameters<BrowserManager['read']>[0]): ReturnType<BrowserManager['read']> { return this.invoke('read', [input]); }
+  override snapshot(cursor = 0, limit = 200, frameIndex = 0, frameCursor = 0): ReturnType<BrowserManager['snapshot']> { return this.invoke('snapshot', [cursor, limit, frameIndex, frameCursor]); }
   override screenshot(fullPage: boolean): ReturnType<BrowserManager['screenshot']> { return this.invoke('screenshot', [fullPage]); }
   override click(ref: string, button: 'left' | 'right'): ReturnType<BrowserManager['click']> { return this.invoke('click', [ref, button]); }
   override clickWithViewerPointer(ref: string, button: 'left' | 'right', generation?: number): ReturnType<BrowserManager['clickWithViewerPointer']> { return this.invoke('clickWithViewerPointer', [ref, button, generation]); }

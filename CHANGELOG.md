@@ -4,6 +4,18 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
+### Added
+
+- Authenticated `browser_read` with Unicode-safe text pagination, literal search,
+  frame/subtree targeting, and document-bound cursors. Reads retain a consistent
+  captured text version without invalidating interactive element references;
+  navigation, closure, expiry or eviction requires a fresh read.
+
+### Changed
+
+- Development control protocol 12 adds the new observation contracts. Existing
+  published runtime images retain their original protocol and identities.
+
 ### Fixed
 
 - Browser snapshots continue at the first omitted control after count or byte

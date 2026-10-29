@@ -95,6 +95,7 @@ test('browser capability matches the Terminal1 semantic and screenshot-grounded 
   const expected = [
     'browser_navigate',
     'browser_snapshot',
+    'browser_read',
     'browser_screenshot',
     'browser_click',
     'browser_type',

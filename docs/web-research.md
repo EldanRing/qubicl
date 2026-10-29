@@ -32,3 +32,25 @@ Canvas-only pixels are not HTML and therefore remain outside automatic extractio
 Both paths reject embedded credentials and non-public destinations. Direct extraction validates all DNS answers and every redirect; browser extraction validates page requests. Loopback, RFC1918/private, link-local, metadata, reserved, and other non-public addresses are blocked. The `offline` profile denies both tools; `web-only`, `custom`, and `developer` retain their existing semantics. Extracted content is untrusted data, never instructions.
 
 Provider interfaces intentionally keep the public schemas stable. The initial providers are `ddgs` and `local`; optional SearXNG or other providers can be added later without changing agent calls.
+
+
+## Reading logged-in browser pages
+
+`browser_read` reads the active persistent browser, including authenticated pages.
+It does not send page content to the public extractor. Use `selector` for a DOM
+subtree or an observed `ref`, and `frameIndex` to choose a frame. `browser_snapshot` lists frames; follow its
+`nextFrameCursor` using `frameCursor` to discover further frames. `query` performs
+literal text search (`caseSensitive` is optional) and returns match offsets and
+short excerpts. Without a query it returns text. `maxBytes` controls the encoded
+content budget (512–16,000 bytes; default 12,000).
+
+Continue using `nextCursor` and optional `maxBytes` only. All pages come from the
+same captured text, identified by `documentId` and `capturedAt`, even if the live
+DOM changes. Navigation, tab changes, detached frames, closed pages and expired
+or evicted captures require a new read. A tab mismatch invalidates that cursor.
+Captures last up to five minutes; up to four captures share 16 MB of memory.
+An individual capture over 8 MB fails explicitly: select a smaller subtree.
+These retention limits bound runtime memory; they are not silent text truncation.
+Offsets count JavaScript UTF-16 units and generated cursors preserve Unicode.
+Reading does not replace the latest interactive refs. Browser snapshots still
+provide bounded accessibility text; their numeric cursor pages controls only.

@@ -521,8 +521,10 @@ export class ToolExecutor {
         }
       case 'browser_navigate':
         return respond(await runBrowser(() => this.browser.navigate(input.url as string)));
+      case 'browser_read':
+        return respond(await runBrowser(() => this.browser.read(input)));
       case 'browser_snapshot':
-        return respond(await runBrowser(() => this.browser.snapshot(input.cursor as number, input.limit as number, input.frameIndex as number)));
+        return respond(await runBrowser(() => this.browser.snapshot(input.cursor as number, input.limit as number, input.frameIndex as number, input.frameCursor as number)));
       case 'browser_screenshot':
         return respond(await runBrowser(() => this.browser.screenshot(input.full_page as boolean)));
       case 'browser_click':

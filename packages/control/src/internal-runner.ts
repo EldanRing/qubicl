@@ -309,7 +309,7 @@ function requiredCompatibility(): Preset {
 }
 
 const BROWSER_METHODS = [
-  'health', 'navigate', 'snapshot', 'screenshot', 'click', 'clickWithViewerPointer', 'type', 'select', 'press', 'scroll', 'history', 'wait',
+  'health', 'navigate', 'snapshot', 'read', 'screenshot', 'click', 'clickWithViewerPointer', 'type', 'select', 'press', 'scroll', 'history', 'wait',
   'tabs', 'useTab', 'newTab', 'closeTab', 'reset', 'clickAt', 'hoverAt', 'drag', 'scrollAt', 'typeFocused',
   'inspectAt', 'computer', 'computerWithViewerPointers', 'upload', 'listDownloads', 'cancelDownload',
   'listDialogs', 'respondDialog', 'permissions', 'browserDiagnostics', 'setViewport', 'shutdown',

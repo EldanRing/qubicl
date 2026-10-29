@@ -11,6 +11,7 @@
     "./pty": "./dist/pty.js",
     "./desktop-applications": "./dist/desktop-applications.js",
     "./browser": "./dist/browser.js",
+    "./browser-reading": "./dist/browser-reading.js",
     "./resource-limits": "./dist/resource-limits.js",
     "./executor": "./dist/executor.js",
     "./contract": "./dist/contract.js",

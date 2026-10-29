@@ -407,11 +407,25 @@ export const toolDefinitions = {
     lease: true,
   },
   browser_snapshot: {
-    description: 'Return one bounded, paginated frame accessibility snapshot and exact interactive refs.',
+    description: 'Return bounded accessibility text and paginated exact interactive refs. Use browser_read for text continuation.',
     input: observationOnly.extend({
       cursor: z.number().int().min(0).max(100_000).default(0),
       limit: z.number().int().min(1).max(200).default(200),
-      frameIndex: z.number().int().min(0).max(63).default(0),
+      frameIndex: z.number().int().min(0).max(100_000).default(0),
+      frameCursor: z.number().int().min(0).max(100_000).default(0),
+    }),
+    lease: false,
+  },
+  browser_read: {
+    description: 'Read or search captured text from the logged-in browser. Continue with cursor and maxBytes only; navigation invalidates cursors. Optional selector or ref targets a subtree.',
+    input: observationOnly.extend({
+      cursor: z.string().regex(/^[a-f0-9]{24}:\d{1,8}$/).optional(),
+      maxBytes: z.number().int().min(512).max(16_000).default(12_000),
+      frameIndex: z.number().int().min(0).max(100_000).optional(),
+      selector: z.string().min(1).max(2000).optional(),
+      ref: browserRef.optional(),
+      query: z.string().min(1).max(1000).optional(),
+      caseSensitive: z.boolean().optional(),
     }),
     lease: false,
   },
@@ -642,7 +656,7 @@ const interactiveInputTools = new Set<ToolName>([
   'write_clipboard', 'open_desktop_application', 'close_desktop_application',
 ]);
 const interactiveObservationTools = new Set<ToolName>([
-  'take_screenshot', 'browser_snapshot', 'browser_screenshot', 'browser_tabs', 'browser_inspect_at',
+  'take_screenshot', 'browser_snapshot', 'browser_read', 'browser_screenshot', 'browser_tabs', 'browser_inspect_at',
   'read_clipboard',
 ]);
 
@@ -716,7 +730,7 @@ export function toolNamesForProfile(
     'skills_list', 'skill_view', 'skill_manage',
   ];
   const semanticBrowser: ToolName[] = [
-    'get_computer_status', 'skills_list', 'skill_view', 'skill_manage', 'web_search', 'web_extract', 'browser_navigate', 'browser_snapshot', 'browser_screenshot', 'browser_click',
+    'get_computer_status', 'skills_list', 'skill_view', 'skill_manage', 'web_search', 'web_extract', 'browser_navigate', 'browser_snapshot', 'browser_read', 'browser_screenshot', 'browser_click',
     'browser_type', 'browser_select', 'browser_press', 'browser_scroll', 'browser_history', 'browser_wait',
     'browser_tabs', 'browser_use_tab', 'browser_new_tab', 'browser_close_tab', 'browser_reset', 'browser_upload',
     'browser_downloads', 'browser_cancel_download', 'browser_dialogs', 'browser_respond_dialog', 'browser_permissions',

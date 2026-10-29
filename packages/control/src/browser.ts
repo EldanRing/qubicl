@@ -13,6 +13,7 @@ import type {
 } from 'playwright-core';
 import { MODEL_TEXT_BUDGET_BYTES } from '@qubicl/core';
 import { QubiclError } from './errors.js';
+import { BrowserReader, type BrowserReadInput } from './browser-reading.js';
 import { isGloballyRoutableIp } from './network-address.js';
 import type { ViewerPointerAction, ViewerPointerUpdate } from './viewer-actions.js';
 
@@ -176,6 +177,7 @@ export class BrowserManager {
   private activePage: Page | undefined;
   private references = new Map<string, ElementHandle<SVGElement | HTMLElement>>();
   private referenceGeneration = 0;
+  private readonly reader = new BrowserReader();
   private referenceEpoch = 0;
   private operationQueue = Promise.resolve<unknown>(undefined);
   private queuedOperations = 0;
@@ -371,7 +373,13 @@ export class BrowserManager {
     });
   }
 
-  snapshot(cursor = 0, limit = MAX_INTERACTIVE_ELEMENTS, frameIndex = 0): Promise<Record<string, unknown>> {
+  read(input: BrowserReadInput): Promise<Record<string, unknown>> {
+    return this.enqueue(async () => this.reader.read(
+      await this.getPage(), input, input.ref ? await this.referencedElement(input.ref) : undefined,
+    ));
+  }
+
+  snapshot(cursor = 0, limit = MAX_INTERACTIVE_ELEMENTS, frameIndex = 0, frameCursor = 0): Promise<Record<string, unknown>> {
     return this.enqueue(async () => {
       const page = await this.getPage();
       const frames = browserFrames(page);
@@ -459,8 +467,9 @@ export class BrowserManager {
           scroll,
           generation,
           frame: { index: frameIndex, url: truncateUtf8Text(frame.url(), 2048).text },
-          frames: frames.slice(0, 64).map((item, index) => ({ index, url: truncateUtf8Text(item.url(), 128).text, urlTruncated: Buffer.byteLength(item.url()) > 128, main: item === page.mainFrame() })),
+          frames: frames.slice(frameCursor, frameCursor + 64).map((item, index) => ({ index: frameCursor + index, url: truncateUtf8Text(item.url(), 128).text, urlTruncated: Buffer.byteLength(item.url()) > 128, main: item === page.mainFrame() })),
           totalFrames: frames.length,
+          nextFrameCursor: frameCursor + 64 < frames.length ? frameCursor + 64 : null,
           snapshot: '',
           scan: {
             totalCandidates,
@@ -775,6 +784,7 @@ export class BrowserManager {
   }
 
   async shutdown(): Promise<void> {
+    await this.reader.clear();
     const context = this.contextPromise ? await this.contextPromise.catch(() => undefined) : undefined;
     this.contextPromise = undefined;
     this.clearReferences();
@@ -1096,6 +1106,7 @@ export class BrowserManager {
   }
 
   private clearContext(context: BrowserContext): void {
+    void this.reader.clear();
     void this.contextPromise?.then((current) => {
       if (current === context) this.contextPromise = undefined;
     }).catch(() => undefined);

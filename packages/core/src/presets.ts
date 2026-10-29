@@ -32,7 +32,7 @@ export const ViewerAuthenticationSchema = z.literal(VIEWER_AUTHENTICATION_HEADER
 export type ViewerAuthentication = z.infer<typeof ViewerAuthenticationSchema>;
 
 export const CAPABILITY_CONTRACT_VERSION = 1;
-export const CONTROL_PROTOCOL_VERSION = 11;
+export const CONTROL_PROTOCOL_VERSION = 12;
 
 export interface PresetDefinition {
   id: Preset;
@@ -152,6 +152,7 @@ export const COMPUTER_TOOL_NAMES = [
   'control_computer',
   'browser_navigate',
   'browser_snapshot',
+  'browser_read',
   'browser_screenshot',
   'browser_click',
   'browser_type',
@@ -234,6 +235,7 @@ const desktopToolNames: ComputerToolName[] = ['take_screenshot', 'control_comput
 const browserToolNames: ComputerToolName[] = [
   'browser_navigate',
   'browser_snapshot',
+  'browser_read',
   'browser_screenshot',
   'browser_click',
   'browser_type',
