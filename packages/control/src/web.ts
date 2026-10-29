@@ -58,8 +58,23 @@ export class LocalWebProvider implements WebSearchProvider, WebExtractProvider {
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
       let bytes = 0;
-      const timer = setTimeout(() => child.kill('SIGKILL'), this.timeoutMs);
+      let timeoutExpired = false;
+      const timer = setTimeout(() => { timeoutExpired = true; child.kill('SIGKILL'); }, this.timeoutMs);
       timer.unref();
+      let transportFailed = false;
+      const failTransport = (message: string): void => {
+        if (transportFailed || timeoutExpired || bytes > MAX_PROVIDER_OUTPUT_BYTES) return;
+        transportFailed = true;
+        clearTimeout(timer);
+        child.kill('SIGKILL');
+        reject(new QubiclError('web_provider_failure', message, 502));
+      };
+      // A provider can exit before reading a rendered page. Writable stream
+      // errors are separate from ChildProcess errors and must remain handled
+      // even after the request promise settles.
+      child.stdin.on('error', () => failTransport('The local web provider could not receive its request.'));
+      child.stdout.on('error', () => failTransport('The local web provider response stream failed.'));
+      child.stderr.on('error', () => failTransport('The local web provider diagnostic stream failed.'));
       child.stdout.on('data', (chunk: Buffer) => {
         bytes += chunk.length;
         if (bytes > MAX_PROVIDER_OUTPUT_BYTES) child.kill('SIGKILL');
@@ -68,17 +83,23 @@ export class LocalWebProvider implements WebSearchProvider, WebExtractProvider {
       child.stderr.on('data', (chunk: Buffer) => {
         if (Buffer.concat(stderr).length < 8192) stderr.push(chunk);
       });
-      child.once('error', reject);
+      child.once('error', () => failTransport('The local web provider could not start.'));
       child.once('close', (code, signal) => {
         clearTimeout(timer);
+        // A process may have exited successfully before the size-limit kill is
+        // delivered. Never accept its retained JSON prefix as a complete result.
+        if (bytes > MAX_PROVIDER_OUTPUT_BYTES) {
+          reject(new QubiclError('web_response_too_large', 'The web provider exceeded its response size limit.', 502));
+          return;
+        }
         let value: { error?: { code?: string; message?: string }; [key: string]: unknown } | undefined;
         try { value = JSON.parse(Buffer.concat(stdout).toString('utf8')) as typeof value; } catch { /* handled below */ }
         if (code !== 0 || !value) {
           const reason = value?.error?.message ?? Buffer.concat(stderr).toString('utf8').trim() ?? '';
-          const timedOut = signal === 'SIGKILL' && bytes <= MAX_PROVIDER_OUTPUT_BYTES;
+          const timedOut = timeoutExpired && signal === 'SIGKILL';
           const status = value?.error ? providerStatus(value.error.code) : timedOut ? 504 : 502;
           reject(new QubiclError(
-            value?.error?.code ?? (timedOut ? 'web_timeout' : bytes > MAX_PROVIDER_OUTPUT_BYTES ? 'web_response_too_large' : 'web_provider_failure'),
+            value?.error?.code ?? (timedOut ? 'web_timeout' : 'web_provider_failure'),
             value?.error?.message ?? (timedOut ? 'The web provider exceeded its time limit.' : reason || 'The local web provider failed.'),
             status,
           ));

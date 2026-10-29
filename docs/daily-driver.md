@@ -31,6 +31,10 @@ continue, while lease-scoped session work stops. A disconnected controlling
 viewer gets a visible 10-second reconnect grace by default; configure 5–300
 seconds with `qubicl config set --viewer-reconnect-grace SECONDS`. **Release
 control** lets the agent obtain fresh interactive ownership.
+Concurrent takeover requests are serialized so only the owning viewer receives
+success. A reconnect during automatic release waits for the human-input fence to
+be restored before forwarding input. Viewer status reconciles the displayed mode
+and view-only setting after refresh, automatic release or operator release.
 
 ## Ports
 
@@ -153,6 +157,12 @@ Commands and terminals receive the same configured environment and proxy setting
 and share the configured managed-task concurrency limit. The 30-day lifetime and
 retention settings work for long-running tasks; large retained logs remain readable
 through bounded pages up to the configured output limit.
+Saved services beyond the concurrency limit queue visibly at startup and start
+as slots free. Polling an exited service keeps it manageable. On 0.8 runtimes,
+`tasks stop-all` atomically disables saved service declarations and stops active
+work, including queued services. Completed ordinary task records remain available;
+runtime shutdown keeps service declarations for the next start. See [service recovery](runtime-reliability.md)
+for status fields and older-runtime compatibility.
 
 ```sh
 qubicl tasks show research

@@ -96,7 +96,51 @@ else process.stdout.write(JSON.stringify({finalUrl:'https://example.com',content
     await assert.rejects(new LocalWebProvider(process.execPath, script, 1000).search({ query: 'q', limit: 1 }), /malformed/);
     await writeFile(script, `setTimeout(()=>process.stdout.write('{}'),1000);`);
     await assert.rejects(new LocalWebProvider(process.execPath, script, 20).search({ query: 'q', limit: 1 }), /time limit/);
+    await assert.rejects(new LocalWebProvider(process.execPath, script, 20).extractRendered({
+      finalUrl: 'https://example.test/', title: '', contentType: 'text/html',
+      html: 'x'.repeat(1_500_000), sourceTruncated: false, format: 'text', maxChars: 1000,
+    }), { code: 'web_timeout', status: 504 });
+    await writeFile(script, `process.stdin.resume();process.stdout.write(JSON.stringify({query:'q',provider:'ddgs',results:[]})+' '.repeat(2100000),()=>process.exit(0));`);
+    await assert.rejects(new LocalWebProvider(process.execPath, script, 1000).search({ query: 'q', limit: 1 }), {
+      code: 'web_response_too_large', status: 502,
+    });
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('provider stdin failure returns a tool error and leaves the hosting web service usable', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'qubicl-web-broken-pipe-'));
+  const script = join(directory, 'provider.mjs');
+  const prior = process.env.QUBICL_RUNNER_KEY;
+  const key = 'p'.repeat(43);
+  process.env.QUBICL_RUNNER_KEY = key;
+  const provider = new LocalWebProvider(process.execPath, script, 1000);
+  const server = createWebServer(provider);
+  try {
+    await writeFile(script, 'process.exit(1);');
+    await new Promise<void>((resolve, reject) => server.listen(0, '127.0.0.1', resolve).once('error', reject));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const headers = { 'content-type': 'application/json', 'x-qubicl-runner-key': key };
+    const failed = await fetch(`${base}/v1/extract-rendered`, {
+      method: 'POST', headers, body: JSON.stringify({
+        finalUrl: 'https://example.test/', title: '', contentType: 'text/html',
+        html: 'x'.repeat(1_500_000), sourceTruncated: false, format: 'text', maxChars: 1000,
+      }),
+    });
+    assert.equal(failed.status, 502);
+    assert.equal((await failed.json() as { error: { code: string } }).error.code, 'web_provider_failure');
+    assert.equal((await fetch(`${base}/health`)).status, 200);
+    await writeFile(script, `process.stdin.resume();process.stdin.on('end',()=>process.stdout.write(JSON.stringify({query:'q',provider:'ddgs',results:[]})));`);
+    const recovered = await fetch(`${base}/v1/search`, { method: 'POST', headers, body: JSON.stringify({ query: 'q', limit: 1 }) });
+    assert.equal(recovered.status, 200);
+    assert.deepEqual(await recovered.json(), { query: 'q', provider: 'ddgs', results: [] });
+    await assert.rejects(new LocalWebProvider(join(directory, 'missing-executable'), script).search({ query: 'q', limit: 1 }), {
+      code: 'web_provider_failure', status: 502,
+    });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (prior === undefined) delete process.env.QUBICL_RUNNER_KEY; else process.env.QUBICL_RUNNER_KEY = prior;
     await rm(directory, { recursive: true, force: true });
   }
 });

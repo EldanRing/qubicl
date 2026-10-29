@@ -133,6 +133,12 @@ export const controlServer = createServer(async (request, response) => {
         json(response, 200, await executor.stopOperatorManagedProcess(managedId(body.processId, 'processId')));
         return;
       }
+      if (request.method === 'POST' && url.pathname === '/_qubicl/operator/management/processes/stop-all') {
+        requireJson(request);
+        exactOperatorBody(await readJson(request, 4096), []);
+        json(response, 200, await executor.stopAllOperatorManagedProcesses());
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/_qubicl/operator/management/previews/revoke') {
         requireJson(request);
         const body = exactOperatorBody(await readJson(request, 4096), ['previewId']);

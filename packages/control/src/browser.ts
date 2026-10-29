@@ -266,11 +266,13 @@ export class BrowserManager {
       const record = this.downloads.get(id);
       if (!record) throw new QubiclError('browser_download_not_found', `Browser download ${id} was not found.`, 404);
       const download = this.activeDownloads.get(id);
-      if (download) await this.dispatchInput(() => download.cancel());
-      if (record.status === 'in-progress') {
-        record.status = 'cancelled';
-        record.completedAt = new Date().toISOString();
-      }
+      await this.dispatchInput(async () => {
+        if (download) await download.cancel();
+        if (record.status === 'in-progress') {
+          record.status = 'cancelled';
+          record.completedAt = new Date().toISOString();
+        }
+      });
       return { id, status: record.status };
     });
   }

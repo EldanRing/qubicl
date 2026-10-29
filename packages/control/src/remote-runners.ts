@@ -1,3 +1,4 @@
+import { constants as osConstants } from 'node:os';
 import type { DesktopScreenshotOptions } from './executor.js';
 import type { WebSearchInput } from './web.js';
 import type { NativeDesktopMethod } from './desktop-native.js';
@@ -109,6 +110,11 @@ export class RemoteProcessManager {
     const value = await this.request<unknown>('/v1/process/management-stop', { id }, 'POST', true);
     if (!isRecord(value) || value.id !== id || value.status !== 'stopped') throw invalidRunnerResult(true);
     return { id, status: 'stopped' };
+  }
+  async stopAllForManagement(): Promise<{ stopped: number }> {
+    const value = await this.request<unknown>('/v1/process/management-stop-all', {}, 'POST', true);
+    if (!isRecord(value) || !Number.isSafeInteger(value.stopped) || (value.stopped as number) < 0) throw invalidRunnerResult(true);
+    return { stopped: value.stopped as number };
   }
   status(): Promise<RemoteProcessStatus> { return this.request('/v1/status', undefined, 'GET'); }
   private request<T>(path: string, body?: unknown, method = 'POST', ambiguousOnFailure = false): Promise<T> {
@@ -326,16 +332,31 @@ function managementProcessSummary(value: unknown): ManagementProcessSummary {
     || typeof value.id !== 'string'
     || typeof value.label !== 'string'
     || !['session', 'task', 'service'].includes(String(value.lifecycle))
-    || !['running', 'exited', 'signaled', 'timed-out', 'stopped', 'interrupted'].includes(String(value.status))
+    || !['queued', 'running', 'exited', 'signaled', 'timed-out', 'stopped', 'interrupted'].includes(String(value.status))
     || typeof value.startedAt !== 'string'
     || !(value.finishedAt === undefined || typeof value.finishedAt === 'string')
     || !['agent', 'computer'].includes(String(value.owner))
     || !Number.isSafeInteger(value.ownerGeneration)
     || (value.ownerGeneration as number) < 1
-    || Object.keys(value).some((key) => !['id', 'label', 'lifecycle', 'status', 'startedAt', 'finishedAt', 'owner', 'ownerGeneration'].includes(key))) {
+    || !(value.exitCode === undefined || Number.isSafeInteger(value.exitCode))
+    || !(value.signal === undefined || (typeof value.signal === 'string' && Object.hasOwn(osConstants.signals, value.signal)))
+    || !(value.service === undefined || (value.lifecycle === 'service' && validServiceState(value.service)))
+    || (value.status === 'queued' && (value.lifecycle !== 'service' || !isRecord(value.service) || value.service.state !== 'queued'))
+    || Object.keys(value).some((key) => !['id', 'label', 'lifecycle', 'status', 'startedAt', 'finishedAt', 'owner', 'ownerGeneration', 'service', 'exitCode', 'signal'].includes(key))) {
     throw invalidRunnerResult(false);
   }
   return value as unknown as ManagementProcessSummary;
+}
+
+function validServiceState(value: unknown): boolean {
+  return isRecord(value)
+    && ['queued', 'starting', 'ready', 'unhealthy', 'exited', 'unverified'].includes(String(value.state))
+    && Number.isSafeInteger(value.restartAttempts) && (value.restartAttempts as number) >= 0
+    && (value.lastCheckedAt === undefined || typeof value.lastCheckedAt === 'string')
+    && (value.lastError === undefined || typeof value.lastError === 'string')
+    && (value.nextRestartAt === undefined || typeof value.nextRestartAt === 'string')
+    && (value.lastExitCode === undefined || Number.isSafeInteger(value.lastExitCode))
+    && !Object.keys(value).some((key) => !['state', 'restartAttempts', 'lastCheckedAt', 'lastError', 'nextRestartAt', 'lastExitCode'].includes(key));
 }
 
 function invalidRunnerResult(ambiguous: boolean): QubiclError {

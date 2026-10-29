@@ -74,7 +74,7 @@ export function createInternalRunner(options: { browser?: BrowserManager } = {})
   return {
     server,
     shutdown: async () => {
-      if (processes) await processes.terminateOwner(undefined);
+      if (processes) await processes.shutdown();
       if (applications) await applications.shutdown();
       if (browser) await browser.shutdown();
       nativeDesktop.shutdown();
@@ -207,6 +207,9 @@ async function handleExecutor(
       return;
     case 'POST /v1/process/management-stop':
       send(response, 200, await processes.stopForManagement(processId(body.id)));
+      return;
+    case 'POST /v1/process/management-stop-all':
+      send(response, 200, await processes.stopAllForManagement());
       return;
     case 'GET /v1/ports':
       send(response, 200, { ports: await discoverListeningPorts(requiredIdentity('QUBICL_HOST_UID')) });

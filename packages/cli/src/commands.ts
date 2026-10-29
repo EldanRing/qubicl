@@ -300,14 +300,28 @@ async function tasksCommand(args: ParsedArgs): Promise<void> {
       }
       const base = `http://127.0.0.1:${state.config.gateway.port}/computers/${computer.id}/operator/management`;
       const headers = { 'x-qubicl-operator-key': state.secrets.computers[computer.id]!.internalKey, 'content-type': 'application/json' };
-      const response = await fetch(`${base}/processes`, { headers });
-      const value = await response.json() as { items?: Array<{ id?: unknown; status?: unknown }>; error?: { message?: string } };
-      if (!response.ok || !Array.isArray(value.items)) throw new Error(value.error?.message ?? `Could not list managed work for ${computer.name}.`);
-      const running = value.items.filter((item): item is { id: string; status: 'running' } => typeof item.id === 'string' && item.status === 'running');
+      const response = await fetch(`${base}/processes/stop-all`, { method: 'POST', headers, body: '{}' });
+      if (response.status !== 404) {
+        const value = await response.json().catch(() => undefined) as { stopped?: unknown; error?: { message?: string } } | undefined;
+        if (!response.ok) throw new Error(value?.error?.message ?? `Could not stop managed work for ${computer.name}; observe its current state before retrying.`);
+        if (!Number.isSafeInteger(value?.stopped) || Number(value?.stopped) < 0) throw new Error('The stop-all response was invalid; observe managed work before retrying.');
+        operationOutput('log', `Stopped ${value!.stopped} managed item${value!.stopped === 1 ? '' : 's'} on ${computer.name}.`);
+        return;
+      }
+      // Released runtimes do not have the atomic stop-all route. Only a definite
+      // unsupported-route response permits this fallback; never replay an
+      // uncertain mutation after a network error or an invalid success result.
+      await response.arrayBuffer();
+      operationOutput('warn', 'This runtime uses sequential stop-all compatibility mode. Upgrade its runtime for atomic cancellation of queued and active services.');
+      const listed = await fetch(`${base}/processes`, { headers });
+      const value = await listed.json() as { items?: Array<{ id?: unknown; status?: unknown; lifecycle?: unknown }>; error?: { message?: string } };
+      if (!listed.ok || !Array.isArray(value.items)) throw new Error(value.error?.message ?? `Could not list managed work for ${computer.name}.`);
+      const selected = value.items.filter((item): item is { id: string; status: string; lifecycle?: string } => typeof item.id === 'string'
+        && (item.status === 'running' || item.lifecycle === 'service'));
       let stoppedCount = 0;
-      for (const item of running) {
+      for (const item of selected) {
         const stopped = await fetch(`${base}/processes/stop`, { method: 'POST', headers, body: JSON.stringify({ processId: item.id }) });
-        if (!stopped.ok) throw new Error(`Stopped ${stoppedCount} of ${running.length} managed items; retry to reconcile the remainder.`);
+        if (!stopped.ok) throw new Error(`Stopped ${stoppedCount} of ${selected.length} managed items; observe the remaining work before retrying.`);
         await stopped.arrayBuffer();
         stoppedCount += 1;
       }

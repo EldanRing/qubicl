@@ -86,6 +86,7 @@ type ProcessController = Pick<ProcessManager,
   listCompatibility(owner: LeaseProof): ReturnType<ProcessManager['listCompatibility']> | Promise<ReturnType<ProcessManager['listCompatibility']>>;
   listForManagement(): ReturnType<ProcessManager['listForManagement']> | Promise<ReturnType<ProcessManager['listForManagement']>>;
   stopForManagement(id: string): ReturnType<ProcessManager['stopForManagement']>;
+  stopAllForManagement(): ReturnType<ProcessManager['stopAllForManagement']>;
   readOutput(id: string, offset: number, maxBytes: number, tailBytes: number | undefined, encoding: 'utf8' | 'base64'): ReturnType<ProcessManager['readOutput']> | Promise<ReturnType<ProcessManager['readOutput']>>;
   saveOutput(id: string, path: string, maxBytes: number): ReturnType<ProcessManager['saveOutput']>;
   terminalList(): ReturnType<ProcessManager['terminalList']> | Promise<ReturnType<ProcessManager['terminalList']>>;
@@ -688,6 +689,10 @@ export class ToolExecutor {
 
   stopOperatorManagedProcess(id: string): Promise<{ id: string; status: 'stopped' }> {
     return this.processes.stopForManagement(id);
+  }
+
+  stopAllOperatorManagedProcesses(): Promise<{ stopped: number }> {
+    return this.processes.stopAllForManagement();
   }
 
   revokeOperatorPreview(id: string): { id: string; status: 'revoked' } {

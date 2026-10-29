@@ -147,7 +147,7 @@ export interface ServiceOptions {
   restart?: { maxAttempts: number; backoffMs?: number };
 }
 export interface ServiceState {
-  state: 'starting' | 'ready' | 'unhealthy' | 'exited' | 'unverified';
+  state: 'queued' | 'starting' | 'ready' | 'unhealthy' | 'exited' | 'unverified';
   restartAttempts: number;
   lastCheckedAt?: string;
   lastError?: string;
@@ -163,7 +163,7 @@ export interface ProcessResult {
   survivesDisconnect: boolean;
   survivesHumanTakeover: boolean;
   running: boolean;
-  terminalState: 'running' | 'exited' | 'signaled' | 'timed_out' | 'failed';
+  terminalState: 'queued' | 'running' | 'exited' | 'signaled' | 'timed_out' | 'failed';
   output?: string;
   stdout?: string;
   stderr?: string;
@@ -209,7 +209,7 @@ export interface ManagementProcessSummary {
   id: string;
   exitCode?: number;
   signal?: NodeJS.Signals;
-  status: 'running' | 'exited' | 'signaled' | 'timed-out' | 'stopped' | 'interrupted';
+  status: 'queued' | 'running' | 'exited' | 'signaled' | 'timed-out' | 'stopped' | 'interrupted';
   startedAt: string;
   finishedAt?: string;
   label: string;
@@ -250,6 +250,12 @@ interface PersistedServiceDefinition {
   ownerGeneration: number;
 }
 
+interface PendingService {
+  definition: PersistedServiceDefinition;
+  queuedAt: string;
+  startError?: string;
+}
+
 export interface CompatibilityStatusOptions {
   waitMs?: number;
   offset?: number;
@@ -280,6 +286,12 @@ export interface ProcessManagerOptions {
 
 export class ProcessManager {
   private readonly processes = new Map<string, ManagedProcess>();
+  private readonly pendingServices = new Map<string, PendingService>();
+  private drainingServices = false;
+  private bulkStopping = false;
+  private shuttingDown = false;
+  private stopAllOperation?: Promise<{ stopped: number }>;
+  private shutdownOperation?: Promise<void>;
   private readonly maxProcesses: number;
   private readonly maxCompletedProcesses: number;
   private readonly maxRetainedOutputBytes: number;
@@ -385,15 +397,26 @@ export class ProcessManager {
   }
 
   async write(id: string, input: string, close: boolean, yieldTimeMs: number, owner: LeaseProof): Promise<ProcessResult> {
+    const pending = this.pendingServices.get(id);
+    if (pending) {
+      if (input || close) throw new QubiclError('process_not_running', `Managed service ${id} has not started and cannot accept input.`, 409);
+      return pendingServiceResult(pending);
+    }
     const managed = this.owned(id, owner);
     await this.writeInput(managed, input, close);
     if (!managed.completed) await Promise.race([managed.finished, delay(yieldTimeMs)]);
     const result = this.consume(managed);
-    if (!result.running) await this.discard(managed, true);
+    if (!result.running && managed.lifecycle !== 'service') await this.discard(managed, true);
     return result;
   }
 
   async stop(id: string, owner: LeaseProof, signal: StopSignal = 'SIGTERM'): Promise<ProcessResult> {
+    const pending = this.pendingServices.get(id);
+    if (pending) {
+      this.removeServiceDefinition(id);
+      this.pendingServices.delete(id);
+      return { ...pendingServiceResult(pending), terminalState: 'exited', service: { state: 'exited', restartAttempts: 0 } };
+    }
     const managed = this.owned(id, owner);
     await this.terminate(managed, signal, 'stop');
     const result = this.consume(managed);
@@ -518,6 +541,7 @@ export class ProcessManager {
 
   listForManagement(): ManagementProcessSummary[] {
     const current = [...this.processes.values()].map((managed) => managementSummary(managed));
+    current.push(...[...this.pendingServices.values()].map(pendingServiceSummary));
     const liveIds = new Set(current.map(({ id }) => id));
     return [...current, ...this.terminals.listForManagement(), ...[...this.taskHistory.values()].filter(({ id }) => !liveIds.has(id)).map(stripPersistedTask)]
       .sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
@@ -528,6 +552,11 @@ export class ProcessManager {
   }
 
   async stopForManagement(id: string): Promise<{ id: string; status: 'stopped' }> {
+    if (this.pendingServices.has(id)) {
+      this.removeServiceDefinition(id);
+      this.pendingServices.delete(id);
+      return { id, status: 'stopped' };
+    }
     const managed = this.processes.get(id);
     if (!managed) {
       if (await this.terminals.closeForManagement(id)) return { id, status: 'stopped' };
@@ -540,6 +569,56 @@ export class ProcessManager {
     if (managed.lifecycle === 'service') this.removeServiceDefinition(managed.id);
     await this.discard(managed, false);
     return { id, status: 'stopped' };
+  }
+
+  stopAllForManagement(): Promise<{ stopped: number }> {
+    if (this.stopAllOperation) return this.stopAllOperation;
+    this.bulkStopping = true;
+    this.stopAllOperation = (async () => {
+      let stopped = 0;
+      const errors: unknown[] = [];
+      // Freeze admission first, including when a live service exits during an
+      // awaited stop. Disabling queued definitions must never launch them.
+      const ids = [
+        ...this.pendingServices.keys(),
+        ...[...this.processes.values()].filter((managed) => managed.lifecycle === 'service' || !managed.completed).map(({ id }) => id),
+        ...this.terminals.list().filter(({ running }) => running).map(({ terminalId }) => terminalId),
+      ];
+      for (const id of ids) {
+        try {
+          await this.stopForManagement(id);
+          stopped += 1;
+        } catch (error) {
+          if (error instanceof QubiclError && error.code === 'process_not_found') continue;
+          errors.push(error);
+        }
+      }
+      if (errors.length) throw new QubiclError('process_stop_failed', `Stopped ${stopped} managed items; ${errors.length} could not be stopped. Their records were retained; inspect managed work before retrying.`, 500);
+      return { stopped };
+    })().finally(() => {
+      this.bulkStopping = false;
+      delete this.stopAllOperation;
+    });
+    return this.stopAllOperation;
+  }
+
+  shutdown(): Promise<void> {
+    if (this.shutdownOperation) return this.shutdownOperation;
+    this.shuttingDown = true;
+    this.shutdownOperation = (async () => {
+      const results = await Promise.allSettled([
+        ...[...this.processes.values()].map(async (managed) => {
+          if (!managed.completed) await this.terminate(managed, 'SIGTERM', 'stop');
+          if (!managed.completed) throw new QubiclError('process_fencing_failed', `Could not confirm termination of managed process ${managed.id}.`, 500);
+          // Leader exit does not prove that redirected descendants have exited.
+          await this.terminateCompletedGroup(managed);
+        }),
+        ...this.terminals.list().map(({ terminalId }) => this.terminals.closeForManagement(terminalId)),
+      ]);
+      const failure = results.find((result) => result.status === 'rejected');
+      if (failure?.status === 'rejected') throw failure.reason;
+    })();
+    return this.shutdownOperation;
   }
 
   readOutput(id: string, offset: number, maxBytes: number, tailBytes: number | undefined, encoding: 'utf8' | 'base64'): ProcessOutputPage {
@@ -765,6 +844,9 @@ export class ProcessManager {
   }
 
   private assertCapacity(): void {
+    if (this.bulkStopping || this.shuttingDown) throw new QubiclError('process_admission_paused', 'Managed work is stopping; no new processes or terminals can start.', 409);
+    // Saved services already waiting for a slot take precedence over new work.
+    if (!this.drainingServices) this.drainServiceQueue();
     if (this.count() >= this.maxProcesses) {
       throw new QubiclError('process_limit', `This computer already has ${this.maxProcesses} managed processes (including tasks, services, and terminals). Read or stop an existing task before starting another.`, 429);
     }
@@ -805,7 +887,7 @@ export class ProcessManager {
     // Fence any surviving old process-group members before reusing this service handle.
     try {
       await this.terminateCompletedGroup(managed);
-      if (managed.completed || managed.terminationReason) return;
+      if (managed.completed || managed.terminationReason || this.bulkStopping || this.shuttingDown) return;
       delete managed.restartTimer;
       const child = spawn('/bin/bash', ['-lc', managed.command], { cwd: managed.cwd, detached: true, env: this.environment,
         ...(this.spawnUid === undefined ? {} : { uid: this.spawnUid, gid: this.spawnGid }), stdio: ['pipe', 'pipe', 'pipe'] });
@@ -1153,6 +1235,7 @@ export class ProcessManager {
       managed.expiryTimer.unref();
     }
     if (managed.compatibilitySession) void this.pruneCompleted().catch(() => undefined);
+    this.drainServiceQueue();
   }
 
   private async pruneCompleted(): Promise<void> {
@@ -1341,6 +1424,7 @@ export class ProcessManager {
 
   private openRetainedOutput(id: string): { descriptor: number; size: number; complete: boolean; truncated: boolean } {
     if (!/^[A-Za-z0-9_-]{16}$/u.test(id)) throw new QubiclError('invalid_arguments', 'processId must be an exact managed task identifier.', 400);
+    if (this.pendingServices.has(id)) throw new QubiclError('process_output_unavailable', `Managed service ${id} has not started and has no output yet.`, 409);
     const managed = this.processes.get(id);
     const historical = this.taskHistory.get(id);
     if (!managed && !historical) throw new QubiclError('process_not_found', `Managed task ${id} was not found or its retained output expired.`, 404);
@@ -1430,7 +1514,7 @@ export class ProcessManager {
       throw new Error('The durable service directory must be private.');
     }
     const names = readdirSync(directory).filter((name) => /^[A-Za-z0-9_-]{16}\.json$/u.test(name)).sort();
-    if (names.length > this.maxProcesses) throw new Error('Too many durable service definitions.');
+    const definitions: PersistedServiceDefinition[] = [];
     for (const name of names) {
       const path = join(directory, name);
       const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -1445,20 +1529,39 @@ export class ProcessManager {
         closeSync(descriptor);
       }
       if (`${definition.id}.json` !== name) throw new Error('A durable service definition has a mismatched identity.');
-      this.start(
-        definition.command,
-        definition.cwd,
-        { id: 'durable-service', generation: definition.ownerGeneration, epoch: 'computer' },
-        definition.maxOutputBytes,
-        definition.timeoutMs,
-        definition.outputMode,
-        null,
-        false,
-        'service',
-        definition.label,
-        definition.id,
-        definition.service,
-      );
+      definitions.push(definition);
+    }
+    // Validate the complete saved set before starting anything. The concurrency
+    // limit bounds live work, not the number of durable definitions on disk.
+    const queuedAt = new Date().toISOString();
+    for (const definition of definitions) this.pendingServices.set(definition.id, { definition, queuedAt });
+    this.drainServiceQueue();
+  }
+
+  private drainServiceQueue(): void {
+    if (this.drainingServices || this.bulkStopping || this.shuttingDown) return;
+    this.drainingServices = true;
+    try {
+      for (const [id, pending] of this.pendingServices) {
+        if (this.count() >= this.maxProcesses) break;
+        if (pending.startError !== undefined) continue;
+        const definition = pending.definition;
+        try {
+          this.start(
+            definition.command, definition.cwd,
+            { id: 'durable-service', generation: definition.ownerGeneration, epoch: 'computer' },
+            definition.maxOutputBytes, definition.timeoutMs, definition.outputMode,
+            null, false, 'service', definition.label, definition.id, definition.service,
+          );
+          this.pendingServices.delete(id);
+        } catch (error) {
+          // Preserve the definition and a manageable failure record. Do not
+          // throw from another process's completion callback or retry in a loop.
+          pending.startError = `Could not start saved service; retry on runtime restart: ${(error as Error).message}`;
+        }
+      }
+    } finally {
+      this.drainingServices = false;
     }
   }
 
@@ -1702,6 +1805,40 @@ function closeOutputDescriptor(managed: ManagedProcess): void {
   // Invalidate before closing: the OS can reuse this number for another request.
   managed.outputFileClosed = true;
   try { closeSync(managed.outputFile); } catch { /* never retry a potentially reused descriptor */ }
+}
+
+function pendingServiceState(pending: PendingService): ServiceState {
+  return {
+    state: pending.startError === undefined ? 'queued' : 'unhealthy',
+    restartAttempts: 0,
+    ...(pending.startError === undefined ? {} : { lastError: pending.startError }),
+  };
+}
+
+function pendingServiceResult(pending: PendingService): ProcessResult {
+  return {
+    processId: pending.definition.id,
+    label: pending.definition.label,
+    lifecycle: 'service',
+    survivesDisconnect: true,
+    survivesHumanTakeover: true,
+    running: false,
+    terminalState: pending.startError === undefined ? 'queued' : 'failed',
+    service: pendingServiceState(pending),
+  };
+}
+
+function pendingServiceSummary(pending: PendingService): ManagementProcessSummary {
+  return {
+    id: pending.definition.id,
+    label: pending.definition.label,
+    lifecycle: 'service',
+    status: pending.startError === undefined ? 'queued' : 'interrupted',
+    startedAt: pending.queuedAt,
+    owner: 'computer',
+    ownerGeneration: pending.definition.ownerGeneration,
+    service: pendingServiceState(pending),
+  };
 }
 
 function managementSummary(managed: ManagedProcess): ManagementProcessSummary {

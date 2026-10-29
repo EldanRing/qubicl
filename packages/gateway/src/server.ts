@@ -44,7 +44,7 @@ import { RouteStore } from './routes.js';
 
 interface TimedValue { id: string; expiresAt: number; tokenHash: string; controlling: boolean }
 interface ViewSession extends TimedValue { key: string }
-interface ViewerSocket { socket: Duplex; controlling: boolean }
+interface ViewerSocket { socket: Duplex; controlling: boolean; ready: boolean }
 interface EpochSynchronization {
   signature: string;
   acknowledged: boolean;
@@ -151,6 +151,7 @@ export class Gateway {
   private readonly tickets = new Map<string, TimedValue>();
   private readonly sessions = new Map<string, ViewSession>();
   private readonly viewerSockets = new Map<string, Set<ViewerSocket>>();
+  private readonly controlTransitions = new Map<string, Promise<void>>();
   private readonly abandonedControlTimers = new Map<string, { timer: NodeJS.Timeout; releasesAt: number }>();
   private readonly gatewayEpoch = randomBytes(18).toString('base64url');
   private readonly epochSynchronizations = new Map<string, EpochSynchronization>();
@@ -439,17 +440,25 @@ export class Gateway {
       if (!this.requireSameOrigin(request, response, surface)) return;
       const session = this.requireViewSession(request, response, route, surface);
       if (!session) return;
-      const taking = suffix === '/human-control/take';
-      const existingController = [...this.sessions.values()].find((candidate) => candidate.id === id && candidate.controlling);
-      if (taking && existingController && existingController !== session) {
-        sendJson(response, 409, { error: { code: 'human_control_owned', message: 'Another viewer session currently controls this computer.' } });
-        return;
-      }
-      if (!taking && !session.controlling) {
-        sendJson(response, 409, { error: { code: 'human_control_not_owned', message: 'Only the controlling viewer session can release human control.' } });
-        return;
-      }
-      this.proxy(request, response, route, taking ? '/_qubicl/human/take' : '/_qubicl/human/release', false, () => this.setControllingSession(id, taking ? session : undefined), surface);
+      await this.serializeControlTransition(id, async () => {
+        if (response.destroyed || this.closing) return;
+        const currentRoute = this.routes.get(id);
+        if (!currentRoute) { sendJson(response, 404, { error: { code: 'computer_not_found', message: 'Computer not found.' } }); return; }
+        if (this.requireViewSession(request, response, currentRoute, surface) !== session) return;
+        const taking = suffix === '/human-control/take';
+        const existingController = [...this.sessions.values()].find((candidate) => candidate.id === id && candidate.controlling);
+        if (taking && existingController && existingController !== session) {
+          sendJson(response, 409, { error: { code: 'human_control_owned', message: 'Another viewer session currently controls this computer.' } });
+          return;
+        }
+        if (!taking && !session.controlling) {
+          sendJson(response, 409, { error: { code: 'human_control_not_owned', message: 'Only the controlling viewer session can release human control.' } });
+          return;
+        }
+        await new Promise<void>((resolve) => this.proxy(request, response, currentRoute,
+          taking ? '/_qubicl/human/take' : '/_qubicl/human/release', false,
+          () => this.setControllingSession(id, taking ? session : undefined), surface, undefined, resolve));
+      });
       return;
     }
 
@@ -475,6 +484,7 @@ export class Gateway {
         'GET /operator/management/processes': '/_qubicl/operator/management/processes',
         'GET /operator/management/previews': '/_qubicl/operator/management/previews',
         'POST /operator/management/processes/stop': '/_qubicl/operator/management/processes/stop',
+        'POST /operator/management/processes/stop-all': '/_qubicl/operator/management/processes/stop-all',
         'POST /operator/management/previews/revoke': '/_qubicl/operator/management/previews/revoke',
         'POST /operator/management/previews/share': '/_qubicl/operator/management/previews/share',
         'POST /operator/management/previews/unshare': '/_qubicl/operator/management/previews/unshare',
@@ -490,7 +500,14 @@ export class Gateway {
     }
     if (request.method === 'POST' && suffix === '/operator/human-control/release') {
       if (!this.requireOperator(request, response, route)) return;
-      this.proxy(request, response, route, '/_qubicl/human/release', false, () => this.setControllingSession(id, undefined), surface);
+      await this.serializeControlTransition(id, async () => {
+        if (response.destroyed || this.closing) return;
+        const currentRoute = this.routes.get(id);
+        if (!currentRoute) { sendJson(response, 404, { error: { code: 'computer_not_found', message: 'Computer not found.' } }); return; }
+        if (!this.requireOperator(request, response, currentRoute)) return;
+        await new Promise<void>((resolve) => this.proxy(request, response, currentRoute, '/_qubicl/human/release', false,
+          () => this.setControllingSession(id, undefined), surface, undefined, resolve));
+      });
       return;
     }
     const client = this.requireBearer(request, response, route, surface);
@@ -643,14 +660,17 @@ export class Gateway {
     onSuccess?: () => void,
     surface: RequestSurface = LOCAL_SURFACE,
     client?: RuntimeClientCredential,
+    onSettled?: () => void,
   ): void {
     if (view && route.viewPort === undefined) {
       sendJson(outgoing, 404, { error: { code: 'capability_unsupported', message: 'This computer does not provide a viewer.' } });
+      onSettled?.();
       return;
     }
     const active = this.activeProxyRequests.get(route.id) ?? 0;
     if (active >= MAX_PROXY_REQUESTS_PER_COMPUTER) {
       sendJson(outgoing, 429, { error: { code: 'computer_busy', message: `Computer ${route.id} already has ${MAX_PROXY_REQUESTS_PER_COMPUTER} active gateway requests.` } });
+      onSettled?.();
       return;
     }
     this.activeProxyRequests.set(route.id, active + 1);
@@ -661,6 +681,7 @@ export class Gateway {
       const remaining = (this.activeProxyRequests.get(route.id) ?? 1) - 1;
       if (remaining > 0) this.activeProxyRequests.set(route.id, remaining);
       else this.activeProxyRequests.delete(route.id);
+      onSettled?.();
     };
     const previewProxy = path.startsWith('/_qubicl/previews/');
     const headers = sanitizedProxyHeaders(incoming.headers, previewProxy);
@@ -699,6 +720,12 @@ export class Gateway {
       dispatched = true;
       backend.setTimeout(PROXY_IDLE_TIMEOUT_MS, () => backend.destroy(new Error('Computer response idle timeout.')));
       if ((backend.statusCode ?? 500) >= 200 && (backend.statusCode ?? 500) < 300) onSuccess?.();
+      backend.once('error', (error) => { if (!outgoing.writableEnded) outgoing.destroy(error); });
+      backend.once('aborted', () => { if (!outgoing.writableEnded) outgoing.destroy(); });
+      backend.once('close', () => {
+        if (!backend.complete && !outgoing.writableEnded) outgoing.destroy();
+        release();
+      });
       const responseHeaders = sanitizedResponseHeaders(backend.headers);
       const previewCookies = previewProxy ? backend.headers['set-cookie'] : undefined;
       delete responseHeaders['set-cookie'];
@@ -723,7 +750,6 @@ export class Gateway {
       }
       outgoing.writeHead(backend.statusCode ?? 502, responseHeaders);
       backend.pipe(outgoing);
-      backend.once('close', release);
     });
     const connectTimer = setTimeout(() => {
       if (!dispatched) proxied.destroy(new Error('Computer request connect timeout.'));
@@ -751,7 +777,9 @@ export class Gateway {
       else outgoing.destroy(error);
     });
     outgoing.once('close', () => {
-      if (!outgoing.writableEnded) proxied.destroy();
+      // Ownership transitions must finish even if their caller disconnects;
+      // cancelling the socket does not cancel the backend's fencing operation.
+      if (!outgoing.writableEnded && !onSettled) proxied.destroy();
     });
     const bodyLimit = surface.kind === 'external' ? EXTERNAL_MAX_BODY_BYTES : LOCAL_MAX_BODY_BYTES;
     const limiter = boundedRequestBody(bodyLimit);
@@ -764,6 +792,7 @@ export class Gateway {
         outgoing.destroy();
       }
     });
+    incoming.once('aborted', () => proxied.destroy(new Error('Gateway request body was interrupted.')));
     incoming.pipe(limiter).pipe(proxied);
   }
 
@@ -855,11 +884,37 @@ export class Gateway {
     if (!hasExactViewerOrigin(request, surface)) return rejectUpgrade(socket, 403, 'Forbidden');
     const session = this.validViewSession(request, route, surface);
     if (!session) return rejectUpgrade(socket, 401, 'Unauthorized');
+    // Register a reconnect immediately so an in-flight abandoned release can
+    // restore the fence, but do not forward input until that transition settles.
+    const tracked = this.trackViewerSocket(session.key, socket, session.controlling);
+    socket.pause();
+    void this.connectViewerAfterTransitions(id, session, tracked, request, head, url, surface);
+  }
+
+  private async connectViewerAfterTransitions(id: string, session: ViewSession, tracked: ViewerSocket, request: IncomingMessage, head: Buffer, url: URL, surface: RequestSurface): Promise<void> {
+    const { socket } = tracked;
+    while (this.controlTransitions.has(id)) await this.controlTransitions.get(id);
+    if (socket.destroyed || this.closing) return;
+    const route = this.routes.get(id);
+    if (!route || this.validViewSession(request, route, surface) !== session) return rejectUpgrade(socket, 401, 'Unauthorized');
+    if (route.viewPort === undefined || route.controlViewPort === undefined) return rejectUpgrade(socket, 404, 'Viewer Unsupported');
+    tracked.controlling = session.controlling;
     const viewPort = session.controlling ? route.controlViewPort : route.viewPort;
-    this.trackViewerSocket(session.key, socket, session.controlling);
     const viewHost = route.viewHost ?? route.host;
     const backend = connect(viewPort, viewHost);
-    backend.on('connect', () => {
+    backend.on('connect', () => { void (async () => {
+      while (this.controlTransitions.has(id)) await this.controlTransitions.get(id);
+      if (socket.destroyed || this.closing) { backend.destroy(); return; }
+      const currentRoute = this.routes.get(id);
+      if (!currentRoute || this.validViewSession(request, currentRoute, surface) !== session
+        || session.controlling !== tracked.controlling
+        || (currentRoute.viewHost ?? currentRoute.host) !== viewHost
+        || (session.controlling ? currentRoute.controlViewPort : currentRoute.viewPort) !== viewPort
+        || currentRoute.internalKey !== route.internalKey || currentRoute.viewerAuthentication !== route.viewerAuthentication) {
+        backend.destroy();
+        rejectUpgrade(socket, 409, 'Viewer Session Changed');
+        return;
+      }
       const lines = [`${request.method ?? 'GET'} /websockify${url.search} HTTP/${request.httpVersion}`];
       lines.push(...sanitizedUpgradeHeaderLines(request));
       lines.push(`Host: ${viewHost}:${viewPort}`, 'Connection: Upgrade', 'Upgrade: websocket');
@@ -869,8 +924,10 @@ export class Gateway {
       lines.push('', '');
       backend.write(lines.join('\r\n'));
       if (head.length) backend.write(head);
+      tracked.ready = true;
       socket.pipe(backend).pipe(socket);
-    });
+      if (this.controlTransitions.has(id) && tracked.controlling) socket.pause();
+    })(); });
     backend.on('error', () => socket.destroy());
     backend.on('close', () => socket.destroy());
     socket.on('error', () => backend.destroy());
@@ -886,6 +943,27 @@ export class Gateway {
     return found;
   }
 
+  private serializeControlTransition(id: string, operation: () => Promise<void>): Promise<void> {
+    const previous = this.controlTransitions.get(id) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(async () => {
+      for (const session of this.sessions.values()) {
+        if (session.id !== id) continue;
+        for (const tracked of this.viewerSockets.get(session.key) ?? []) if (tracked.controlling) tracked.socket.pause();
+      }
+      try { await operation(); }
+      finally {
+        for (const session of this.sessions.values()) {
+          if (session.id !== id || !session.controlling) continue;
+          for (const tracked of this.viewerSockets.get(session.key) ?? []) if (tracked.controlling && tracked.ready) tracked.socket.resume();
+        }
+      }
+    });
+    const settled = current.then(() => undefined, () => undefined);
+    this.controlTransitions.set(id, settled);
+    void settled.then(() => { if (this.controlTransitions.get(id) === settled) this.controlTransitions.delete(id); });
+    return current;
+  }
+
   private setControllingSession(id: string, controller: TimedValue | undefined): void {
     for (const [key, session] of this.sessions) {
       if (session.id !== id) continue;
@@ -897,8 +975,9 @@ export class Gateway {
     }
   }
 
-  private trackViewerSocket(key: string, socket: Duplex, controlling: boolean): void {
-    const tracked = { socket, controlling };
+  private trackViewerSocket(key: string, socket: Duplex, controlling: boolean): ViewerSocket {
+    const tracked = { socket, controlling, ready: false };
+    socket.on('error', () => socket.destroy());
     const sockets = this.viewerSockets.get(key) ?? new Set<ViewerSocket>();
     sockets.add(tracked);
     this.viewerSockets.set(key, sockets);
@@ -906,18 +985,27 @@ export class Gateway {
     socket.once('close', () => {
       sockets.delete(tracked);
       if (!sockets.size) this.viewerSockets.delete(key);
-      if (controlling) {
+      if (tracked.controlling) {
         const session = this.sessions.get(key);
         if (session?.controlling) this.armAbandonedControlRelease(session);
       }
     });
+    return tracked;
   }
 
   private armAbandonedControlRelease(session: ViewSession): void {
     this.clearAbandonedControlRelease(session.key);
-    const timer = setTimeout(() => void this.releaseAbandonedControl(session.key), this.abandonedControlGraceMs);
-    timer.unref();
-    this.abandonedControlTimers.set(session.key, { timer, releasesAt: Date.now() + this.abandonedControlGraceMs });
+    if (this.closing || this.hasControllingViewerSocket(session.key)) return;
+    const pending = {
+      timer: setTimeout(() => {
+        if (this.abandonedControlTimers.get(session.key) !== pending) return;
+        this.abandonedControlTimers.delete(session.key);
+        void this.serializeControlTransition(session.id, () => this.releaseAbandonedControl(session.key));
+      }, this.abandonedControlGraceMs),
+      releasesAt: Date.now() + this.abandonedControlGraceMs,
+    };
+    pending.timer.unref();
+    this.abandonedControlTimers.set(session.key, pending);
   }
 
   private clearAbandonedControlRelease(key: string): void {
@@ -927,7 +1015,6 @@ export class Gateway {
   }
 
   private async releaseAbandonedControl(key: string): Promise<void> {
-    this.abandonedControlTimers.delete(key);
     if (this.closing) return;
     const session = this.sessions.get(key);
     if (!session?.controlling || this.hasControllingViewerSocket(key)) return;
@@ -936,22 +1023,36 @@ export class Gateway {
       this.setControllingSession(session.id, undefined);
       return;
     }
-    const released = await this.requestHumanRelease(route);
-    if (released) this.setControllingSession(session.id, undefined);
-    else if (!this.closing && session.controlling && !this.hasControllingViewerSocket(key)) this.armAbandonedControlRelease(session);
+    const released = await this.requestHumanTransition(route, 'release');
+    if (this.closing || this.sessions.get(key) !== session || !session.controlling) return;
+    if (released || this.hasControllingViewerSocket(key)) {
+      // A reconnect can arrive after release was dispatched. The backend has
+      // removed its fence (or its outcome is unknown), so restore it before retaining this owner.
+      // A map-only guard would incorrectly claim human control was still active.
+      if (this.hasControllingViewerSocket(key)) {
+        const currentRoute = this.routes.get(session.id);
+        const restored = currentRoute && routeAcceptsTokenHash(currentRoute, session.tokenHash)
+          && await this.requestHumanTransition(currentRoute, 'take');
+        if (restored && !this.closing && this.sessions.get(key) === session && session.controlling) {
+          if (!this.hasControllingViewerSocket(key)) this.armAbandonedControlRelease(session);
+          return;
+        }
+      }
+      this.setControllingSession(session.id, undefined);
+    } else if (!this.hasControllingViewerSocket(key)) this.armAbandonedControlRelease(session);
   }
 
   private hasControllingViewerSocket(key: string): boolean {
     return [...(this.viewerSockets.get(key) ?? [])].some(({ controlling, socket }) => controlling && !socket.destroyed);
   }
 
-  private requestHumanRelease(route: RuntimeRoute): Promise<boolean> {
+  private requestHumanTransition(route: RuntimeRoute, action: 'take' | 'release'): Promise<boolean> {
     return new Promise((resolve) => {
       const request = httpRequest({
         hostname: route.host,
         port: route.controlPort,
         method: 'POST',
-        path: '/_qubicl/human/release',
+        path: `/_qubicl/human/${action}`,
         agent: false,
         headers: {
           'content-length': '0',
@@ -1633,13 +1734,15 @@ html,body{height:100%;margin:0;background:#111;color:#eee;font:14px system-ui}bo
 <script nonce="${nonce}">
 const mapViewerPointerToCanvas=(${mapViewerPointerToCanvas.toString()});
 const state=document.querySelector('#state'),stage=document.querySelector('#stage'),desktop=document.querySelector('#desktop'),pointer=document.querySelector('#agent-pointer'),toggle=document.querySelector('#agent-toggle');
-let pointerEnabled=true,actionSequence=0,polling=true,currentPointer=null,display={width:1440,height:900};
+let pointerEnabled=true,actionSequence=0,polling=true,currentPointer=null,controlRevision=0,controlPending=false,controlling=false,display={width:1440,height:900};
 try{pointerEnabled=localStorage.getItem('qubicl-agent-pointer')!=='off'}catch{}
 function updateToggle(){toggle.textContent='Agent pointer: '+(pointerEnabled?'on':'off');toggle.setAttribute('aria-pressed',String(pointerEnabled));if(pointerEnabled)renderPointer(false);else pointer.setAttribute('class','agent-pointer')}
-function setViewOnly(value){const url=new URL(desktop.src);url.searchParams.set('view_only',String(value));desktop.src=url}
+function setViewOnly(value){const url=new URL(desktop.src);if(url.searchParams.get('view_only')===String(value))return;url.searchParams.set('view_only',String(value));desktop.src=url}
 function counted(value,singular,plural){return value+' '+(value===1?singular:plural)}
-async function control(action){const taking=action==='take';if(taking)state.textContent='Taking control — fencing agent interactive input…';const response=await fetch('../human-control/'+action,{method:'POST'});const value=await response.json();if(!response.ok)throw new Error(value.error?.message||response.statusText);if(taking)hidePointer();setViewOnly(!taking);state.textContent=taking?'Human control active — agent input fenced; '+counted(value.preservedDesktopApplications||0,'desktop application','desktop applications')+' and '+counted(value.preservedBrowserSessions||0,'managed browser','managed browsers')+' preserved; '+counted(value.terminatedManagedProcesses||0,'session command','session commands')+' stopped. Background tasks and services remain available.':'Observer mode — agent interactive access requires a fresh lease.'}
-async function pollControlStatus(){while(polling){try{const response=await fetch('../human-control/status',{cache:'no-store'});if(response.ok){const value=await response.json();if(value.controlling&&value.reconnectDeadline){const remaining=Math.max(0,Math.ceil((Date.parse(value.reconnectDeadline)-Date.now())/1000));state.textContent='Viewer connection interrupted — reconnecting; human control releases in '+remaining+'s.'}}}catch{}await new Promise(resolve=>setTimeout(resolve,1000))}}
+async function control(action){if(controlPending)return;controlPending=true;controlRevision+=1;const taking=action==='take';if(taking)state.textContent='Taking control — fencing agent interactive input…';try{const response=await fetch('../human-control/'+action,{method:'POST'});const value=await response.json();if(!response.ok)throw new Error(value.error?.message||response.statusText);controlling=taking;if(taking)hidePointer();setViewOnly(!taking);state.textContent=taking?'Human control active — agent input fenced; '+counted(value.preservedDesktopApplications||0,'desktop application','desktop applications')+' and '+counted(value.preservedBrowserSessions||0,'managed browser','managed browsers')+' preserved; '+counted(value.terminatedManagedProcesses||0,'session command','session commands')+' stopped. Background tasks and services remain available.':'Observer mode — agent interactive access requires a fresh lease.'}finally{controlPending=false;controlRevision+=1}}
+function applyControlStatus(value){const next=value.controlling===true,changed=next!==controlling;controlling=next;setViewOnly(!next);if(next){hidePointer();if(value.reconnectDeadline){const remaining=Math.max(0,Math.ceil((Date.parse(value.reconnectDeadline)-Date.now())/1000));state.textContent='Viewer connection interrupted — reconnecting; human control releases in '+remaining+'s.'}else if(changed||state.textContent.startsWith('Viewer connection interrupted'))state.textContent='Human control active — agent interactive input fenced.'}else state.textContent='Observer mode — agent interactive access requires a fresh lease.'}
+async function pollControlStatus(){while(polling){const revision=controlRevision;try{const response=await fetch('../human-control/status',{cache:'no-store'});if(response.ok){const value=await response.json();if(!controlPending&&revision===controlRevision)applyControlStatus(value)}}catch{}await new Promise(resolve=>setTimeout(resolve,1000))}}
+
 function validState(value){return value&&Number.isFinite(value.x)&&Number.isFinite(value.y)&&typeof value.kind==='string'}
 function framebufferRect(){const stageRect=stage.getBoundingClientRect(),frameRect=desktop.getBoundingClientRect();try{const canvas=desktop.contentDocument&&desktop.contentDocument.querySelector('#noVNC_canvas');if(canvas){const rect=canvas.getBoundingClientRect();if(rect.width>0&&rect.height>0)return{left:frameRect.left-stageRect.left+rect.left,top:frameRect.top-stageRect.top+rect.top,width:rect.width,height:rect.height}}}catch{}const scale=Math.min(frameRect.width/display.width,frameRect.height/display.height),width=display.width*scale,height=display.height*scale;return{left:frameRect.left-stageRect.left+(frameRect.width-width)/2,top:frameRect.top-stageRect.top+(frameRect.height-height)/2,width,height}}
 function renderPointer(pulse){if(!pointerEnabled||!validState(currentPointer)){pointer.setAttribute('class','agent-pointer');return}const point=mapViewerPointerToCanvas(currentPointer,display,framebufferRect());if(!point){pointer.setAttribute('class','agent-pointer');return}pointer.setAttribute('transform','translate('+point.x+' '+point.y+')');pointer.setAttribute('class','agent-pointer visible '+currentPointer.kind);if(pulse){pointer.getBoundingClientRect();pointer.classList.add('pulse')}}

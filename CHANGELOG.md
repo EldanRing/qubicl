@@ -47,6 +47,19 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Web-provider startup and pipe failures return tool errors without crashing the
+  hosting service. Timeout classification and response-size enforcement remain
+  correct when process termination races with stream completion.
+- Saved services beyond the concurrency limit queue without blocking startup;
+  polling completed services keeps them visible and stoppable. Remote process
+  inspection accepts service state and retained exit/signal outcomes. Atomic
+  stop-all disables saved declarations without starting queued work, while
+  shutdown preserves declarations for the next runtime start.
+- Viewer takeover requests serialize, reconnects during automatic release wait
+  for restored input fencing, and status polling reconciles displayed control
+  mode. Interrupted gateway responses close downstream instead of hanging.
+- Browser cancellation records remain accurate when ownership changes just
+  after a successful cancellation.
 - Home restore and clone preserve saved workload settings while allocating fresh
   identities. Backup retention counts only checksum-verified archives and
   reports incomplete or unsafe entries without deleting them.

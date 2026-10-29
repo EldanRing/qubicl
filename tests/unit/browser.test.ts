@@ -283,7 +283,7 @@ test('ownership is rechecked after pointer publication and before queued semanti
   await leases.release(current);
 });
 
-test('completed dialog and permission changes remain accurately recorded when the lease ends during dispatch', async (context) => {
+test('completed dialog, download, and permission changes remain accurately recorded when the lease ends during dispatch', async (context) => {
   const fake = new FakeBrowserRuntime();
   const manager = new BrowserManager(true, { browserType: fake.browserType });
   context.after(() => manager.shutdown());
@@ -312,6 +312,16 @@ test('completed dialog and permission changes remain accurately recorded when th
   const dialog = (await manager.listDialogs()).dialogs[0]!;
   await assert.rejects(guarded(() => manager.respondDialog(dialog.id, 'accept')), { code: 'stale_lease' });
   assert.deepEqual((await manager.listDialogs()).dialogs, []);
+
+  owner = leases.acquire(60);
+  const downloads = manager as unknown as {
+    downloads: Map<string, { id: string; status: string }>;
+    activeDownloads: Map<string, { cancel(): Promise<void> }>;
+  };
+  downloads.downloads.set('active', { id: 'active', status: 'in-progress' });
+  downloads.activeDownloads.set('active', { cancel: async () => { await leases.release(owner); } });
+  await assert.rejects(guarded(() => manager.cancelDownload('active')), { code: 'stale_lease' });
+  assert.equal((await manager.listDownloads()).downloads[0]!.status, 'cancelled');
 });
 
 test('remote browser input proves current ownership through the authenticated control/session round trip', { timeout: 10_000 }, async (context) => {

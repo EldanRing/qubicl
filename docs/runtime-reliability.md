@@ -41,7 +41,7 @@ settings. Controller credentials remain excluded. Environment values cannot
 contain NUL because operating systems cannot pass those values to a process.
 
 The configured managed-task concurrency limit includes pending terminal starts
-and services waiting to restart, so opening terminals cannot bypass it. Completed
+and services in crash-restart backoff, so opening terminals cannot bypass it. Completed
 records do not consume running slots. Task lifetimes and completed-output retention
 support the full configured 30-day range without overflowing platform timers.
 Paged log reads validate against the configured per-log writer limit and allocate
@@ -75,7 +75,7 @@ connection establishes reachability, not application correctness; choose a healt
 endpoint when that distinction matters. The command can return when the first probe
 succeeds, within `yieldTimeMs`; otherwise inspect the retained process handle later.
 
-The response and task listing include `service.state`: `starting`, `ready`,
+The response and task listing include `service.state`: `queued`, `starting`, `ready`,
 `unhealthy`, or `exited`, with check time and the last probe error when available.
 Without a probe the running state is explicitly `unverified`. Probes continue after
 readiness and detect a later failure or recovery. A startup timeout marks the
@@ -89,6 +89,23 @@ never trigger a crash retry; stopping also cancels a pending backoff. Health pro
 failure alone does not restart a process. The service handle and output journal
 remain stable across retries. Existing restart-on-computer-start declarations
 persist these settings; an explicit stop removes that declaration.
+
+At runtime startup, saved services beyond the concurrent-task limit remain
+visible as `queued` and start as slots become available. Their empty `write_stdin`
+poll returns `running: false` and `terminalState: "queued"`; they have no current
+output until started. A saved service that cannot launch remains visible with
+its error. Stop it explicitly or correct the cause before the next runtime start.
+Polling a completed service preserves its management record and restart
+declaration; polling never disables or hides a service.
+
+On 0.8 runtimes, `qubicl tasks stop-all NAME --yes` blocks new admissions while it
+disables all saved service declarations and stops managed work, including queued
+and completed services. Completed ordinary task and terminal records remain
+available. It does not start queued services while stopping others.
+Executor/runtime shutdown stops work while preserving service declarations for the next
+start. When connected to an older runtime without atomic stop-all, the CLI uses
+its existing per-process stop interface; that compatibility path cannot exclude
+concurrent new admissions.
 
 ## Failed custom skill updates
 
