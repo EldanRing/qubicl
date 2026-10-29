@@ -225,17 +225,26 @@ export async function assertSbomEvidence(sbomPath, noticePath, {
   const rootPackage = (document.packages ?? []).find((entry) => entry.SPDXID === document.documentDescribes[0]);
   assert(rootPackage?.name === 'qubicl-cli' && rootPackage.versionInfo === version, 'Artifact SBOM root package name/version is invalid.');
 
-  const noticeKeys = thirdPartyNoticeKeys(await readFile(noticePath, 'utf8'));
+  assertSbomComponents(document, await readFile(noticePath, 'utf8'), { version, nativeNodeVersion });
+}
+
+export function assertSbomComponents(document, notices, { version, nativeNodeVersion } = {}) {
+  assert(document.spdxVersion === 'SPDX-2.3', 'Artifact SBOM must use SPDX 2.3.');
+  const release = /^(\d+)\.(\d+)\.\d+(?:[-+].+)?$/u.exec(version ?? '');
+  assert(release, 'Artifact SBOM requires an explicit release version.');
+  const firstPartyKeys = [
+    `qubicl-dashboard@${version}`,
+    ...(Number(release[1]) > 0 || Number(release[2]) >= 8 ? [`qubicl-workstation-skills@${version}`] : []),
+  ];
+  const noticeKeys = thirdPartyNoticeKeys(notices);
   const componentKeys = spdxPackageKeys(document);
-  const dashboardKey = `qubicl-dashboard@${version}`;
-  assert(!noticeKeys.includes(dashboardKey), 'The first-party dashboard must not be listed as a third-party dependency.');
+  assert(firstPartyKeys.every((key) => !noticeKeys.includes(key)), 'First-party components must not be listed as third-party dependencies.');
   const expected = [
     ...noticeKeys,
-    dashboardKey,
+    ...firstPartyKeys,
     ...(nativeNodeVersion ? [`node@${nativeNodeVersion}`] : []),
   ].sort();
-  assert(equalArrays(componentKeys, expected), 'Artifact SBOM components do not match THIRD_PARTY_NOTICES.txt.');
-  assert(componentKeys.includes(dashboardKey), 'Artifact SBOM omits the first-party dashboard.');
+  assert(equalArrays(componentKeys, expected), `Artifact SBOM components do not match THIRD_PARTY_NOTICES.txt. Expected ${expected.join(', ')}; found ${componentKeys.join(', ')}.`);
   assert(componentKeys.some((key) => key.startsWith('@modelcontextprotocol/node@')), 'Artifact SBOM omits @modelcontextprotocol/node.');
   assert(componentKeys.some((key) => key.startsWith('@hono/node-server@')), 'Artifact SBOM omits @hono/node-server.');
   assert(!componentKeys.some((key) => key.startsWith('@modelcontextprotocol/client@')), 'Artifact SBOM includes test-only @modelcontextprotocol/client.');

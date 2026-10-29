@@ -53,6 +53,37 @@ test('generated artifact evidence separates the first-party dashboard from third
   ));
 });
 
+test('artifact SBOM accounting requires 0.8 workstation skills without weakening third-party or legacy checks', async () => {
+  const { assertSbomComponents } = await import(moduleUrl);
+  const notices = '@hono/node-server@2.1.5\nDeclared license: MIT\n@modelcontextprotocol/node@2.1.2\nDeclared license: Apache-2.0\n';
+  const fixture = (version: string, native = false) => ({
+    spdxVersion: 'SPDX-2.3',
+    documentDescribes: ['root'],
+    packages: [
+      { name: 'qubicl-cli', versionInfo: version, SPDXID: 'root' },
+      { name: '@hono/node-server', versionInfo: '2.1.5' },
+      { name: '@modelcontextprotocol/node', versionInfo: '2.1.2' },
+      { name: 'qubicl-dashboard', versionInfo: version },
+      ...(version === '0.7.0' ? [] : [{ name: 'qubicl-workstation-skills', versionInfo: version }]),
+      ...(native ? [{ name: 'node', versionInfo: '22.23.4' }] : []),
+    ],
+  });
+  assert.doesNotThrow(() => assertSbomComponents(fixture('0.7.0'), notices, { version: '0.7.0' }));
+  assert.doesNotThrow(() => assertSbomComponents(fixture('0.8.0'), notices, { version: '0.8.0' }));
+  assert.doesNotThrow(() => assertSbomComponents(fixture('0.8.0', true), notices, { version: '0.8.0', nativeNodeVersion: '22.23.4' }));
+  const missingSkills = fixture('0.8.0');
+  missingSkills.packages = missingSkills.packages.filter(({ name }) => name !== 'qubicl-workstation-skills');
+  assert.throws(() => assertSbomComponents(missingSkills, notices, { version: '0.8.0' }), /components do not match/);
+  const unexpected = fixture('0.8.0');
+  unexpected.packages.push({ name: 'qubicl-unexpected', versionInfo: '0.8.0' });
+  assert.throws(() => assertSbomComponents(unexpected, notices, { version: '0.8.0' }), /components do not match/);
+  const missingDependency = fixture('0.8.0');
+  missingDependency.packages = missingDependency.packages.filter(({ name }) => name !== '@hono/node-server');
+  assert.throws(() => assertSbomComponents(missingDependency, notices, { version: '0.8.0' }), /components do not match/);
+  assert.throws(() => assertSbomComponents(fixture('0.8.0'), notices + 'qubicl-workstation-skills@0.8.0\nDeclared license: Apache-2.0\n', { version: '0.8.0' }), /First-party components/);
+  assert.throws(() => assertSbomComponents(fixture('0.8.0', true), notices, { version: '0.8.0', nativeNodeVersion: '24.22.1' }), /components do not match/);
+});
+
 test('compiled candidate evidence permits only explicit legacy development image identifiers', async () => {
   const { assertCompiledCandidateRefs } = await import(moduleUrl);
   const temporary = await mkdtemp(join(tmpdir(), 'qubicl-artifact-evidence-'));

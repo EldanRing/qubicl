@@ -4,11 +4,11 @@ import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { spdxPackageKeys } from './bundle-evidence.mjs';
 import { assertCatalogIdentity, normalizeRepository } from './candidate-evidence.mjs';
 import {
   assertNativeArtifact,
   assertNpmArtifact,
+  assertSbomComponents,
   extractReleaseArchive,
 } from './artifact-evidence.mjs';
 
@@ -243,31 +243,10 @@ async function packDevelopmentArtifact(destination) {
 }
 
 async function assertSbomMatchesNotices(sbomPath, noticePath, { native = false, version } = {}) {
-  const document = await jsonFile(sbomPath);
-  assert(document.spdxVersion === 'SPDX-2.3', 'Artifact SBOM must use SPDX 2.3.');
-  const noticeKeys = thirdPartyNoticeKeys(await readFile(noticePath, 'utf8'));
-  const sbomKeys = spdxPackageKeys(document);
-  const dashboardKey = `qubicl-dashboard@${version}`;
-  assert(!noticeKeys.includes(dashboardKey), 'The first-party dashboard must not be listed as a third-party dependency.');
-  const expected = [
-    ...noticeKeys,
-    dashboardKey,
-    ...(native ? sbomKeys.filter((key) => key.startsWith('node@')) : []),
-  ].sort();
-  assert(JSON.stringify(sbomKeys) === JSON.stringify(expected), 'Artifact SBOM components do not match THIRD_PARTY_NOTICES.txt.');
-  assert(sbomKeys.includes(dashboardKey), 'Artifact SBOM omits the first-party dashboard.');
-  assert(sbomKeys.some((key) => key.startsWith('@modelcontextprotocol/node@')), 'Artifact SBOM omits @modelcontextprotocol/node.');
-  assert(sbomKeys.some((key) => key.startsWith('@hono/node-server@')), 'Artifact SBOM omits @hono/node-server.');
-  assert(!sbomKeys.some((key) => key.startsWith('@modelcontextprotocol/client@')), 'Artifact SBOM includes test-only @modelcontextprotocol/client.');
-}
-
-function thirdPartyNoticeKeys(contents) {
-  const lines = contents.split(/\r?\n/);
-  const keys = [];
-  for (let index = 0; index < lines.length - 1; index += 1) {
-    if (lines[index + 1].startsWith('Declared license:')) keys.push(lines[index]);
-  }
-  return keys.sort();
+  assertSbomComponents(await jsonFile(sbomPath), await readFile(noticePath, 'utf8'), {
+    version,
+    ...(native ? { nativeNodeVersion: process.versions.node } : {}),
+  });
 }
 
 function parseOptions(args) {
