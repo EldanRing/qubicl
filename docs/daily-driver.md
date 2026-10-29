@@ -40,8 +40,13 @@ existing localhost gateway on a publication-specific origin, supports ordinary
 root paths, cookies, streams, and WebSocket upgrades, and remains available
 while the app is listening. `share_preview` creates a separate expiring remote
 credential; `revoke_preview_share` removes share access without closing owner
-access. Explicit revocation or expiry closes the corresponding active
-connections. The preview never binds the computer port directly to the host.
+access. Replacing a share invalidates its old token and closes its existing
+streams and WebSockets immediately; the new expiry applies only to the new
+share. Explicit revocation or expiry also closes the corresponding active
+connections. A failed listener inspection preserves publications until a
+successful check establishes that the app stopped. If an app interrupts an HTTP
+transfer, the preview closes the response so the client can detect the failure.
+The preview never binds the computer port directly to the host.
 
 ## Optional remote gateway
 

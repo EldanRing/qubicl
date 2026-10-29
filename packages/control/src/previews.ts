@@ -223,6 +223,7 @@ export class PreviewManager {
     }
     const access = this.previewAccess();
     if (!access.remoteBaseUrl) throw new QubiclError('preview_not_exposed', 'Remote preview access is not configured.', 409);
+    this.revokeShare(id);
     const token = randomBytes(32).toString('base64url');
     const now = new Date();
     publication.share = { tokenHash: digest(token), expiresAt: new Date(now.getTime() + expiresInSeconds * 1000).toISOString() };
@@ -400,6 +401,7 @@ export class PreviewManager {
   }
 
   private proxy(request: IncomingMessage, response: ServerResponse, publication: PortPublication, targetPath: string, scope: PreviewConnectionScope, cookieToken?: string): void {
+    const shareTokenHash = publication.share?.tokenHash;
     const headers = { ...request.headers };
     const applicationAuthorization = headers['x-qubicl-preview-authorization'];
     if (typeof applicationAuthorization === 'string') headers.authorization = applicationAuthorization;
@@ -421,6 +423,12 @@ export class PreviewManager {
     delete headers['x-qubicl-preview-host'];
     delete headers['x-qubicl-preview-proto'];
     const upstream = httpRequest({ hostname: this.targetHost, port: publication.port, method: request.method, path: targetPath, headers }, (incoming) => {
+      if (this.publications.get(publication.id) !== publication || (scope === 'share'
+        && (!publication.share || publication.share.tokenHash !== shareTokenHash || Date.parse(publication.share.expiresAt) <= Date.now()))) {
+        incoming.destroy();
+        response.destroy();
+        return;
+      }
       const releaseResponse = this.trackConnections(publication.id, scope, incoming, response);
       const outgoingHeaders = { ...incoming.headers };
       const appCookies = safeApplicationCookies(incoming.headers['set-cookie'], publication.id);
@@ -430,13 +438,25 @@ export class PreviewManager {
       if (appCookies.length || previewCookie) outgoingHeaders['set-cookie'] = [...appCookies, ...(previewCookie ? [previewCookie] : [])];
       response.writeHead(incoming.statusCode ?? 502, outgoingHeaders);
       incoming.pipe(response);
-      incoming.once('close', releaseResponse);
-      response.once('close', releaseResponse);
+      incoming.once('aborted', () => response.destroy(new Error('Preview upstream transfer was interrupted.')));
+      incoming.on('error', (error) => response.destroy(error));
+      incoming.once('close', () => {
+        if (!incoming.complete) response.destroy(new Error('Preview upstream transfer ended before completion.'));
+        releaseResponse();
+      });
+      response.once('close', () => { if (!response.writableFinished) incoming.destroy(); releaseResponse(); });
       response.once('finish', releaseResponse);
     });
     const releaseRequest = this.trackConnections(publication.id, scope, upstream);
     upstream.once('close', releaseRequest);
-    upstream.on('error', (error) => json(response, 502, { error: { code: 'preview_unavailable', message: `Published port ${publication.port} is unavailable: ${error.message}` } }));
+    upstream.on('error', (error) => {
+      if (response.destroyed) return;
+      if (response.headersSent) response.destroy(error);
+      else json(response, 502, { error: { code: 'preview_unavailable', message: `Published port ${publication.port} is unavailable: ${error.message}` } });
+    });
+    response.on('error', () => upstream.destroy());
+    response.once('close', () => { if (!response.writableFinished) upstream.destroy(); });
+    request.once('aborted', () => upstream.destroy());
     request.pipe(upstream);
   }
 
@@ -610,9 +630,12 @@ export class PreviewManager {
   }
 
   private async removeStoppedPortPublications(): Promise<void> {
-    const activePorts = new Set((await this.ports.listPorts().catch(() => [])).map(({ port }) => port));
-    for (const publication of this.publications.values()) {
-      if (publication.kind === 'port' && !activePorts.has(publication.port)) this.unpublish(publication.id);
+    const inspected = [...this.publications.values()].filter((publication) => publication.kind === 'port');
+    let activePorts: Set<number>;
+    try { activePorts = new Set((await this.ports.listPorts()).map(({ port }) => port)); }
+    catch { return; } // Failed inspection establishes no evidence that an app stopped.
+    for (const publication of inspected) {
+      if (publication.kind === 'port' && this.publications.get(publication.id) === publication && !activePorts.has(publication.port)) this.unpublish(publication.id);
     }
   }
 
@@ -648,7 +671,7 @@ export class PreviewManager {
       if (released) return;
       released = true;
       for (const connection of connections) active.delete(connection);
-      if (!active.size) this.activeConnections.delete(key);
+      if (!active.size && this.activeConnections.get(key) === active) this.activeConnections.delete(key);
     };
   }
 

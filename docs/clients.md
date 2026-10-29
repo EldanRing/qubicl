@@ -230,7 +230,11 @@ uses a publication-specific origin, forwards ordinary root paths and redirects,
 and keeps application cookies scoped to that publication. Qubicl authentication
 cookies and operator headers never reach the app. Owner access remains available
 while the listener exists; `share_preview` creates a separate expiring remote
-credential that can be revoked without closing owner access.
+credential that can be revoked without closing owner access. Creating a new
+share closes streams and WebSockets opened with the previous share; it does not
+extend their original authority. Temporary port-inspection failures preserve
+working publications, and interrupted upstream HTTP transfers close the client
+response instead of leaving it loading indefinitely.
 
 The Open Terminal compatibility proxy does not provide a WebSocket upgrade
 route. For apps using WebSockets, use the isolated local or remote preview URL

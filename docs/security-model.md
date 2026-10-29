@@ -190,7 +190,9 @@ loopback routes. Review audit exports before sharing them.
   browser security assessment.
 - Preview and restricted-egress revocation close Qubicl-managed upgraded
   connections and tunnels that were authorized by the revoked publication or
-  grant. Connections outside Qubicl's managed proxy are possible in the
+  grant. Preview share rotation also revokes the old token and closes its
+  active HTTP streams and WebSockets, preserving owner and management access.
+  Connections outside Qubicl's managed proxy are possible in the
   unrestricted `developer` profile and are outside this revocation mechanism.
 - Docker shares the host kernel; runtime/kernel escape is out of scope.
 - Docker itself is a privileged host boundary.

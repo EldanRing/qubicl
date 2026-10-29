@@ -47,6 +47,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Temporary listener-inspection failures preserve active app previews. Share
+  rotation closes the previous share's streams and WebSockets while preserving
+  owner access; interrupted upstream transfers terminate the downstream response.
 - Ownership changes after dispatch cannot trigger automatic action retries.
   Modifier setup failures release held keys; browser fill/select errors do not
   repeat input, and dialog interruptions stop the remaining action batch.
