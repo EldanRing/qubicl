@@ -21,6 +21,10 @@ test('workload packages use durable locations without inheriting host credential
   assert(env.PATH?.includes(`${env.VIRTUAL_ENV}/bin`));
   assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined);
   assert.equal(env.QUBICL_INTERNAL_KEY, undefined);
+  assert.equal(ComputerConfigSchema.safeParse({
+    ...defaultConfig().defaults, id: '00000000-0000-4000-8000-000000000001', name: 'environment',
+    createdAt: new Date().toISOString(), environment: { APP_MODE: 'invalid\0value' },
+  }).success, false);
 });
 
 test('software changes replace version pins, remove selected packages, and reset an empty recipe', async () => {

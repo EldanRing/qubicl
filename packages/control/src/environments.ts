@@ -48,11 +48,13 @@ export function workloadEnvironment(source: NodeJS.ProcessEnv, home = DEFAULT_HO
     for (const [key, value] of Object.entries(values)) {
       if (!/^[A-Z_][A-Z0-9_]*$/u.test(key) || key.startsWith('QUBICL_') || typeof value !== 'string') continue;
       if (['HOME', 'PATH', 'USER', 'LOGNAME', 'SHELL', 'LD_PRELOAD', 'NODE_OPTIONS'].includes(key)) continue;
+      if (value.includes('\0')) throw new Error('Configured workload environment values cannot contain NUL characters.');
       environment[key] = value;
     }
   }
   return environment;
 }
+
 
 /** Environment for fixed-shape desktop helper subprocesses. */
 export function desktopHelperEnvironment(source: NodeJS.ProcessEnv, home = DEFAULT_HOME): NodeJS.ProcessEnv {

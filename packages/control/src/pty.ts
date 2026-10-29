@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import { QubiclError } from './errors.js';
 import { workloadEnvironment } from './environments.js';
+import { deadlineTimer, type DeadlineTimer } from './deadline-timer.js';
 import type { LeaseProof } from './lease.js';
 import type { ProcessLifecycle, StopSignal } from './processes.js';
 
@@ -33,7 +34,7 @@ interface PtySession {
   ready: Promise<void>;
   finish: Promise<void>;
   notify: Set<() => void>;
-  cleanupTimer?: NodeJS.Timeout;
+  cleanupTimer?: DeadlineTimer;
 }
 
 export interface PtySummary {
@@ -251,7 +252,7 @@ export class PtyManager {
     if (signal !== undefined) session.signal = signal;
     finish();
     this.notify(session);
-    session.cleanupTimer = setTimeout(() => this.deleteSession(session), this.completedTtlMs);
+    session.cleanupTimer = deadlineTimer(() => this.deleteSession(session), this.completedTtlMs);
     session.cleanupTimer.unref();
     this.pruneCompleted();
   }
@@ -264,7 +265,7 @@ export class PtyManager {
 
   private deleteSession(session: PtySession): void {
     if (this.sessions.get(session.id) !== session || session.finishedAt === undefined) return;
-    if (session.cleanupTimer) clearTimeout(session.cleanupTimer);
+    session.cleanupTimer?.cancel();
     this.aggregateOutputBytes = Math.max(0, this.aggregateOutputBytes - session.output.length);
     session.output = Buffer.alloc(0);
     session.notify.clear();

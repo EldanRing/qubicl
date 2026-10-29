@@ -92,6 +92,11 @@ const [cliBuild, gatewayBuild, controlBuild] = await Promise.all([
 ]);
 
 await Promise.all([
+  build({
+    entryPoints: [fileURLToPath(new URL('../packages/control/src/workload-environment.ts', import.meta.url))],
+    outfile: fileURLToPath(new URL('computer/workload-environment.mjs', assets)),
+    bundle: true, platform: 'node', format: 'esm', target: 'node22',
+  }),
   cp(new URL('../packages/cli/assets/chromium-seccomp.json', import.meta.url), new URL('chromium-seccomp.json', assets)),
   cp(new URL('../images/dashboard/Dockerfile', import.meta.url), new URL('dashboard/Dockerfile', assets)),
   cp(new URL('../LICENSE', import.meta.url), new URL('dashboard/LICENSE', assets)),

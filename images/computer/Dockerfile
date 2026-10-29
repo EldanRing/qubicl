@@ -51,6 +51,7 @@ RUN groupmod --new-name qubicl node \
  && install -d -o qubicl -g qubicl /opt/qubicl
 
 COPY --chown=qubicl:qubicl control.mjs /opt/qubicl/control.mjs
+COPY --chown=root:root workload-environment.mjs /opt/qubicl/workload-environment.mjs
 COPY --chown=qubicl:qubicl web-provider.py /opt/qubicl/web-provider.py
 COPY --chown=root:root desktop-helper.py /opt/qubicl/desktop-helper.py
 COPY --chown=root:root artifact-render.py /opt/qubicl/artifact-render.py

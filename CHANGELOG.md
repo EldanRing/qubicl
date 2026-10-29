@@ -47,6 +47,11 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Interactive terminals retain configured workload/proxy environment and share
+  managed-task admission limits with processes and restarting services. Long
+  task and output-retention deadlines support the full configured 30-day range;
+  paginated retained-log reads honor the configured per-log size. Devcontainer
+  lifecycle hooks use the same sanitized workload environment as commands.
 - Outbound HTTP forwarding preserves website session cookies. Credential broker
   requests allow URL and escaped-path query values within their scoped pathname,
   decode compressed responses with bounded expansion and accurate body encoding,

@@ -212,7 +212,7 @@ export const ComputerConfigSchema = z.strictObject({
   ssh: SshAccessSchema.optional(),
   environment: z.record(
     z.string().regex(/^[A-Z_][A-Z0-9_]*$/),
-    z.string().max(8192),
+    z.string().max(8192).refine(value => !value.includes('\0'), 'Environment values cannot contain NUL characters.'),
   ).refine((value) => Object.keys(value).length <= 128, 'at most 128 environment entries are allowed').optional(),
   toolPolicy: ToolPolicySchema.optional(),
   skillPolicy: SkillPolicySchema.optional(),

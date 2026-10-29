@@ -63,13 +63,21 @@ chmod 0700 /home/qubicl
 runuser -u qubicl -- env -i HOME=/home/qubicl PATH=/usr/local/bin:/usr/bin:/bin /bin/bash /opt/qubicl/setup-user-software.sh
 
 run_guest_hook() {
-  local hook="$1" marker="$2" command workspace
+  local hook="$1" marker="$2" command workspace environment_file
+  local -a hook_environment
   [[ -v QUBICL_DEVCONTAINER_GUEST_JSON ]] || return 0
   command="$(QUBICL_GUEST_HOOK="$hook" node -e 'const value=JSON.parse(process.env.QUBICL_DEVCONTAINER_GUEST_JSON); const command=value.hooks?.[process.env.QUBICL_GUEST_HOOK]; if(typeof command==="string") process.stdout.write(command)')"
   [[ -n "$command" ]] || return 0
   if [[ -n "$marker" ]] && [[ -e "$marker" ]]; then return 0; fi
   workspace="$(node -e 'const value=JSON.parse(process.env.QUBICL_DEVCONTAINER_GUEST_JSON); process.stdout.write(value.workspaceFolder??"/home/qubicl")')"
-  runuser -u qubicl -- env -i HOME=/home/qubicl USER=qubicl LOGNAME=qubicl SHELL=/bin/bash PATH=/home/qubicl/.local/bin:/home/qubicl/.local/share/qubicl/python/current/bin:/usr/local/bin:/usr/bin:/bin VIRTUAL_ENV=/home/qubicl/.local/share/qubicl/python/current npm_config_prefix=/home/qubicl/.local LANG=C.UTF-8 LC_ALL=C.UTF-8 QUBICL_GUEST_WORKSPACE="$workspace" QUBICL_GUEST_COMMAND="$command" bash -lc 'cd -- "$QUBICL_GUEST_WORKSPACE" && exec bash -lc "$QUBICL_GUEST_COMMAND"'
+  environment_file="$(mktemp)"
+  if ! node /opt/qubicl/workload-environment.mjs >"$environment_file"; then
+    rm -f -- "$environment_file"
+    return 1
+  fi
+  mapfile -d '' -t hook_environment <"$environment_file"
+  rm -f -- "$environment_file"
+  runuser -u qubicl -- env -i "${hook_environment[@]}" /bin/bash -lc 'cd -- "$1" && exec /bin/bash -lc "$2"' qubicl-guest-hook "$workspace" "$command"
   if [[ -n "$marker" ]]; then runuser -u qubicl -- touch "$marker"; fi
 }
 

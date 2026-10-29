@@ -27,6 +27,7 @@ import { workloadEnvironment } from './environments.js';
 import type { LeaseProof } from './lease.js';
 import { BoundedFileSystem, BoundedPathError } from './bounded-files.js';
 import { PtyManager, type PtyManagerOptions, type PtyPage, type PtySummary } from './pty.js';
+import { deadlineTimer, type DeadlineTimer } from './deadline-timer.js';
 
 const DEFAULT_MAX_PROCESSES = 32;
 const DEFAULT_MAX_COMPLETED_PROCESSES = 64;
@@ -124,10 +125,10 @@ interface ManagedProcess {
   requestedSignal: StopSignal | null;
   terminationReason: 'stop' | 'timeout' | 'lifetime' | 'lease_revoked' | null;
   forcedKill: boolean;
-  outputCleanupTimer?: NodeJS.Timeout;
-  expiryTimer?: NodeJS.Timeout;
-  lifetimeTimer?: NodeJS.Timeout;
-  timeoutTimer?: NodeJS.Timeout;
+  outputCleanupTimer?: DeadlineTimer;
+  expiryTimer?: DeadlineTimer;
+  lifetimeTimer?: DeadlineTimer;
+  timeoutTimer?: DeadlineTimer;
   serviceOptions?: ServiceOptions;
   serviceState?: ServiceState;
   serviceTimer?: NodeJS.Timeout;
@@ -328,7 +329,9 @@ export class ProcessManager {
     this.outputWorkspace = new BoundedFileSystem(this.durableHome);
     this.terminals = new PtyManager({
       home: this.durableHome,
-      environment: this.environment,
+      environment: options.environment ?? process.env,
+      maxTerminals: this.maxProcesses,
+      completedTtlMs: this.completedTtlMs,
       ...(options.spawnUid === undefined ? undefined : { spawnUid: options.spawnUid, spawnGid: options.spawnGid }),
       ...options.pty,
     });
@@ -498,7 +501,10 @@ export class ProcessManager {
     return [...this.processes.values()].filter((managed) => !managed.completed).length + this.terminals.list().filter(({ running }) => running).length;
   }
 
-  terminalOpen(command: string, cwd: string, rows: number, columns: number, owner: LeaseProof, lifecycle: 'session' | 'task', label: string): Promise<PtySummary> {
+  async terminalOpen(command: string, cwd: string, rows: number, columns: number, owner: LeaseProof, lifecycle: 'session' | 'task', label: string): Promise<PtySummary> {
+    this.assertCapacity();
+    // PtyManager registers the child synchronously before awaiting readiness,
+    // so the next admission already counts this pending terminal.
     return this.terminals.open(command, cwd, rows, columns, owner, lifecycle, label);
   }
   terminalList(): PtySummary[] { return this.terminals.list(); }
@@ -653,9 +659,7 @@ export class ProcessManager {
     idOverride?: string,
     serviceOptions?: ServiceOptions,
   ): ManagedProcess {
-    if (this.count() >= this.maxProcesses) {
-      throw new QubiclError('process_limit', `This computer already has ${this.maxProcesses} managed processes. Read or stop an existing process before starting another.`, 429);
-    }
+    this.assertCapacity();
     const id = idOverride ?? randomBytes(12).toString('base64url');
     if (this.processes.has(id)) throw new QubiclError('process_conflict', `Managed process ${id} already exists.`, 409);
     const outputDirectory = this.ensureOutputDirectory();
@@ -742,7 +746,7 @@ export class ProcessManager {
     this.processes.set(id, managed);
     if (lifecycle === 'task') this.persistTask(managed);
     if (compatibilitySession || lifecycle === 'task') {
-      managed.lifetimeTimer = setTimeout(() => {
+      managed.lifetimeTimer = deadlineTimer(() => {
         if (managed.completed) return;
         managed.timedOut = true;
         void this.terminate(managed, 'SIGKILL', 'lifetime').catch(() => undefined);
@@ -750,7 +754,7 @@ export class ProcessManager {
       managed.lifetimeTimer.unref();
     }
     if (timeoutMs !== undefined) {
-      managed.timeoutTimer = setTimeout(() => {
+      managed.timeoutTimer = deadlineTimer(() => {
         if (managed.completed) return;
         managed.timedOut = true;
         void this.terminate(managed, 'SIGTERM', 'timeout').catch(() => undefined);
@@ -758,6 +762,12 @@ export class ProcessManager {
       managed.timeoutTimer.unref();
     }
     return managed;
+  }
+
+  private assertCapacity(): void {
+    if (this.count() >= this.maxProcesses) {
+      throw new QubiclError('process_limit', `This computer already has ${this.maxProcesses} managed processes (including tasks, services, and terminals). Read or stop an existing task before starting another.`, 429);
+    }
   }
 
   private attachChild(managed: ManagedProcess, child: ChildProcessWithoutNullStreams, finish: () => void): void {
@@ -1126,18 +1136,18 @@ export class ProcessManager {
     if (managed.serviceState) { managed.serviceState.state = 'exited'; delete managed.serviceState.nextRestartAt; }
     for (const member of processGroupMembers(managed.child.pid)) managed.observedGroupMembers.set(member.pid, member.startTime);
     managed.finishedAt = Date.now();
-    if (managed.timeoutTimer) clearTimeout(managed.timeoutTimer);
-    if (managed.lifetimeTimer) clearTimeout(managed.lifetimeTimer);
+    managed.timeoutTimer?.cancel();
+    managed.lifetimeTimer?.cancel();
     closeOutputDescriptor(managed);
     if (managed.lifecycle === 'task') this.persistTask(managed);
     this.notify(managed);
-    managed.outputCleanupTimer = setTimeout(
+    managed.outputCleanupTimer = deadlineTimer(
       () => this.cleanupOutput(managed),
       Math.max(this.outputTtlMs, managed.compatibilitySession ? this.completedTtlMs : 0),
     );
     managed.outputCleanupTimer.unref();
     if (managed.lifecycle !== 'service') {
-      managed.expiryTimer = setTimeout(() => {
+      managed.expiryTimer = deadlineTimer(() => {
         void this.discard(managed, !managed.compatibilitySession).catch(() => undefined);
       }, this.completedTtlMs);
       managed.expiryTimer.unref();
@@ -1163,9 +1173,9 @@ export class ProcessManager {
 
   private deleteRecord(managed: ManagedProcess, preserveOutput: boolean): void {
     if (this.processes.get(managed.id) !== managed) return;
-    if (managed.expiryTimer) clearTimeout(managed.expiryTimer);
-    if (managed.timeoutTimer) clearTimeout(managed.timeoutTimer);
-    if (managed.lifetimeTimer) clearTimeout(managed.lifetimeTimer);
+    managed.expiryTimer?.cancel();
+    managed.timeoutTimer?.cancel();
+    managed.lifetimeTimer?.cancel();
     this.retainedBytes -= managed.outputBytes;
     managed.outputBytes = 0;
     managed.stdout.chunks = [];
@@ -1176,10 +1186,10 @@ export class ProcessManager {
     this.processes.delete(managed.id);
     closeOutputDescriptor(managed);
     if (!preserveOutput) {
-      if (managed.outputCleanupTimer) clearTimeout(managed.outputCleanupTimer);
+      managed.outputCleanupTimer?.cancel();
       this.cleanupOutput(managed);
     } else if (!managed.outputCleanupTimer) {
-      managed.outputCleanupTimer = setTimeout(() => this.cleanupOutput(managed), this.outputTtlMs);
+      managed.outputCleanupTimer = deadlineTimer(() => this.cleanupOutput(managed), this.outputTtlMs);
       managed.outputCleanupTimer.unref();
     }
   }
@@ -1241,7 +1251,7 @@ export class ProcessManager {
     }
     if (managed.completed) return;
     if (reason !== 'timeout' && managed.timeoutTimer) {
-      clearTimeout(managed.timeoutTimer);
+      managed.timeoutTimer.cancel();
       delete managed.timeoutTimer;
     }
     if (managed.requestedSignal !== null) {
@@ -1352,7 +1362,7 @@ export class ProcessManager {
       if (!openedDirectory.isDirectory() || namedDirectory.isSymbolicLink() || !sameIdentity(identity(openedDirectory), identity(namedDirectory))) throw new Error('retained-output directory identity changed');
       descriptor = openSync(join(descriptorPath(directory), basename(outputPath)), constants.O_RDONLY | constants.O_NOFOLLOW);
       const info = fstatSync(descriptor, { bigint: true });
-      if (!info.isFile() || info.nlink !== 1n || (info.mode & 0o077n) !== 0n || info.size > BigInt(DEFAULT_MAX_FULL_OUTPUT_BYTES)) throw new Error('retained-output file is not a private bounded regular file');
+      if (!info.isFile() || info.nlink !== 1n || (info.mode & 0o077n) !== 0n || info.size > BigInt(this.maxFullOutputBytes)) throw new Error('retained-output file is not a private bounded regular file');
       closeSync(directory);
       directory = undefined;
       return {

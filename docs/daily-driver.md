@@ -132,6 +132,10 @@ human GUI takeover. Services are declared restartable; after runtime recreation
 Qubicl restarts services only, retains ordinary task records and logs, and does
 not replay arbitrary commands. Interactive terminals are bounded PTYs with
 explicit geometry, reconnectable output, input, resize, signal, and close.
+Commands and terminals receive the same configured environment and proxy settings,
+and share the configured managed-task concurrency limit. The 30-day lifetime and
+retention settings work for long-running tasks; large retained logs remain readable
+through bounded pages up to the configured output limit.
 
 ```sh
 qubicl tasks show research
@@ -206,7 +210,8 @@ are operator-owned and are not killed by an agent lease takeover.
 JSONC, paths relative to the configuration file, an image or a local Docker
 build, harmless forwarded-port metadata, and guest `onCreateCommand`,
 `updateContentCommand`, `postCreateCommand`, and `postStartCommand` hooks. Hooks
-run inside the computer. It rejects Compose, devcontainer feature plugins,
+run inside the computer with the imported workload environment and proxy settings,
+using the same sanitization as ordinary commands and terminals. It rejects Compose, devcontainer feature plugins,
 privilege/capability changes, host mounts, host hooks, and variable-substituted
 environment values. Offline import refuses implicit builds before contacting
 Docker.

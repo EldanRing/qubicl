@@ -35,6 +35,19 @@ Retained task summaries and records preserve `exitCode` and `signal` when known.
 Older records that never stored these fields still have an unknown outcome; an
 `exited` status alone does not establish success.
 
+Commands, interactive terminals and devcontainer lifecycle hooks use the same
+sanitized workload environment, including configured variables and network proxy
+settings. Controller credentials remain excluded. Environment values cannot
+contain NUL because operating systems cannot pass those values to a process.
+
+The configured managed-task concurrency limit includes pending terminal starts
+and services waiting to restart, so opening terminals cannot bypass it. Completed
+records do not consume running slots. Task lifetimes and completed-output retention
+support the full configured 30-day range without overflowing platform timers.
+Paged log reads validate against the configured per-log writer limit and allocate
+only the requested page. Whole-buffer export retains its separate explicit tool
+limit; increasing retention does not require loading a whole log into memory.
+
 ## Service readiness and bounded restarts
 
 An `exec_command` with `lifecycle: "service"` can include:
