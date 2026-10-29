@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { homedir } from 'node:os';
@@ -72,6 +73,61 @@ test('runtime image contract cache keeps supported prior gateway evidence readab
 test('stopped services use a Compose command that supports dependency suppression', () => {
   assert.deepEqual(stoppedServiceCreationArgs('gateway', false), ['up', '--no-start', '--no-deps', 'gateway']);
   assert.deepEqual(stoppedServiceCreationArgs('computer', true), ['create', 'computer']);
+});
+
+test('runtime Compose preserves literal guest hooks, environment values, and bind paths', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-runtime-$APP_MODE-'));
+  try {
+    const state = await initializeState(statePaths(root));
+    const configured: ComputerConfig = {
+      id: '00000000-0000-4000-8000-000000000323', name: 'literal-environment',
+      createdAt: new Date().toISOString(), controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
+      ...presetDefaults('workstation'),
+      environment: { APP_MODE: 'configured-review', LITERAL_VALUE: '$APP_MODE ${APP_MODE:-fallback} $$ $1 $(printf guest) $? $' },
+      devcontainer: {
+        workspaceFolder: '/home/qubicl/$APP_MODE workspace',
+        hooks: { postStartCommand: 'printf "%s" "$APP_MODE" > /home/qubicl/hook-env.txt' },
+      },
+    };
+    state.config.computers.push(configured);
+    state.secrets.computers[configured.id] = { token: 't'.repeat(43), internalKey: 'i'.repeat(43) };
+    const original = structuredClone(state.config);
+    const contentId = `sha256:${'a'.repeat(64)}` as const;
+    configured.image.contentId = contentId;
+    original.computers[0]!.image.contentId = contentId;
+    await recordRuntimeImageContracts(state, [{ kind: 'computer', contentId, viewerAuthentication: 'header-v1' }]);
+    await renderRuntime(state);
+    type Compose = { services: Record<string, { environment: Record<string, string>; volumes: Array<{ type: string; source: string; target: string }> }> };
+    const serialized = YAML.parse(await readFile(state.paths.compose, 'utf8')) as Compose;
+    const service = computerServiceName(state, configured);
+    const serializedEnvironment = serialized.services[service]!.environment;
+    assert.deepEqual(JSON.parse(serializedEnvironment.QUBICL_DEVCONTAINER_GUEST_JSON!), {
+      workspaceFolder: '/home/qubicl/$$APP_MODE workspace',
+      hooks: { postStartCommand: 'printf "%s" "$$APP_MODE" > /home/qubicl/hook-env.txt' },
+    });
+    assert.deepEqual(JSON.parse(serializedEnvironment.QUBICL_WORKLOAD_ENV_JSON!), {
+      APP_MODE: 'configured-review', LITERAL_VALUE: '$$APP_MODE $${APP_MODE:-fallback} $$$$ $$1 $$(printf guest) $$? $$',
+    });
+    assert.equal(serialized.services.gateway!.volumes.find(({ target }) => target === '/runtime')!.source, state.paths.runtime.replace('$APP_MODE', () => '$$APP_MODE'));
+    assert.deepEqual(state.config, original, 'Compose escaping must not change saved runtime semantics');
+
+    if (process.env.QUBICL_TEST_COMPOSE_CONFIG === '1') {
+      const canonical = execFileSync('docker', ['compose', '--project-directory', root, '--file', state.paths.compose, 'config', '--format', 'json'], {
+        encoding: 'utf8', timeout: 20_000, maxBuffer: 2_000_000,
+        env: { ...process.env, APP_MODE: 'host-value-must-not-be-used' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      assert(!canonical.includes('host-value-must-not-be-used'));
+      // Compose config re-escapes every dollar for a reusable output document:
+      // docker/compose cmd/compose/config.go runConfig + escapeDollarSign.
+      // Remove that output-only encoding to inspect the interpolated model.
+      const expanded = JSON.parse(canonical.replaceAll('$$', () => '$')) as Compose;
+      const environment = expanded.services[service]!.environment;
+      assert.equal(environment.QUBICL_DEVCONTAINER_GUEST_JSON, JSON.stringify(configured.devcontainer));
+      assert.equal(environment.QUBICL_WORKLOAD_ENV_JSON, JSON.stringify(configured.environment));
+      assert.equal(expanded.services.gateway!.volumes.find(({ target }) => target === '/runtime')!.source, state.paths.runtime);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('gateway runtime is hardened without arbitrary CPU or memory limits', async () => {

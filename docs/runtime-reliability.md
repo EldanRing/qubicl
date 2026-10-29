@@ -39,6 +39,9 @@ Commands, interactive terminals and devcontainer lifecycle hooks use the same
 sanitized workload environment, including configured variables and network proxy
 settings. Controller credentials remain excluded. Environment values cannot
 contain NUL because operating systems cannot pass those values to a process.
+Generated Compose files escape literal dollar signs, so guest hook variables
+expand in the guest shell and configured values or paths are not substituted
+from the host environment.
 
 The configured managed-task concurrency limit includes pending terminal starts
 and services in crash-restart backoff, so opening terminals cannot bypass it. Completed

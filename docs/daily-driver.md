@@ -248,7 +248,9 @@ JSONC, paths relative to the configuration file, an image or a local Docker
 build, harmless forwarded-port metadata, and guest `onCreateCommand`,
 `updateContentCommand`, `postCreateCommand`, and `postStartCommand` hooks. Hooks
 run inside the computer with the imported workload environment and proxy settings,
-using the same sanitization as ordinary commands and terminals. It rejects Compose, devcontainer feature plugins,
+using the same sanitization as ordinary commands and terminals. Shell variables
+in hook commands expand inside the guest; Compose does not substitute them from
+the host. It rejects Compose, devcontainer feature plugins,
 privilege/capability changes, host mounts, host hooks, and variable-substituted
 environment values. Offline import refuses implicit builds before contacting
 Docker.

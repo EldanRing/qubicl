@@ -54,6 +54,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 - Installation-wide upgrades from a development checkout resolve local image
   tags to immutable content before preview and reject tag changes before applying
   the plan; published catalog digest checks remain unchanged.
+- Generated Compose configuration preserves literal dollar signs in guest hooks,
+  configured environment values and paths instead of expanding them on the host.
 - Standalone Excel-to-CSV exports use the same typed-formula metadata and ISO
   duration values as workbook inspection instead of Python object representations.
 - Worksheet copies preserve independently editable charts, images, native tables,

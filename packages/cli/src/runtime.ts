@@ -841,7 +841,17 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
   }
 
   await writeMountedRuntimeFile(state.paths.routes, `${JSON.stringify(routes, null, 2)}\n`, 0o600);
-  await atomicWrite(state.paths.compose, YAML.stringify({ name: projectName(installationId, state.paths.root), services, networks, volumes }), 0o600);
+  await atomicWrite(state.paths.compose, YAML.stringify(composeLiteralValues({ name: projectName(installationId, state.paths.root), services, networks, volumes })), 0o600);
+}
+
+// Runtime values have already been resolved by Qubicl. Compose must not expand
+// guest shell expressions or literal environment/path values against host env.
+// Escape only values, once at serialization; mapping keys are not interpolated.
+function composeLiteralValues(value: unknown): unknown {
+  if (typeof value === 'string') return value.replaceAll('$', () => '$$');
+  if (Array.isArray(value)) return value.map(composeLiteralValues);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, composeLiteralValues(entry)]));
+  return value;
 }
 
 async function ensurePrivateRuntimeDirectory(path: string): Promise<void> {
