@@ -4,6 +4,12 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
+### Fixed
+
+- Browser snapshots continue at the first omitted control after count or byte
+  truncation, including hidden candidates, and account for frame metadata in
+  their response budget. Small pages no longer lose their continuation cursor.
+
 ## 0.7.0 - 2026-10-28
 
 ### Added

@@ -400,9 +400,11 @@ export class BrowserManager {
       const generation = ++this.referenceGeneration;
       const handles = new Set<ElementHandle<SVGElement | HTMLElement>>();
       try {
-        const candidatesWithDetails: Array<{ locator: ElementHandle<SVGElement | HTMLElement>; details: { tag: string; role: string; name: string; type: string; disabled: boolean } }> = [];
-        // Bound concurrent protocol requests while preserving DOM candidate order.
-        for (let start = 0; start < count; start += 16) {
+        const candidatesWithDetails: Array<{ index: number; locator: ElementHandle<SVGElement | HTMLElement>; details: { tag: string; role: string; name: string; type: string; disabled: boolean } }> = [];
+        let scannedCandidates = 0;
+        // Look ahead one visible candidate; hidden entries retain their DOM positions.
+        for (let start = 0; start < count && candidatesWithDetails.length <= limit; start += 16) {
+          scannedCandidates = Math.min(count, start + 16);
           const batch = await Promise.all(Array.from({ length: Math.min(16, count - start) }, async (_, offset) => {
             const index = cursor + start + offset;
             // A model ref names this exact node, not a selector that can resolve to
@@ -440,7 +442,7 @@ export class BrowserManager {
                 disabled: Boolean(input.disabled) || element.getAttribute('aria-disabled') === 'true',
               };
             }).catch(() => undefined);
-            return details ? { locator, details } : undefined;
+            return details ? { index, locator, details } : undefined;
           }));
           for (const candidate of batch) if (candidate) candidatesWithDetails.push(candidate);
         }
@@ -449,7 +451,6 @@ export class BrowserManager {
           .catch(() => ({ x: 0, y: 0 }));
         const state = await pageState(page);
         const viewportSize = browserViewportSize(page);
-        const boundedSnapshot = truncateUtf8Text(aria, Math.floor(MODEL_TEXT_BUDGET_BYTES / 2));
         const base = {
           url: truncateUtf8Text(state.url, 2048).text,
           title: truncateUtf8Text(state.title, 512).text,
@@ -458,20 +459,27 @@ export class BrowserManager {
           scroll,
           generation,
           frame: { index: frameIndex, url: truncateUtf8Text(frame.url(), 2048).text },
-          frames: frames.slice(0, 64).map((item, index) => ({ index, url: truncateUtf8Text(item.url(), 2048).text, main: item === page.mainFrame() })),
-          snapshot: boundedSnapshot.text,
+          frames: frames.slice(0, 64).map((item, index) => ({ index, url: truncateUtf8Text(item.url(), 128).text, urlTruncated: Buffer.byteLength(item.url()) > 128, main: item === page.mainFrame() })),
+          totalFrames: frames.length,
+          snapshot: '',
           scan: {
             totalCandidates,
             cursor,
-            scannedCandidates: count,
+            scannedCandidates,
             resultLimit: limit,
-            scanLimitReached: totalCandidates > cursor + count,
-            nextCursor: totalCandidates > cursor + count ? cursor + count : null,
+            scanLimitReached: scannedCandidates === MAX_SCANNED_INTERACTIVE_ELEMENTS && totalCandidates > cursor + scannedCandidates,
+            nextCursor: null as number | null,
           },
         };
+        // Metadata counts too. Reserve room for at least one bounded ref and continuation.
+        const textBudget = Math.max(0, Math.min(MODEL_TEXT_BUDGET_BYTES / 2, MODEL_TEXT_BUDGET_BYTES - Buffer.byteLength(JSON.stringify(base)) - 2048));
+        const boundedSnapshot = truncateJsonText(aria, textBudget);
+        base.snapshot = boundedSnapshot.text;
         const references = new Map<string, ElementHandle<SVGElement | HTMLElement>>();
         const refs: Record<string, unknown>[] = [];
-        for (const candidate of candidatesWithDetails.slice(0, limit)) {
+        let firstOmitted: number | undefined;
+        for (const candidate of candidatesWithDetails) {
+          if (refs.length >= limit) { firstOmitted = candidate.index; break; }
           const ref = `g${generation}e${refs.length + 1}`;
           const record = {
             ref,
@@ -485,13 +493,14 @@ export class BrowserManager {
             refs: [...refs, record],
             truncated: { snapshot: boundedSnapshot.truncated, refs: false },
           };
-          if (Buffer.byteLength(JSON.stringify(prospective)) > MODEL_TEXT_BUDGET_BYTES) break;
+          if (Buffer.byteLength(JSON.stringify(prospective)) > MODEL_TEXT_BUDGET_BYTES - 64) { firstOmitted = candidate.index; break; }
           refs.push(record);
           references.set(ref, candidate.locator);
         }
         if (epoch !== this.referenceEpoch) {
           throw new QubiclError('stale_browser_ref', 'The browser changed during the snapshot; call browser_snapshot again.', 409);
         }
+        base.scan.nextCursor = firstOmitted ?? (cursor + scannedCandidates < totalCandidates ? cursor + scannedCandidates : null);
         this.references = references;
         for (const handle of references.values()) handles.delete(handle);
         return {
@@ -499,7 +508,7 @@ export class BrowserManager {
           refs,
           truncated: {
             snapshot: boundedSnapshot.truncated,
-            refs: refs.length < candidatesWithDetails.length || totalCandidates > cursor + count,
+            refs: base.scan.nextCursor !== null,
           },
         };
       } finally {
@@ -1418,6 +1427,21 @@ function requirePageIndex(pages: Page[], index: number): Page {
 
 async function pageState(page: Page): Promise<PageState> {
   return { url: page.url().slice(0, 8192), title: (await page.title().catch(() => '')).slice(0, 512) };
+}
+
+function truncateJsonText(value: string, maximumBytes: number): { text: string; truncated: boolean } {
+  const candidate = truncateUtf8Text(value, maximumBytes);
+  if (Buffer.byteLength(JSON.stringify(candidate.text)) - 2 <= maximumBytes) return candidate;
+  let lower = 0;
+  let upper = Buffer.byteLength(candidate.text);
+  let text = '';
+  while (lower <= upper) {
+    const middle = Math.floor((lower + upper) / 2);
+    const prefix = truncateUtf8Text(candidate.text, middle).text;
+    if (Buffer.byteLength(JSON.stringify(prefix)) - 2 <= maximumBytes) { text = prefix; lower = middle + 1; }
+    else upper = middle - 1;
+  }
+  return { text, truncated: true };
 }
 
 function truncateUtf8Text(value: string, maximumBytes: number): { text: string; truncated: boolean } {

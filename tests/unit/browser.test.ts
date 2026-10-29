@@ -507,3 +507,62 @@ test('snapshot inspection overlaps protocol waits with at most sixteen candidate
   assert.equal(result.refs[0]?.ref, 'g1e1');
   assert.equal(result.refs[79]?.ref, 'g1e80');
 });
+
+
+test('snapshot continuation reaches omitted controls through limits and hidden candidates', async () => {
+  for (const [count, limit, hidden, expected] of [[300, 200, 0, 200], [2500, 200, 0, 200], [30, 10, 0, 10], [30, 10, 5, 15], [2500, 200, 2500, 2000]]) {
+    const fake = new FakeBrowserRuntime(count!, '');
+    // Short labels isolate count pagination from the independent byte budget.
+    for (const [index, node] of fake.locators.entries()) {
+      node.visible = index >= hidden!;
+      node.evaluate = async (callback) => callback({ tagName: 'BUTTON', textContent: `Button ${index}`, getAttribute: () => null } as unknown as HTMLElement);
+    }
+    const manager = new BrowserManager(true, { browserType: fake.browserType, headless: true });
+    try {
+      const first = await manager.snapshot(0, limit) as { scan: { nextCursor: number }; refs: Array<{ name: string }> };
+      assert.equal(first.scan.nextCursor, expected);
+      if (hidden! < count!) {
+        const second = await manager.snapshot(first.scan.nextCursor, limit) as { refs: Array<{ name: string }> };
+        assert.equal(second.refs[0]?.name, `Button ${expected}`);
+      }
+    } finally { await manager.shutdown(); }
+  }
+});
+
+test('byte-limited snapshots continue at the first omitted control', async () => {
+  const fake = new FakeBrowserRuntime(200, 'x'.repeat(80_000));
+  const manager = new BrowserManager(true, { browserType: fake.browserType, headless: true });
+  try {
+    const first = await manager.snapshot() as { refs: unknown[]; scan: { nextCursor: number } };
+    assert.ok(first.refs.length > 0 && first.refs.length < 200);
+    assert.equal(first.scan.nextCursor, first.refs.length);
+    const next = await manager.snapshot(first.scan.nextCursor) as { refs: Array<{ name: string }> };
+    assert.ok(next.refs[0]?.name.startsWith(`Control ${first.refs.length} `));
+  } finally { await manager.shutdown(); }
+});
+
+test('frame metadata shares the aggregate snapshot budget with text and refs', async () => {
+  const fake = new FakeBrowserRuntime(1, 'x'.repeat(80_000));
+  const connection = await fake.browserType.connectOverCDP('http://fake');
+  const page = connection.contexts()[0]!.pages()[0]! as unknown as FakePage;
+  Object.assign(page, { frames: () => Array.from({ length: 64 }, () => page) });
+  page.urlValue = 'https://example.test/' + 'a'.repeat(2020);
+  const manager = new BrowserManager(true, { browserType: fake.browserType, headless: true });
+  try {
+    const snapshot = await manager.snapshot() as { refs: unknown[] };
+    assert.ok(Buffer.byteLength(JSON.stringify(snapshot)) <= 24_000);
+    assert.equal(snapshot.refs.length, 1);
+  } finally { await manager.shutdown(); }
+});
+
+
+test('JSON escaping and Unicode stay inside the snapshot response budget', async () => {
+  const fake = new FakeBrowserRuntime(1, '\n"\\🦆'.repeat(10_000));
+  const manager = new BrowserManager(true, { browserType: fake.browserType, headless: true });
+  try {
+    const snapshot = await manager.snapshot() as { refs: unknown[]; snapshot: string };
+    assert.ok(Buffer.byteLength(JSON.stringify(snapshot)) <= 24_000);
+    assert.equal(snapshot.refs.length, 1);
+    assert.ok(!snapshot.snapshot.includes('�'));
+  } finally { await manager.shutdown(); }
+});
