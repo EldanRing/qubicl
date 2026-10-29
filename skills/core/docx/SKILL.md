@@ -9,7 +9,7 @@ Keep inputs and outputs under `/home/qubicl`. Obtain this skill's `resourceRoot`
 
 Useful helpers beneath `<resourceRoot>/scripts/`:
 
-- `docx_read.py FILE --text|--structure|--styles|--revisions`
+- `docx_read.py FILE --text|--structure|--styles|--revisions [--mode final|original|markup]`
 - `docx_create.py SPEC.json OUTPUT.docx`
 - `docx_edit.py` for text, paragraph, style, and table-cell edits
 - `docx_template.py TEMPLATE.docx VALUES.json OUTPUT.docx`
@@ -28,4 +28,6 @@ run directory with PDF, exact numbered PNGs and `manifest.json`. Read `sourceSha
 are never returned as this run's outputs. `visuallyInspected: false` is intentional:
 the tool renders; the agent performs visual review. Office rendering needs workstation.
 
-Text replacements use original matches once and preserve drawings and run properties. Edits across unsupported tabs/breaks/field structures fail explicitly. Comment anchors split text without duplicating inline objects. Ordinary reading reports `completeFinalView: false` and revision warnings when tracked changes are present, including tables and headers; do not present that extraction as the complete revised document. Resolve revisions on a copy for a final/original reading, and retain warnings for unsupported revision types.
+Text replacements use original matches once and preserve drawings and run properties. Edits across unsupported tabs/breaks/field structures fail explicitly. Comment anchors split text without duplicating inline objects.
+
+Read tracked documents with `--mode final` (default, accept revisions in memory), `--mode original` (reject them in memory), or `--mode markup` (both views and anchored revision records). Reading preserves the source file. These modes resolve inserted/deleted/moved content, paragraph marks, revised rows/cells and property snapshots across body content, nested tables, all header/footer variants, notes, comments and text boxes. Text JSON includes ordered `blocks`, `headerStories`/`footerStories`, `footnotes`, `endnotes`, `comments` and `textboxes`, alongside the compatible `body`/`tables`/`headers`/`footers` fields. Include the related stories when reviewing the whole document. Revision records identify the original package part, XML path, author/date, context and previous/current properties. Use `docx_revisions.py` only when an accepted/rejected output file is wanted; `--part` can scope a reused revision ID to one story. Text extraction reports stored field results; rendering remains the way to inspect pagination and visual appearance.

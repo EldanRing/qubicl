@@ -14,7 +14,9 @@ its hash, conversion warnings and structural validation. It never scans an old
 output directory for previously generated pages. Existing files and previous runs
 are preserved. A failed invocation removes only its own new directory.
 
-LibreOffice uses a fresh isolated profile with macros and active content disabled.
+LibreOffice uses a fresh isolated profile with macros disabled and untrusted
+external links blocked. Embedded charts remain enabled: LibreOffice's broader
+active-content switch also suppresses ordinary chart rendering.
 PDF inputs use Poppler directly. DOCX, XLSX and PPTX rendering requires LibreOffice,
 provided by workstation; unavailable tools produce `rendered: false`, no files and
 explicit guidance. Existing `pptx_render.py` delegates to this renderer while
@@ -25,6 +27,14 @@ that matters to the task. `rendered: true` means pages were generated and counte
 `visuallyInspected` and `fidelityVerified` stay false. It does not imply Word,
 PowerPoint or Excel fidelity. Fonts, pagination, graphs and embedded objects can
 render differently in LibreOffice.
+
+Office editing helpers preserve editable content before rendering: PowerPoint
+chart-slide copies own independent chart/workbook parts, and spreadsheet
+row/column edits update native tables, chart sources, drawings and dependent
+formulas. Word `docx_read.py --mode final|original|markup` reads tracked changes
+without saving the source; markup includes both views and revision locations.
+For a visual rendering of a selected Word revision view, use
+`docx_revisions.py accept-all|reject-all INPUT -o COPY.docx` and render that copy.
 
 For XLSX, the renderer first recalculates a captured copy, then renders it. The
 receipt reports cached formula counts, missing results, exact error cells and

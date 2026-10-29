@@ -28,10 +28,9 @@ Operations (repeatable where noted, applied in the order listed below):
   --recalc                      set fullCalcOnLoad so Excel/LibreOffice
                                 recomputes all formulas on next open
 
-WARNING: openpyxl does NOT shift merged-cell ranges, chart anchors, or
-formula references when rows/columns are inserted or deleted. Verify any
-sheet containing merges or formulas after structural edits — or use
-xlsx_restructure.py, which rewrites references for you.
+Row/column edits and table appends share xlsx_restructure.py's reference-aware
+transformations. Sheet renames update formula-bearing dependents throughout the
+workbook. Inspect the saved result before delivering it.
 
 Usage:
   xlsx_edit.py book.xlsx --sheet Data --set B2=42 --set C2=2026-01-01 \
@@ -42,15 +41,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from copy import copy
 import json
+import re
 import sys
 from datetime import date, datetime
 
 from openpyxl import load_workbook
 from openpyxl.comments import Comment
 from openpyxl.styles import Protection
-from openpyxl.utils import get_column_letter, range_boundaries
+from openpyxl.utils import get_column_letter, range_boundaries, quote_sheetname
 from openpyxl.workbook.defined_name import DefinedName
+from openpyxl.workbook.properties import CalcProperties
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 
@@ -89,24 +91,188 @@ def add_table(ws, spec):
     style = parts[3] if len(parts) > 3 else "TableStyleMedium9"
     table = Table(displayName=name, ref=rng)
     table.tableStyleInfo = TableStyleInfo(name=style, showRowStripes=True)
+    table._initialise_columns()
+    left, top, _, _ = range_boundaries(table.ref)
+    for offset, column in enumerate(table.tableColumns):
+        column.name = str(ws.cell(top, left+offset).value)
     ws.add_table(table)
 
 
+def rewrite_workbook_references(wb, ws, rewrite, snapshots=None):
+    """Rewrite formula-bearing dependents without moving worksheet cells."""
+    from xlsx_restructure import shift_point, shift_range
+    from xlsx_restructure_dependents import snapshot_dependents, apply_dependents
+    snapshots = snapshot_dependents(wb) if snapshots is None else snapshots
+    for sheet in wb.worksheets:
+        for row in sheet.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str) and cell.value.startswith("="):
+                    cell.value = rewrite(cell.value, sheet.title)
+                elif getattr(cell.value, "text", None):
+                    cell.value.text = rewrite(cell.value.text, sheet.title)
+                if cell.hyperlink and cell.hyperlink.location:
+                    cell.hyperlink.location = rewrite(cell.hyperlink.location, sheet.title)
+        for table in sheet.tables.values():
+            for column in table.tableColumns:
+                for attr in ("calculatedColumnFormula", "totalsRowFormula"):
+                    formula = getattr(column, attr)
+                    if formula is not None and formula.attr_text:
+                        formula.attr_text = rewrite(formula.attr_text, sheet.title)
+    for name in wb.defined_names.values():
+        if name.attr_text:
+            name.attr_text = rewrite(name.attr_text, ws.title)
+    return apply_dependents(wb, snapshots, ws, "rows", 1, 0, False,
+                            rewrite, shift_point, shift_range)
+
+
+def rewrite_range_tokens(text, callback):
+    from openpyxl.formula.tokenizer import Tokenizer
+    prefix = "" if text.startswith("=") else "="
+    tokens = Tokenizer(prefix + text).items
+    rewritten = "".join(callback(token.value) if token.subtype == "RANGE" else token.value
+                        for token in tokens)
+    return ("=" if not prefix else "") + rewritten
+
+
+def rename_sheet(wb, old, new):
+    from xlsx_restructure_dependents import snapshot_dependents
+    ws = wb[old]
+    if any(sheet is not ws and sheet.title.casefold() == new.casefold() for sheet in wb):
+        raise ValueError(f"A worksheet named {new!r} already exists")
+    snapshots = snapshot_dependents(wb)
+    if old.casefold() == new.casefold() and old != new:
+        temporary = "_qubicl_rename"
+        while temporary.casefold() in {sheet.title.casefold() for sheet in wb}:
+            temporary += "_"
+        ws.title = temporary
+    ws.title = new
+    actual = ws.title
+
+    def rewrite(text, home):
+        def token(value):
+            qualified = re.fullmatch(r"('(?:[^']|'')+'|[^!\[\]]+)!(.*)", value)
+            if not qualified:
+                return value
+            qualifier, coordinate = qualified.groups()
+            name = qualifier[1:-1].replace("''", "'") if qualifier.startswith("'") and qualifier.endswith("'") else qualifier
+            if "[" in name or "]" in name:
+                return value
+            endpoints = name.split(":")
+            replaced = [actual if endpoint.casefold() == old.casefold() else endpoint for endpoint in endpoints]
+            if replaced == endpoints:
+                return value
+            return quote_sheetname(":".join(replaced)) + "!" + coordinate
+        return rewrite_range_tokens(text, token)
+
+    rewrite_workbook_references(wb, ws, rewrite, snapshots)
+    return actual
+
+
 def table_append(ws, name, row_values):
+    from openpyxl.formula.translate import Translator
+    from xlsx_restructure import restructure_workbook, REF_RE, COORD_RE
     table = ws.tables[name]
-    min_col, min_row, max_col, max_row = range_boundaries(table.ref)
-    new_row = max_row + 1
+    left, top, right, bottom = range_boundaries(table.ref)
+    if not isinstance(row_values, list) or len(row_values) > right-left+1:
+        raise ValueError("A table row must be a JSON array no wider than the table")
+    first_data = top + int(bool(table.headerRowCount))
+    last_data = bottom - (table.totalsRowCount or 0)
+    new_row = last_data + 1
+
+    # Insert a worksheet row so unrelated data, formulas and dependents below
+    # the table cannot be overwritten. Totals rows remain below the new data.
+    restructure_workbook(ws.parent, ws, "rows", new_row, 1, False)
+    table = ws.tables[name]
+    if not table.totalsRowCount:
+        table.ref = f"{get_column_letter(left)}{top}:{get_column_letter(right)}{bottom+1}"
+    for col in range(left, right+1):
+        if last_data >= first_data:
+            ws.cell(new_row, col)._style = copy(ws.cell(last_data, col)._style)
+        formula = table.tableColumns[col-left].calculatedColumnFormula
+        if formula is not None and formula.attr_text:
+            text = formula.attr_text
+            text = text if text.startswith("=") else "=" + text
+            ws.cell(new_row, col).value = Translator(text, origin=f"{get_column_letter(col)}{first_data}").translate_formula(f"{get_column_letter(col)}{new_row}")
     for offset, value in enumerate(row_values):
-        ws.cell(row=new_row, column=min_col + offset, value=value)
-    table.ref = (f"{get_column_letter(min_col)}{min_row}:"
-                 f"{get_column_letter(max_col)}{new_row}")
+        ws.cell(new_row, left+offset).value = value
+
+    def expand_range(value):
+        a, first, b, last = range_boundaries(value)
+        if first in (top, first_data) and last == last_data and left <= a <= b <= right:
+            return f"{get_column_letter(a)}{first}:{get_column_letter(b)}{last+1}"
+        return value
+    if table.autoFilter and table.autoFilter.ref:
+        table.autoFilter.ref = expand_range(table.autoFilter.ref)
+    for state in (table.sortState, table.autoFilter.sortState if table.autoFilter else None):
+        if state:
+            state.ref = expand_range(state.ref)
+            for condition in state.sortCondition:
+                condition.ref = expand_range(condition.ref)
+
+    def expand_formula(text, home, chart_source=False):
+        def token(value):
+            original = value
+            if "[" in value:
+                return original
+            match = REF_RE.fullmatch(value)
+            if not match:
+                return original
+            if not match.group("end"):
+                if not chart_source or first_data != last_data:
+                    return original
+                value += ":" + match.group("start")
+                match = REF_RE.fullmatch(value)
+            qualifier = match.group("sheet") or ""
+            sheet = qualifier[:-1] if qualifier else home
+            if sheet.startswith("'"):
+                sheet = sheet[1:-1].replace("''", "'")
+            if sheet.casefold() != ws.title.casefold():
+                return original
+            start, end = COORD_RE.fullmatch(match.group("start")), COORD_RE.fullmatch(match.group("end"))
+            a, first, b, last = range_boundaries(match.group("start") + ":" + match.group("end"))
+            if min(first,last) not in (top,first_data) or max(first,last) != last_data or not (left <= min(a,b) <= max(a,b) <= right):
+                return original
+            start_row = first + 1 if first == last_data else first
+            end_row = last + 1 if last == last_data else last
+            # A single-row range expands its end; its start remains anchored.
+            if first == last: start_row = first
+            return (qualifier + f"{start.group(1)}{start.group(2)}{start.group(3)}{start_row}:"
+                    f"{end.group(1)}{end.group(2)}{end.group(3)}{end_row}")
+        return rewrite_range_tokens(text, token)
+
+    # A one-row chart series is commonly serialized as a single cell rather
+    # than A2:A2. Expand only series data here; ordinary scalar formulas and
+    # chart titles must remain single-cell references.
+    from openpyxl.chart.series import Series
+    from openpyxl.chart.data_source import NumRef, StrRef, MultiLevelStrRef
+    from xlsx_restructure_dependents import _walk_objects, _refresh_cache, _cells_for_reference
+    for sheet in ws.parent.worksheets:
+        for chart in sheet._charts:
+            for series in _walk_objects(chart):
+                if not isinstance(series, Series):
+                    continue
+                for attr in ("val", "cat", "xVal", "yVal", "bubbleSize"):
+                    for ref in _walk_objects(getattr(series, attr, None)):
+                        if isinstance(ref, (NumRef, StrRef, MultiLevelStrRef)) and ref.f:
+                            ref.f = expand_formula(ref.f, sheet.title, chart_source=True)
+                            _refresh_cache(ref, _cells_for_reference(ws.parent, sheet.title, ref.f), ws.parent)
+    if table.totalsRowCount:
+        totals_row = range_boundaries(table.ref)[3]
+        for offset, column in enumerate(table.tableColumns):
+            formula = column.totalsRowFormula
+            if formula is not None and formula.attr_text:
+                formula.attr_text = expand_formula(formula.attr_text, ws.title)
+            cell = ws.cell(totals_row, left+offset)
+            if isinstance(cell.value, str) and cell.value.startswith("="):
+                cell.value = expand_formula(cell.value, ws.title)
+    return new_row
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Edit an existing .xlsx workbook.",
-        epilog="Plain insert/delete does not shift merges/formula refs — "
-               "use xlsx_restructure.py for reference-aware moves.")
+        epilog="Structural edits and table appends preserve workbook references; "
+               "sheet renames update formulas and dependents.")
     ap.add_argument("file", help="path to .xlsx file")
     ap.add_argument("--sheet", help="target sheet (default: active)")
     ap.add_argument("--out", help="output path (default: edit in place)")
@@ -150,19 +316,20 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     wb = load_workbook(args.file)
+    selected_ws = wb[args.sheet] if args.sheet and args.sheet in wb.sheetnames else None
     changes = []
 
     for pair in args.rename_sheet:
         old, new = pair.split(":", 1)
-        wb[old].title = new
-        changes.append(f"rename {old}->{new}")
+        actual = rename_sheet(wb, old, new)
+        changes.append(f"rename {old}->{actual}")
     for pair in args.copy_sheet:
         src, new = pair.split(":", 1)
         copy = wb.copy_worksheet(wb[src])
         copy.title = new
         changes.append(f"copy {src}->{new}")
 
-    ws = wb[args.sheet] if args.sheet else wb.active
+    ws = selected_ws or (wb[args.sheet] if args.sheet else wb.active)
 
     if args.list_tables:
         print(json.dumps({"ok": True, "sheet": ws.title,
@@ -174,21 +341,23 @@ def main(argv=None):
                          ensure_ascii=False))
         return 0
 
+    from xlsx_restructure import restructure_workbook
+
     for arg in args.insert_rows:
         idx, n = parse_idx(arg)
-        ws.insert_rows(idx, n)
+        restructure_workbook(wb, ws, "rows", idx, n, False)
         changes.append(f"insert_rows {idx}x{n}")
     for arg in args.delete_rows:
         idx, n = parse_idx(arg)
-        ws.delete_rows(idx, n)
+        restructure_workbook(wb, ws, "rows", idx, n, True)
         changes.append(f"delete_rows {idx}x{n}")
     for arg in args.insert_cols:
         idx, n = parse_idx(arg)
-        ws.insert_cols(idx, n)
+        restructure_workbook(wb, ws, "cols", idx, n, False)
         changes.append(f"insert_cols {idx}x{n}")
     for arg in args.delete_cols:
         idx, n = parse_idx(arg)
-        ws.delete_cols(idx, n)
+        restructure_workbook(wb, ws, "cols", idx, n, True)
         changes.append(f"delete_cols {idx}x{n}")
 
     for assignment in args.set:
@@ -245,6 +414,7 @@ def main(argv=None):
                           if args.unlock else ""))
 
     if args.recalc:
+        if wb.calculation is None: wb.calculation = CalcProperties()
         wb.calculation.fullCalcOnLoad = True
         changes.append("fullCalcOnLoad")
 

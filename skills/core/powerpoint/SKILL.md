@@ -25,4 +25,19 @@ run directory with PDF, exact numbered PNGs and `manifest.json`. Read `sourceSha
 are never returned as this run's outputs. `visuallyInspected: false` is intentional:
 the tool renders; the agent performs visual review. Office rendering needs workstation.
 
-Replacement visits grouped shapes and all original matches across runs, preserving unaffected formatting. Slide duplication preserves explicit backgrounds and rejects charts even inside groups because their embedded workbook cannot be cloned independently by this helper. Footer placeholders receive unique shape IDs.
+Replacement visits grouped shapes and all original matches across runs, preserving unaffected formatting. Slide duplication copies chart XML, embedded workbooks, styles/colors, notes and media into independent parts, including nested grouped charts. Editing the duplicate leaves the source data and styles unchanged. Layout/master definitions and links to other slides remain shared presentation references; self-links target the duplicate. The chart-data command indexes charts recursively through groups. Explicit replacement of a linked chart's data creates a private embedded workbook without accessing its external source. Footer placeholders receive unique shape IDs.
+
+Chart outlines retain `type`, `categories` and flattened series `values`, and add
+`plots` with each plot's index, type, kind, categories and series. Scatter series
+include `xValues` and `yValues`; bubble series also include `bubbleSizes`. Sparse
+points retain their positions. Missing caches are read from the embedded workbook,
+including series names and date-valued coordinates, without fetching external links.
+
+Use `"plot": N` in a chart-data specification to edit a combined chart's plot
+(default `0`). Category specifications keep their existing `categories` and
+`series` mapping. For scatter or bubble replacement use
+`{"series": [{"name": "S", "xValues": [1, 2], "yValues": [3, 4], "bubbleSizes": [5, 6]}]}`;
+omit `bubbleSizes` for scatter. `update_series` may change `xValues`, `yValues`
+(or its compatible alias `values`) and `bubbleSizes` independently; omitted
+coordinates and sizes remain intact. Combined-plot edits preserve other plots and
+existing embedded worksheet formulas. An emptied plot can be populated again.

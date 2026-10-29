@@ -114,6 +114,8 @@ workstation. Other graphical presets gain native window inspection.
 
 The same development branch adds safer browser actions, guarded file saves,
 service readiness, document-preserving edits and verifiable render manifests.
+Office helpers support independent chart-slide copies, native table restructuring
+with dependent charts/formulas, and final/original/markup tracked-change reads.
 See [browser safety](https://github.com/EldanRing/qubicl/blob/main/docs/browser-control.md), [files and services](https://github.com/EldanRing/qubicl/blob/main/docs/runtime-reliability.md), and [artifact verification](https://github.com/EldanRing/qubicl/blob/main/docs/artifact-verification.md) for the implemented behavior and limits.
 
 Every preset includes native keyless `web_search`, local `web_extract`, and

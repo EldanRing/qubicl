@@ -63,14 +63,27 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 - Browser resize invalidates old geometry. Concurrent same-name downloads retain
   independent files; cancellation failures and active transfers remain tracked.
 - Spreadsheet restructuring preserves structured/external references, table
-  filters, row/column dimensions and removed validation/table ranges.
+  column schemas, calculated/totals formulas, filters and row/column dimensions.
+  Native table insert/delete edits update structured references throughout the
+  workbook. Chart sources/caches, chart/image anchors, conditional-format and
+  validation formulas, local names and print settings follow structural edits.
+  Worksheet renames update dependent references; table appends insert space to
+  preserve neighboring content, totals, calculated columns and row formatting.
 - Word replacement processes original matches once without losing inline objects;
-  comment anchoring does not duplicate images, and reading flags incomplete views
-  of tracked revisions across document parts.
+  comment anchoring does not duplicate images. Tracked-change reads now support
+  final, original and markup modes across body, tables, headers/footers, notes,
+  comments and text boxes, with anchored revision records. Accept/reject shares
+  the same projection, including paragraph, row/cell and property changes.
 - PowerPoint replacement covers mixed runs and groups; duplication preserves
-  explicit backgrounds and rejects grouped charts; footer IDs remain unique.
+  backgrounds, grouped charts, independent embedded workbooks, chart styles,
+  notes and media. Grouped chart data can be edited without changing the source
+  slide; footer IDs remain unique. Chart inspection includes scatter X/Y values,
+  bubble sizes and individual plot data. Plot-specific edits preserve the other
+  plots and existing embedded workbook formulas.
 - PDF flattening merges appearances and removes widgets/forms instead of merely
   setting read-only flags. Rendering excludes stale pages from earlier runs.
+  Office previews and artifact rendering show embedded charts while keeping
+  macros disabled and untrusted external links blocked.
 - File edit diffs are replayable, terminal/task output pagination preserves UTF-8,
   retained history includes exit codes, and failed skill updates preserve originals.
 

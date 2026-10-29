@@ -4,7 +4,36 @@ Deep reference for `docx_revisions.py` and `docx_comments.py`. Read this
 when you need to reason about the raw WordprocessingML, extend the
 scripts, or debug an unusual document. Everyday use only needs SKILL.md.
 
-## Tracked changes (w:ins / w:del)
+## Reading tracked documents
+
+`docx_read.py FILE --text --mode final` resolves revisions in an in-memory
+package and returns the accepted text. `--mode original` reconstructs the
+pre-revision view. `--mode markup` returns both under `final` and `original`,
+together with `revisions.records` anchored to the original package's XML.
+The modes also apply to `--structure` and `--styles`; reading never rewrites
+the input file.
+
+The legacy `body`, `tables`, `headers` and `footers` fields remain available.
+Use `blocks` to retain paragraph/table order and nested cell blocks. Table
+cells report `gridSpan` and `verticalMerge`. Related content is exposed as
+`headerStories`, `footerStories`, `footnotes`, `endnotes`, `comments` and
+`textboxes`; note references retain their IDs. Section records identify all
+default/first/even header/footer references and inherited references. Linked
+stories are emitted once, with their section uses listed. Text-box fallback
+representations are deduplicated. These are text/structure views, not layout
+renderings or a field recalculation engine.
+
+Each revision record includes `part`, original XML `path`, `id`, `element`,
+`type`, `scope`, author/date and text. Context includes the containing
+paragraph/cell/row path and text; property revisions include previous/current
+property XML and revision attributes. `type` retains `insertion`/`deletion`
+for the original two revision kinds; `element` always names the OOXML element.
+IDs can repeat between package parts. `docx_revisions.py accept|reject --id N
+--part word/header1.xml` targets a particular part; omitting `--part` resolves
+all matching IDs. `accept-all`/`reject-all` use the same projection engine as
+reading and preserve other package entries, including unknown parts.
+
+## Tracked-change XML
 
 Word records run-level tracked changes as wrapper elements inside a
 paragraph (`w:p`), in the `w` namespace
@@ -24,28 +53,37 @@ paragraph (`w:p`), in the `w` namespace
 
 Key facts the script relies on:
 
-- Deleted text lives in `w:delText`, not `w:t` — that is why plain text
-  extraction naturally shows the "accepted" view (insertions visible,
-  deletions hidden).
+- Deleted text lives in `w:delText`, not `w:t`. A python-docx paragraph's
+  plain `.text` also omits runs inside revision wrappers, including inserted
+  text, so it is not an accepted-view reader. Projection resolves wrappers
+  before extracting text.
 - Resolution semantics:
   - accept `w:ins` → unwrap (move child runs up, drop the wrapper)
   - reject `w:ins` → remove the wrapper and its contents
   - accept `w:del` → remove the wrapper and its contents
   - reject `w:del` → rename each `w:delText` to `w:t`, then unwrap
-- Revisions can appear anywhere block content is allowed: body, table
-  cells (nested tables too), headers, footers, text boxes. The script
-  iterates the body root plus every header/footer part root with
-  `root.iter(W+"ins", W+"del")`, which finds them at any depth.
-- `w:id` values are unique per revision *element*, but one logical edit
-  session may produce several elements. `accept`/`reject --id` acts on
-  exactly the element(s) carrying that id.
+- `moveFrom`/`moveTo` follow deletion/insertion semantics. Move range and
+  custom-XML range markers describe boundaries or markup changes; they do
+  not independently delete all text between the markers.
+- A deleted paragraph mark joins its paragraph to the following paragraph
+  in the final view. Rejecting an inserted paragraph mark joins the original
+  view. Paragraph text remains, and the surviving mark supplies properties.
+- `trPr/ins|del` applies to a whole row; `cellIns|cellDel` applies to a cell.
+  `cellMerge` restores the appropriate current/original vertical-merge state.
+- Property-change records restore the contained prior property snapshot for
+  original reads, or retain current properties for final reads. This includes
+  run/paragraph/row/cell/table/table-grid/section properties. Section snapshots
+  can change which header/footer stories belong to the original document.
+- `numberingChange` is included in revision metadata; original LISTNUM field
+  caches use its recorded original display value. Ordinary field caches are
+  read as stored, without invoking Word or changing calculation state.
+- Projection visits every Word XML package part, including body, nested table
+  cells, content controls, headers/footers, notes, comments and text boxes.
 
-Not handled by the script (detected by `docx_read.py --revisions` but
-left alone): paragraph-mark revisions (`w:rPr/w:ins` on `w:pPr`), table
-row insertions/deletions (`w:trPr/w:ins`), format-change records
-(`w:rPrChange`, `w:pPrChange`), and moves (`w:moveFrom`/`w:moveTo`).
-Moves are rare from typical editors; if present, treat the file with
-Word itself rather than guessing.
+OOXML semantics follow Microsoft's documentation on
+[paragraph marks and property snapshots](https://learn.microsoft.com/en-us/office/open-xml/word/how-to-accept-all-revisions-in-a-word-processing-document),
+[cell merge revisions](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.cellmerge),
+and [numbering changes](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.numberingchange).
 
 ## Comments
 

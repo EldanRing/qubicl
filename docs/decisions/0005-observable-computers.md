@@ -40,6 +40,19 @@ The subsequent audit implementation preserves original data when a conversion,
 edit or update cannot establish success. Dispatch receipts control automatic
 retries; operation uncertainty requires observation. File save guards and service
 readiness/restarts are optional. Render manifests identify captured source bytes
-and exact generated pages without claiming visual fidelity. Known unsupported
-Office structures must fail or produce explicit incomplete-view warnings rather
-than silently corrupting output. These choices are implemented, not release gates.
+and exact generated pages without claiming visual fidelity.
+
+The Office follow-up implements the previously restricted operations: chart-slide
+duplication copies owned package parts and workbooks independently; spreadsheet
+structure edits transform native table schemas and dependent formulas/drawings;
+Word reading projects final/original views and exposes both with anchored revision
+records in markup mode. These operations no longer use blanket refusals or
+incomplete-view warnings. Chart caches refresh from available source values;
+formula-derived values use normal workbook recalculation. Text projection and
+package preservation do not certify identical layout in every Office application.
+Office conversion blocks macros and untrusted external links separately;
+LibreOffice's broad active-content switch is not used because it also removes
+embedded charts from otherwise successful conversions. Revisit these individual
+controls when the converter changes, preserving visible chart content and testing
+that external linked images are not fetched.
+These choices are implemented, not release gates.

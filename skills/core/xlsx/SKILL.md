@@ -34,4 +34,17 @@ OOXML package parts. `recalculated: true` does not mean error-free, correct form
 or perfect Excel fidelity. Preserve the source and review formulas, formats, charts,
 print areas and the rendered pages before delivering converted workbooks.
 
-CSV imports preserve leading-zero/long identifiers and mixed-type columns; strings beginning with `=` stay literal by default, including headers. Use `--column-types '{"A":"text","B":"number"}'` for deliberate types or `--allow-formulas` only when formulas are intended. Review the conversion report. `xlsx_to_csv.py --data-only` refuses missing formula caches before writing; `--allow-missing-results` explicitly permits them and reports affected cells. Restructuring preserves structured references and shifts table filters/dimensions; deleted validation/table ranges are removed.
+CSV imports preserve leading-zero/long identifiers and mixed-type columns; strings beginning with `=` stay literal by default, including headers. Use `--column-types '{"A":"text","B":"number"}'` for deliberate types or `--allow-formulas` only when formulas are intended. Review the conversion report. `xlsx_to_csv.py --data-only` refuses missing formula caches before writing; `--allow-missing-results` explicitly permits them and reports affected cells. Restructuring supports native table column insertion/deletion, unique generated headers, calculated/totals formulas, filter criteria and sort ranges. It updates structured references throughout the workbook; deleted columns/tables become `#REF!`, while partially deleted column ranges retain surviving endpoints. Inserted table rows receive calculated-column formulas, and removing a header preserves the surviving data as a headerless table. Read the JSON transformation report and inspect the saved workbook.
+
+
+`xlsx_edit.py --rename-sheet OLD:NEW` updates worksheet references in cells,
+workbook/local names, tables, charts, validation/formatting rules and internal
+hyperlinks; external workbook links and formula string literals are preserved.
+Its row/column operations use the same reference-aware engine as
+`xlsx_restructure.py`. `--table-append NAME=ROWJSON` inserts space before the next
+row (or the totals row), preserving other content and formulas below the table.
+Appended data inherits column formatting and calculated formulas; supplied values
+replace only their corresponding columns. Totals, filters and chart series spanning the table data
+expand with the table. Fixed named ranges and row-local calculations retain
+their intended scope; structured table references include the new data. Use `--out` to retain the
+original while reviewing a structural edit.

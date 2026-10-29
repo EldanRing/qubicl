@@ -14,7 +14,7 @@ SCRIPTS = ROOT / 'skills/core'
 sys.path.insert(0, str(SCRIPTS / 'docx/scripts'))
 def module(kind, name):
     spec = importlib.util.spec_from_file_location(name, SCRIPTS / kind / 'scripts' / (name + '.py'))
-    value = importlib.util.module_from_spec(spec); spec.loader.exec_module(value); return value
+    value = importlib.util.module_from_spec(spec); sys.modules[spec.name] = value; spec.loader.exec_module(value); return value
 
 def cli(kind, name, *args, ok=True):
     result = subprocess.run([sys.executable, str(SCRIPTS / kind / 'scripts' / (name + '.py')), *map(str,args)], capture_output=True, text=True, timeout=20)
@@ -117,13 +117,18 @@ class OfficeAudit(unittest.TestCase):
         out=self.restructure(wb,'--delete-cols','2','1')
         self.assertEqual(out.active.auto_filter.filterColumn,[])
         ws.add_table(Table(displayName='Schema',ref='A1:C3'))
-        source=self.dir/'guard.xlsx'; target=self.dir/'guard-output.xlsx'; wb.save(source); target.write_bytes(b'preserve existing destination')
-        for flag, value in [('--insert-cols','B'),('--delete-cols','B')]:
-            result=cli('xlsx','xlsx_restructure',source,flag,value,'--out',target,ok=False)
-            self.assertIn('table-schema edit',result.stderr)
-            self.assertEqual(target.read_bytes(),b'preserve existing destination')
+        from openpyxl import load_workbook
+        source=self.dir/'table.xlsx'; target=self.dir/'table-output.xlsx'; wb.save(source)
+        original=source.read_bytes()
+        for flag, names, ref in [('--insert-cols',['A','Column1','B','C'],'A1:D3'),
+                                 ('--delete-cols',['A','C'],'A1:B3')]:
+            cli('xlsx','xlsx_restructure',source,flag,'B','--out',target)
+            edited=load_workbook(target); table=edited.active.tables['Schema']
+            self.assertEqual(table.ref,ref)
+            self.assertEqual([column.name for column in table.tableColumns],names)
+            self.assertEqual(source.read_bytes(),original)
 
-    def test_word_revisions_are_flagged_in_body_tables_headers(self):
+    def test_word_revisions_are_read_in_body_tables_headers(self):
         from docx import Document
         from docx.oxml import OxmlElement
         from docx.oxml.ns import qn
@@ -132,7 +137,9 @@ class OfficeAudit(unittest.TestCase):
             ins=OxmlElement('w:ins'); run=OxmlElement('w:r'); txt=OxmlElement('w:t'); txt.text='$200'; run.append(txt); ins.append(run); para._p.append(ins)
         path=self.dir/'revision.docx'; doc.save(path)
         result=json.loads(cli('docx','docx_read',path,'--text').stdout)
-        self.assertFalse(result['completeFinalView']); self.assertTrue(result['revisions']['insertions']); self.assertTrue(result['warnings'])
+        self.assertTrue(result['completeFinalView']); self.assertTrue(result['revisions']['insertions'])
+        self.assertEqual(result['body'],['Total: $200']); self.assertEqual(result['tables'],[[['$200']]])
+        self.assertEqual(result['headers'],['$200']); self.assertNotIn('warnings',result)
     def test_pptx_mixed_runs_groups_background_footer(self):
         from pptx import Presentation
         from pptx.util import Inches
@@ -146,12 +153,17 @@ class OfficeAudit(unittest.TestCase):
         edit.set_footer(slide,'footer'); ids=[s.shape_id for s in edit.iter_shapes(slide.shapes)]; self.assertEqual(len(ids),len(set(ids)))
         index=edit.duplicate_slide(prs,0); self.assertEqual(str(prs.slides[index].background.fill.fore_color.rgb),'FF0000')
         prs.save(self.dir/'deck.pptx'); reopened=Presentation(self.dir/'deck.pptx'); self.assertEqual(str(reopened.slides[1].background.fill.fore_color.rgb),'FF0000')
-    def test_grouped_chart_duplicate_is_refused_without_mutation(self):
+    def test_grouped_chart_duplicate_has_independent_data(self):
         from pptx import Presentation
         from pptx.chart.data import CategoryChartData
         from pptx.enum.chart import XL_CHART_TYPE
         prs=Presentation(); slide=prs.slides.add_slide(prs.slide_layouts[6]); data=CategoryChartData(); data.categories=['a']; data.add_series('s',[1]); group=slide.shapes.add_group_shape(); group.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED,0,0,1000,1000,data)
-        with self.assertRaises(SystemExit): module('powerpoint','pptx_edit').duplicate_slide(prs,0)
-        self.assertEqual(len(prs.slides),1)
+        edit = module('powerpoint','pptx_edit')
+        duplicate = edit.duplicate_slide(prs,0)
+        copied = next(shape.chart for shape in edit.iter_shapes(prs.slides[duplicate].shapes) if shape.has_chart)
+        data = CategoryChartData(); data.categories=['a']; data.add_series('s',[99]); copied.replace_data(data)
+        self.assertEqual(next(shape.chart for shape in edit.iter_shapes(slide.shapes) if shape.has_chart).series[0].values, (1.0,))
+        self.assertEqual(copied.series[0].values, (99.0,))
+        self.assertEqual(len(prs.slides),2)
 
 if __name__=='__main__': unittest.main()

@@ -11,6 +11,10 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pptx_chart_data import plot_record
 
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
@@ -27,18 +31,11 @@ def iter_shapes(shapes):
 
 
 def chart_info(chart):
-    info = {"type": str(chart.chart_type),
-            "categories": [str(c) for c in chart.plots[0].categories],
-            "series": []}
-    for plot in chart.plots:
-        for series in plot.series:
-            try:
-                name = series.name
-            except (AttributeError, KeyError):
-                name = None
-            info["series"].append({"name": name,
-                                   "values": list(series.values)})
-    return info
+    plots = [plot_record(plot, index) for index, plot in enumerate(chart.plots)]
+    return {"type": plots[0]["type"] if plots else None,
+            "categories": plots[0]["categories"] if plots else [],
+            "series": [dict(series, plot=plot["index"]) for plot in plots for series in plot["series"]],
+            "plots": plots}
 
 
 def slide_record(index, slide):

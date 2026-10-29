@@ -3,12 +3,9 @@
 
 Operations (repeatable / combinable):
   --replace-text OLD NEW   Replace text everywhere (slides, tables, notes).
-                           Adjacent runs with identical formatting are
-                           merged first, so matches PowerPoint split across
-                           identically-formatted runs keep their formatting.
-                           Only a match spanning genuinely different
-                           formats falls back to a paragraph rewrite with
-                           the first run's font (documented caveat).
+                           Matches may span formatted runs and grouped
+                           shapes. Unchanged text keeps its formatting;
+                           replacement text inherits its first matched run.
   --chart-data SPEC.json   Update a chart. Full replace spec:
                            {"slide": 0, "chart": 0,
                             "categories": ["Q1", "Q2"],
@@ -24,14 +21,22 @@ Operations (repeatable / combinable):
                              {"op": "rename_category", "from": "Q1",
                               "to": "Q1 FY26"},
                              {"op": "set_title", "title": "New title"}]}
+                           Optional "plot": N selects a combined-chart plot
+                           (default 0). XY/bubble full replacement uses
+                           {"series": [{"name": "S", "xValues": [1, 2],
+                             "yValues": [3, 4], "bubbleSizes": [5, 6]}]}.
+                           Omit bubbleSizes for scatter plots. update_series
+                           can change xValues, yValues/values or bubbleSizes
+                           independently; unspecified dimensions are retained.
   --swap-image SLIDE SHAPE_NAME NEW_IMAGE
                            Replace a picture's bits, keeping position/size.
   --remove-slide N         Delete slide at index N (0-based).
   --move-slide FROM TO     Reorder: move slide FROM to position TO.
   --duplicate-slide N      Append an independent deep copy of slide N
-                           (text, images, tables, shapes, notes). Refuses
-                           slides containing charts (a chart embeds an XLSX
-                           workbook part that cannot be cloned reliably).
+                           (text, images, tables, grouped shapes, charts,
+                           embedded workbooks, notes and slide properties).
+                           Layout/master definitions and external links retain
+                           their presentation-wide meaning.
   --set-background N HEX   Solid background color for slide N.
   --hyperlink N TEXT URL   Make runs containing TEXT on slide N links.
   --enable-slide-number N  Copy the layout's slide-number placeholder in.
@@ -42,14 +47,26 @@ Operations (repeatable / combinable):
 import argparse
 import copy
 import json
+import io
+import re
+from pathlib import PurePosixPath, Path
 import sys
 
 from lxml import etree
 from pptx import Presentation
-from pptx.chart.data import CategoryChartData
+from pptx.chart.data import CategoryChartData, XyChartData, BubbleChartData
+from pptx.chart.xmlwriter import SeriesXmlRewriterFactory
+from pptx.oxml import parse_xml
+from openpyxl import load_workbook, Workbook
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.oxml.ns import qn
+from pptx.opc.constants import RELATIONSHIP_TYPE as RT, RELATIONSHIP_TARGET_MODE as RTM
+from pptx.opc.package import _Relationship
+from pptx.opc.packuri import PackURI
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pptx_chart_data import plot_kind, plot_type, plot_record
 
 R_EMBED = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 
@@ -132,81 +149,153 @@ def replace_text(prs, old, new):
     return total
 
 
-def _read_chart_data(chart):
-    """Current categories and ordered (name, values) pairs of a chart."""
-    categories = [str(c) for c in chart.plots[0].categories]
-    series = []
-    for plot in chart.plots:
-        for s in plot.series:
-            try:
-                name = s.name
-            except (AttributeError, KeyError):
-                name = ""
-            series.append([name, list(s.values)])
-    return categories, series
+def _series_spec(value):
+    if isinstance(value, dict):
+        return [dict(data, name=name) if isinstance(data, dict) else {"name": name, "values": data}
+                for name, data in value.items()]
+    return [dict(series) for series in value]
+
+
+def _chart_data(kind, categories, series):
+    data = BubbleChartData() if kind == "bubble" else XyChartData() if kind == "xy" else CategoryChartData()
+    if kind == "category":
+        data.categories = categories
+        for entry in series:
+            data.add_series(entry["name"], entry["values"])
+        return data
+    for entry in series:
+        xs, ys = entry["xValues"], entry.get("yValues", entry.get("values"))
+        sizes = entry.get("bubbleSizes")
+        if ys is None or len(xs) != len(ys) or (kind == "bubble" and (sizes is None or len(xs) != len(sizes))):
+            raise ValueError("Each XY/bubble series needs equal-length xValues, yValues and (for bubbles) bubbleSizes")
+        target = data.add_series(entry["name"])
+        for index, (x, y) in enumerate(zip(xs, ys)):
+            if kind == "bubble": target.add_data_point(x, y, sizes[index])
+            else: target.add_data_point(x, y)
+    return data
+
+
+def _detach_external_workbook(chart):
+    external = chart._chartSpace.find(qn("c:externalData"))
+    if external is None: return
+    rid = external.get(R_EMBED + "id")
+    if rid and chart.part.rels[rid].is_external:
+        chart._chartSpace.remove(external)
+        chart.part.drop_rel(rid)
+
+
+def _replace_plot_data(chart, plot_index, data):
+    """Replace one plot's data without applying its type to the other plots."""
+    plot = chart.plots[plot_index]
+    isolated = copy.deepcopy(chart._chartSpace)
+    for index, element in reversed(list(enumerate(isolated.plotArea.iter_xCharts()))):
+        if index != plot_index: isolated.plotArea.remove(element)
+    target = next(isolated.plotArea.iter_xCharts())
+    if len(data):
+        if not target.sers:
+            seed = parse_xml(data.xml_bytes(plot_type(plot))).plotArea.sers[0]
+            target._insert_ser(copy.deepcopy(seed))
+        SeriesXmlRewriterFactory(plot_type(plot), data).replace_series_data(isolated)
+        generated = load_workbook(io.BytesIO(data.xlsx_blob))
+    else:
+        for series in list(target.sers): target.remove(series)
+        generated = Workbook()
+    if len(chart.plots) == 1:
+        workbook = generated
+    else:
+        existing = chart.part.chart_workbook.xlsx_part
+        workbook = load_workbook(io.BytesIO(existing.blob)) if existing is not None else Workbook()
+        source = generated.active
+        # Keep existing worksheets (including formulas feeding untouched plots)
+        # intact. A private new sheet owns this plot's replacement data.
+        destination = workbook.create_sheet(f"QubiclPlot{plot_index + 1}")
+        for row in source:
+            for cell in row:
+                copied = destination.cell(cell.row, cell.column, cell.value)
+                copied._style = copy.copy(cell._style)
+        for formula in target.xpath('.//c:f'):
+            if formula.text and "!" in formula.text:
+                formula.text = "'" + destination.title.replace("'", "''") + "'!" + formula.text.rsplit("!", 1)[1]
+    stream = io.BytesIO(); workbook.save(stream)
+    original = plot._element
+    original.getparent().replace(original, target)
+    # A new series in an earlier plot can otherwise reuse a later plot's idx.
+    other_indices = {series.idx.val for other in chart._chartSpace.plotArea.iter_xCharts()
+                     if other is not target for series in other.sers}
+    used = set(other_indices)
+    next_index = max((series.idx.val for series in chart._chartSpace.plotArea.sers), default=-1) + 1
+    for series in target.sers:
+        if series.idx.val in used:
+            series.idx.val = next_index
+            next_index += 1
+        used.add(series.idx.val)
+    for order, series in enumerate(chart._chartSpace.plotArea.sers): series.order.val = order
+    chart.part.chart_workbook.update_from_xlsx_blob(stream.getvalue())
 
 
 def update_chart(prs, spec_path):
-    """Full replace ("categories"+"series") or surgical "ops".
-
-    python-pptx can only swap a chart's entire dataset (replace_data), so
-    surgical ops are implemented as read-existing -> modify -> replace.
-    """
+    """Edit category, scatter or bubble data in the selected plot (default 0)."""
     with open(spec_path, encoding="utf-8") as fh:
         spec = json.load(fh)
     slide = prs.slides[spec.get("slide", 0)]
-    charts = [s.chart for s in slide.shapes if s.has_chart]
-    if not charts:
-        raise SystemExit(f"no chart on slide {spec.get('slide', 0)}")
+    charts = [shape.chart for shape in iter_shapes(slide.shapes) if shape.has_chart]
+    if not charts: raise ValueError(f"no chart on slide {spec.get('slide', 0)}")
     chart = charts[spec.get("chart", 0)]
-
+    plot_index = spec.get("plot", 0)
+    plot = chart.plots[plot_index]
+    record = plot_record(plot, plot_index)
+    kind, categories, series = record["kind"], record["categories"], record["series"]
+    dirty = "ops" not in spec
     if "ops" in spec:
-        categories, series = _read_chart_data(chart)
-        dirty = False
         for op in spec["ops"]:
-            kind = op["op"]
-            if kind == "update_series":
-                match = [s for s in series if s[0] == op["name"]]
-                if not match:
-                    raise SystemExit(f"no series named {op['name']!r}")
-                match[0][1] = op["values"]
+            operation = op["op"]
+            if operation in {"update_series", "remove_series", "rename_series"}:
+                matches = [entry for entry in series if entry["name"] == op["name"]]
+                if not matches: raise ValueError(f"no series named {op['name']!r}")
+                entry = matches[0]
+                if operation == "update_series":
+                    for key in ("values", "xValues", "yValues", "bubbleSizes"):
+                        if key in op: entry[key] = op[key]
+                    if "values" in op and "yValues" not in op and kind != "category": entry["yValues"] = op["values"]
+                elif operation == "remove_series": series = [entry for entry in series if entry["name"] != op["name"]]
+                else: entry["name"] = op["to"]
                 dirty = True
-            elif kind == "add_series":
-                series.append([op["name"], op["values"]])
+            elif operation == "add_series":
+                series.append({key: value for key, value in op.items() if key != "op"})
                 dirty = True
-            elif kind == "remove_series":
-                before = len(series)
-                series = [s for s in series if s[0] != op["name"]]
-                if len(series) == before:
-                    raise SystemExit(f"no series named {op['name']!r}")
+            elif operation == "rename_category":
+                index = int(op["index"]) if "index" in op else categories.index(op["from"])
+                categories[index] = op["to"]
                 dirty = True
-            elif kind == "rename_category":
-                if "index" in op:
-                    idx = int(op["index"])
-                else:
-                    if op["from"] not in categories:
-                        raise SystemExit(
-                            f"no category named {op['from']!r}")
-                    idx = categories.index(op["from"])
-                categories[idx] = op["to"]
-                dirty = True
-            elif kind == "set_title":
+            elif operation == "set_title":
                 chart.has_title = True
                 chart.chart_title.text_frame.text = op["title"]
-            else:
-                raise SystemExit(f"unknown chart op {kind!r}")
-        if dirty:
-            data = CategoryChartData()
-            data.categories = categories
-            for name, values in series:
-                data.add_series(name, values)
-            chart.replace_data(data)
-        return
+            else: raise ValueError(f"unknown chart op {operation!r}")
+    else:
+        categories = spec.get("categories", categories)
+        series = _series_spec(spec["series"])
+    if not dirty: return
+    data = _chart_data(kind, categories, series)
+    # An external workbook cannot be edited in place. Materialize every cached
+    # plot before detaching it so mixed charts keep their other visible data.
+    external = chart._chartSpace.find(qn("c:externalData"))
+    rid = external.get(R_EMBED + "id") if external is not None else None
+    linked = bool(rid and chart.part.rels[rid].is_external)
+    if linked and len(chart.plots) > 1:
+        preserved = [plot_record(other, index) for index, other in enumerate(chart.plots)]
+        _detach_external_workbook(chart)
+        for original in preserved:
+            if original["index"] == plot_index: continue
+            unchanged = _chart_data(original["kind"], original["categories"], original["series"])
+            _replace_plot_data(chart, original["index"], unchanged)
+    else:
+        _detach_external_workbook(chart)
+    _replace_plot_data(chart, plot_index, data)
 
-    data = CategoryChartData()
-    data.categories = spec["categories"]
-    for name, values in spec["series"].items():
-        data.add_series(name, values)
+
+def replace_chart_data(chart, data):
+    """Supplied data becomes a private embedded workbook, even for linked charts."""
+    _detach_external_workbook(chart)
     chart.replace_data(data)
 
 
@@ -240,53 +329,57 @@ def move_slide(prs, src, dst):
 
 
 def duplicate_slide(prs, index):
-    """Append an independent deep copy of slide `index`.
+    """Append a slide with an independent copy of its owned OPC part graph.
 
-    Copies the shape tree XML and re-creates image/media relationships on
-    the new slide part, remapping rIds. Charts are refused: each chart
-    relationship embeds a separate XLSX workbook part, and cloning that
-    graph reliably is not supported — better to refuse than corrupt.
+    Chart XML, workbooks, chart styles/colors, notes, media and other owned
+    parts are copied together. Relationship IDs remain unchanged inside each
+    copied part, including generic XML parts not modeled by python-pptx.
+    Layout/master definitions and links to other slides remain presentation
+    references; self-links and notes' slide backlinks target the duplicate.
     """
-    source = prs.slides[int(index)]
-    if any(sh.has_chart for sh in iter_shapes(source.shapes)):
-        raise SystemExit(
-            f"slide {index} contains a chart; duplication of chart slides "
-            "is not supported (chart XML embeds a workbook part that "
-            "cannot be cloned safely). Rebuild the chart on a new slide "
-            "with pptx_create.py / pptx_from_template.py instead.")
+    source = prs.slides[int(index)].part
+    package = source.package
+    used_names = {str(part.partname) for part in package.iter_parts()}
+    copied = {}
 
-    dest = prs.slides.add_slide(source.slide_layout)
-    # drop the placeholders add_slide seeded from the layout
-    for shape in list(dest.shapes):
-        shape._element.getparent().remove(shape._element)
+    def next_name(original):
+        path = PurePosixPath(str(original))
+        match = re.fullmatch(r"(.*?)([0-9]+)", path.stem)
+        stem = match.group(1) if match else path.stem + "_copy"
+        number = 1
+        while True:
+            candidate = str(path.with_name(f"{stem}{number}{path.suffix}"))
+            if candidate not in used_names:
+                used_names.add(candidate)
+                return PackURI(candidate)
+            number += 1
 
-    for shape in source.shapes:
-        dest.shapes._spTree.append(copy.deepcopy(shape._element))
+    shared_relationships = {RT.SLIDE_LAYOUT, RT.SLIDE_MASTER, RT.NOTES_MASTER, RT.SLIDE}
 
-    # re-create the source slide's part relationships on the copy
-    rid_map = {}
-    for rel in list(source.part.rels.values()):
-        if rel.reltype.endswith(("/slideLayout", "/notesSlide")):
-            continue
-        if rel.is_external:
-            new_rid = dest.part.rels.get_or_add_ext_rel(
-                rel.reltype, rel.target_ref)
-        else:
-            new_rid = dest.part.relate_to(rel.target_part, rel.reltype)
-        rid_map[rel.rId] = new_rid
+    def clone(part):
+        if part in copied:
+            return copied[part]
+        result = type(part).load(next_name(part.partname), part.content_type,
+                                 package, part.blob)
+        copied[part] = result  # Seed before recursion: notes and custom parts may cycle.
+        for rel in part.rels.values():
+            if rel.is_external:
+                target, mode = rel.target_ref, RTM.EXTERNAL
+            else:
+                original = rel.target_part
+                target = (copied[original] if original in copied else original
+                          if rel.reltype in shared_relationships else clone(original))
+                mode = RTM.INTERNAL
+            # Preserve IDs instead of rewriting XML. Binary/generic parts can
+            # own relationships too, and must retain their original references.
+            result.rels._rels[rel.rId] = _Relationship(
+                result.partname.baseURI, rel.rId, rel.reltype, mode, target)
+        return result
 
-    if source._element.cSld.bg is not None:
-        dest._element.cSld.insert(0, copy.deepcopy(source._element.cSld.bg))
-
-    for el in dest._element.iter():
-        for attr, val in el.attrib.items():
-            if attr.startswith(R_EMBED) and val in rid_map:
-                el.set(attr, rid_map[val])
-
-    if source.has_notes_slide:
-        dest.notes_slide.notes_text_frame.text = (
-            source.notes_slide.notes_text_frame.text)
-    return len(prs.slides._sldIdLst) - 1
+    duplicate = clone(source)
+    rid = prs.part.relate_to(duplicate, RT.SLIDE)
+    prs.slides._sldIdLst.add_sldId(rid)
+    return len(prs.slides) - 1
 
 
 def set_background(slide, hex_color):

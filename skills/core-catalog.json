@@ -119,11 +119,12 @@
         "scripts/docx_create.py",
         "scripts/docx_edit.py",
         "scripts/docx_read.py",
+        "scripts/docx_revision_view.py",
         "scripts/docx_revisions.py",
         "scripts/docx_template.py",
         "scripts/docx_validate.py"
       ],
-      "sha256": "2c60778981a342e79d93f3eca0b8759a369536eccedff2ba907a2fd323170873",
+      "sha256": "4a2ef832185b0d000b45306822bf01ea6e8f1114b22622f10e9d72518565dd51",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",
@@ -160,9 +161,10 @@
         "scripts/xlsx_read.py",
         "scripts/xlsx_recalc.py",
         "scripts/xlsx_restructure.py",
+        "scripts/xlsx_restructure_dependents.py",
         "scripts/xlsx_to_csv.py"
       ],
-      "sha256": "ef50a1a126a4c60a60bee1180254b43f201666da783471682cd77ca4623ae25c",
+      "sha256": "e942402c97503da34f85cba9de798c54cb31fa9c63339f9fbf1222f8d9afd69f",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",
@@ -192,13 +194,14 @@
       "files": [
         "LICENSE",
         "SKILL.md",
+        "scripts/pptx_chart_data.py",
         "scripts/pptx_create.py",
         "scripts/pptx_edit.py",
         "scripts/pptx_from_template.py",
         "scripts/pptx_read.py",
         "scripts/pptx_render.py"
       ],
-      "sha256": "c6d02ec198f09bc6bd0d7aa988d6b38a08ebd31fbb8c9adcd393277efcd97b04",
+      "sha256": "f553da85c5afff4ee71629d8f29ff95f906c96f9cbf476852a23ccd8604396d3",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",

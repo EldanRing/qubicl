@@ -46,11 +46,13 @@ export class OfficePreviewManager {
       if (signal.aborted) throw cancelled();
       const profile = join(directory, 'profile');
       await mkdir(join(profile, 'user'), { recursive: true, mode: 0o700 });
-      // A fresh profile must not inherit the user's macro trust or link-update settings.
+      // Disable macros and remote links without disabling embedded chart rendering.
+      // LibreOffice's broader DisableActiveContent also hides ordinary charts.
       await writeFile(join(profile, 'user', 'registrymodifications.xcu'), `<?xml version="1.0"?>
 <oor:items xmlns:oor="http://openoffice.org/2001/registry">
-<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="DisableMacrosExecution" oor:op="fuse"><value>true</value></prop><prop oor:name="DisableActiveContent" oor:op="fuse"><value>true</value></prop><prop oor:name="BlockUntrustedRefererLinks" oor:op="fuse"><value>true</value></prop></item>
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="DisableMacrosExecution" oor:op="fuse"><value>true</value></prop><prop oor:name="BlockUntrustedRefererLinks" oor:op="fuse"><value>true</value></prop></item>
 <item oor:path="/org.openoffice.Office.Writer/Content/Update"><prop oor:name="Link" oor:op="fuse"><value>2</value></prop></item>
+<item oor:path="/org.openoffice.Office.Calc/Content/Update"><prop oor:name="Link" oor:op="fuse"><value>2</value></prop></item>
 </oor:items>`, { mode: 0o600, flag: 'wx' });
       const input = join(directory, `document${extension}`);
       await writeFile(input, data, { mode: 0o600, flag: 'wx' });
