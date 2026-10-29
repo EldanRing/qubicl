@@ -1,5 +1,6 @@
 import { lstat, mkdir, realpath, rm } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { basename, join, relative, resolve, sep } from 'node:path';
 import { lookup } from 'node:dns/promises';
 import type {
@@ -9,6 +10,7 @@ import type {
   Dialog,
   Download,
   ElementHandle,
+  Frame,
   Page,
 } from 'playwright-core';
 import { MODEL_TEXT_BUDGET_BYTES } from '@qubicl/core';
@@ -16,6 +18,7 @@ import { QubiclError } from './errors.js';
 import { BrowserReader, type BrowserReadInput } from './browser-reading.js';
 import { isGloballyRoutableIp } from './network-address.js';
 import type { ViewerPointerAction, ViewerPointerUpdate } from './viewer-actions.js';
+import type { LeaseProof } from './lease.js';
 
 const DEFAULT_HOME = '/home/qubicl';
 const DEFAULT_ENDPOINT = 'http://127.0.0.1:9222';
@@ -23,6 +26,7 @@ const VIEWPORT_WIDTH = 1440;
 const VIEWPORT_HEIGHT = 900;
 const DEFAULT_MAX_AGENT_TABS = 24;
 const MAX_INTERACTIVE_ELEMENTS = 200;
+const MAX_RETAINED_REFERENCES = 6_400;
 const MAX_SCANNED_INTERACTIVE_ELEMENTS = 2_000;
 const MAX_COMPUTER_ACTIONS = 20;
 const MAX_COMPUTER_BATCH_MS = 30_000;
@@ -176,6 +180,8 @@ export class BrowserManager {
   private connectedBrowser: Browser | undefined;
   private activePage: Page | undefined;
   private references = new Map<string, ElementHandle<SVGElement | HTMLElement>>();
+  private readonly referenceFrames = new Map<string, Frame>();
+  private readonly inputOwnership = new AsyncLocalStorage<{ owner: LeaseProof | undefined; verify: () => void | Promise<void> }>();
   private referenceGeneration = 0;
   private readonly reader = new BrowserReader();
   private referenceEpoch = 0;
@@ -210,6 +216,25 @@ export class BrowserManager {
     this.publishViewerPointer = options.publishViewerPointer;
   }
 
+  // Async-local state follows operations through the browser queue without one
+  // caller's proof replacing another's. RemoteBrowserManager forwards the proof
+  // and the session runner installs its own authoritative verifier.
+  withInputOwnership<T>(owner: LeaseProof | undefined, verify: () => void | Promise<void>, operation: () => Promise<T>): Promise<T> {
+    return this.inputOwnership.run({ owner, verify }, operation);
+  }
+
+  protected inputOwner(): LeaseProof | undefined {
+    return this.inputOwnership.getStore()?.owner;
+  }
+
+  private async dispatchInput<T>(operation: () => Promise<T>): Promise<T> {
+    const ownership = this.inputOwnership.getStore();
+    await ownership?.verify();
+    const result = await operation();
+    await ownership?.verify();
+    return result;
+  }
+
   count(): number {
     return this.contextPromise ? 1 : 0;
   }
@@ -241,7 +266,7 @@ export class BrowserManager {
       const record = this.downloads.get(id);
       if (!record) throw new QubiclError('browser_download_not_found', `Browser download ${id} was not found.`, 404);
       const download = this.activeDownloads.get(id);
-      if (download) await download.cancel();
+      if (download) await this.dispatchInput(() => download.cancel());
       if (record.status === 'in-progress') {
         record.status = 'cancelled';
         record.completedAt = new Date().toISOString();
@@ -264,7 +289,7 @@ export class BrowserManager {
       }
       const page = await this.getPage();
       const locator = await this.referencedElement(ref);
-      await locator.setInputFiles(selected);
+      await this.dispatchInput(() => locator.setInputFiles(selected));
       return { ...await pageState(page), uploaded: selected.map((path) => relative(this.home, path)) };
     });
   }
@@ -277,9 +302,11 @@ export class BrowserManager {
     return (async () => {
       const pending = this.dialogs.get(id);
       if (!pending) throw new QubiclError('browser_dialog_not_found', `Browser dialog ${id} is no longer pending.`, 404);
-      if (action === 'accept') await pending.dialog.accept(promptText);
-      else await pending.dialog.dismiss();
-      this.dialogs.delete(id);
+      await this.dispatchInput(async () => {
+        if (action === 'accept') await pending.dialog.accept(promptText);
+        else await pending.dialog.dismiss();
+        this.dialogs.delete(id);
+      });
       return { id, action: action === 'accept' ? 'accepted' as const : 'dismissed' as const };
     })();
   }
@@ -294,14 +321,21 @@ export class BrowserManager {
       if (permissions.some((permission) => !allowed.has(permission))) throw new QubiclError('browser_permission_invalid', 'Select a supported browser permission.', 400);
       const context = await this.getContext();
       if (clear) {
-        if (scope === 'context') this.permissionGrants.clear();
-        else this.permissionGrants.delete(origin);
-        await context.clearPermissions();
-        for (const [other, grants] of this.permissionGrants) await context.grantPermissions(grants, { origin: other });
+        const retained = scope === 'context' ? [] : [...this.permissionGrants].filter(([other]) => other !== origin);
+        await this.dispatchInput(async () => {
+          await context.clearPermissions();
+          this.permissionGrants.clear();
+        });
+        for (const [other, grants] of retained) await this.dispatchInput(async () => {
+          await context.grantPermissions(grants, { origin: other });
+          this.permissionGrants.set(other, grants);
+        });
       }
       if (permissions.length) {
-        await context.grantPermissions(permissions, { origin });
-        this.permissionGrants.set(origin, [...new Set([...(this.permissionGrants.get(origin) ?? []), ...permissions])]);
+        await this.dispatchInput(async () => {
+          await context.grantPermissions(permissions, { origin });
+          this.permissionGrants.set(origin, [...new Set([...(this.permissionGrants.get(origin) ?? []), ...permissions])]);
+        });
       }
       return { origin, permissions: this.permissionGrants.get(origin) ?? [], cleared: clear, scope };
     });
@@ -315,7 +349,7 @@ export class BrowserManager {
     return this.enqueue(async () => {
       const page = await this.getPage();
       await this.updateGeometry(page);
-      await page.setViewportSize({ width, height });
+      await this.dispatchInput(() => page.setViewportSize({ width, height }));
       const geometryGeneration = await this.updateGeometry(page);
       return { ...await pageState(page), viewport: { width, height, deviceScaleFactor: 1 }, geometryGeneration };
     });
@@ -324,7 +358,7 @@ export class BrowserManager {
   navigate(url: string): Promise<PageState> {
     return this.enqueue(async () => {
       const page = await this.getPage();
-      await page.goto(safeHttpUrl(url), { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await this.dispatchInput(() => page.goto(safeHttpUrl(url), { waitUntil: 'domcontentloaded', timeout: 30_000 }));
       this.clearReferences();
       return pageState(page);
     });
@@ -411,7 +445,6 @@ export class BrowserManager {
         '[role=menuitem]',
         '[role=option]',
       ].join(',');
-      this.clearReferences();
       const epoch = this.referenceEpoch;
       const candidates = frame.locator(selector);
       const totalCandidates = await candidates.count();
@@ -481,6 +514,7 @@ export class BrowserManager {
           geometryGeneration: await this.updateGeometry(page),
           scroll,
           generation,
+          referenceRetention: { maxElements: MAX_RETAINED_REFERENCES, eviction: 'least-recently-observed' },
           frame: { index: frameIndex, url: truncateUtf8Text(frame.url(), 2048).text },
           frames: frames.slice(frameCursor, frameCursor + 64).map((item, index) => ({ index: frameCursor + index, url: truncateUtf8Text(item.url(), 128).text, urlTruncated: Buffer.byteLength(item.url()) > 128, main: item === page.mainFrame() })),
           totalFrames: frames.length,
@@ -499,12 +533,23 @@ export class BrowserManager {
         const textBudget = Math.max(0, Math.min(MODEL_TEXT_BUDGET_BYTES / 2, MODEL_TEXT_BUDGET_BYTES - Buffer.byteLength(JSON.stringify(base)) - 2048));
         const boundedSnapshot = truncateJsonText(aria, textBudget);
         base.snapshot = boundedSnapshot.text;
+        // Compare node identity in one frame evaluation. An unchanged passive
+        // snapshot reuses the original ref and handle, instead of ageing it out
+        // or retaining duplicate handles for the same control.
+        const previous = [...this.references].filter(([ref]) => this.referenceFrames.get(ref) === frame);
+        const reusedRefs = previous.length ? await frame.evaluate(({ observed, retained }) => {
+          const byNode = new Map(retained.map(({ ref, node }) => [node, ref]));
+          return observed.map((node) => byNode.get(node) ?? null);
+        }, {
+          observed: candidatesWithDetails.map(({ locator }) => locator),
+          retained: previous.map(([ref, node]) => ({ ref, node })),
+        }) : [];
         const references = new Map<string, ElementHandle<SVGElement | HTMLElement>>();
         const refs: Record<string, unknown>[] = [];
         let firstOmitted: number | undefined;
-        for (const candidate of candidatesWithDetails) {
+        for (const [candidateIndex, candidate] of candidatesWithDetails.entries()) {
           if (refs.length >= limit) { firstOmitted = candidate.index; break; }
-          const ref = `g${generation}e${refs.length + 1}`;
+          const ref = reusedRefs[candidateIndex] ?? `g${generation}e${refs.length + 1}`;
           const record = {
             ref,
             role: candidate.details.role || candidate.details.tag,
@@ -519,13 +564,24 @@ export class BrowserManager {
           };
           if (Buffer.byteLength(JSON.stringify(prospective)) > MODEL_TEXT_BUDGET_BYTES - 64) { firstOmitted = candidate.index; break; }
           refs.push(record);
-          references.set(ref, candidate.locator);
+          references.set(ref, this.references.get(ref) ?? candidate.locator);
         }
         if (epoch !== this.referenceEpoch) {
           throw new QubiclError('stale_browser_ref', 'The browser changed during the snapshot; call browser_snapshot again.', 409);
         }
         base.scan.nextCursor = firstOmitted ?? (cursor + scannedCandidates < totalCandidates ? cursor + scannedCandidates : null);
-        this.references = references;
+        for (const [ref, handle] of references) {
+          this.references.delete(ref);
+          this.references.set(ref, handle);
+          this.referenceFrames.set(ref, frame);
+        }
+        while (this.references.size > MAX_RETAINED_REFERENCES) {
+          const oldest = this.references.keys().next().value!;
+          const handle = this.references.get(oldest)!;
+          this.references.delete(oldest);
+          this.referenceFrames.delete(oldest);
+          void handle.dispose().catch(() => undefined);
+        }
         for (const handle of references.values()) handles.delete(handle);
         return {
           ...base,
@@ -560,7 +616,7 @@ export class BrowserManager {
       const locator = await this.referencedElement(ref);
       // Playwright clicks scroll refs into view. Do that explicitly before
       // sampling the box so the viewer receipt describes the actual target.
-      await locator.scrollIntoViewIfNeeded({ timeout: 15_000 });
+      await this.dispatchInput(() => locator.scrollIntoViewIfNeeded({ timeout: 15_000 }));
       const box = await locator.boundingBox().catch(() => null);
       const pointer = box
         ? await browserViewerPointer(page, {
@@ -572,7 +628,7 @@ export class BrowserManager {
         : undefined;
       const publication = pointer ? await this.beginViewerPointer(pointer, generation) : undefined;
       try {
-        await locator.click({ button, timeout: 15_000 });
+        await this.dispatchInput(() => locator.click({ button, timeout: 15_000 }));
         if (publication) await this.finishViewerPointer(publication, generation!, 'confirm');
       } catch (error) {
         if (publication) await this.finishViewerPointer(publication, generation!, 'cancel');
@@ -587,13 +643,13 @@ export class BrowserManager {
     return this.act(async (page) => {
       const locator = await this.referencedElement(ref);
       if (clear) {
-        await locator.fill(text);
+        await this.dispatchInput(() => locator.fill(text));
       } else {
-        await locator.click();
-        await locator.press('End').catch(() => undefined);
-        await page.keyboard.type(text);
+        await this.dispatchInput(() => locator.click());
+        await this.dispatchInput(() => locator.press('End').catch(() => undefined));
+        await this.dispatchInput(() => page.keyboard.type(text));
       }
-      if (submit) await locator.press('Enter');
+      if (submit) await this.dispatchInput(() => locator.press('Enter'));
       return page;
     });
   }
@@ -602,22 +658,24 @@ export class BrowserManager {
     return this.act(async (page) => {
       const locator = await this.referencedElement(ref);
       const hasLabel = await locator.evaluate((node, label) => Array.from((node as HTMLSelectElement).options ?? []).some((option) => option.label === label), value);
-      await locator.selectOption(hasLabel ? { label: value } : { value });
+      await this.dispatchInput(() => locator.selectOption(hasLabel ? { label: value } : { value }));
       return page;
     });
   }
 
   press(key: string, ref?: string): Promise<PageState> {
     return this.act(async (page) => {
-      if (ref) await (await this.referencedElement(ref)).press(key);
-      else await page.keyboard.press(key);
+      if (ref) {
+        const locator = await this.referencedElement(ref);
+        await this.dispatchInput(() => locator.press(key));
+      } else await this.dispatchInput(() => page.keyboard.press(key));
       return page;
     });
   }
 
   scroll(direction: 'up' | 'down', amount: number): Promise<PageState> {
     return this.act(async (page) => {
-      await page.mouse.wheel(0, direction === 'up' ? -amount : amount);
+      await this.dispatchInput(() => page.mouse.wheel(0, direction === 'up' ? -amount : amount));
       return page;
     });
   }
@@ -625,15 +683,15 @@ export class BrowserManager {
   history(action: 'back' | 'forward' | 'reload'): Promise<PageState> {
     return this.act(async (page) => {
       if (action === 'back') {
-        const response = await page.goBack({ waitUntil: 'domcontentloaded', timeout: 30_000 });
+        const response = await this.dispatchInput(() => page.goBack({ waitUntil: 'domcontentloaded', timeout: 30_000 }));
         if (!response) throw new QubiclError('browser_no_history', 'This tab has no earlier history entry.', 409);
       }
       if (action === 'forward') {
-        const response = await page.goForward({ waitUntil: 'domcontentloaded', timeout: 30_000 });
+        const response = await this.dispatchInput(() => page.goForward({ waitUntil: 'domcontentloaded', timeout: 30_000 }));
         if (!response) throw new QubiclError('browser_no_history', 'This tab has no later history entry.', 409);
       }
       if (action === 'reload') {
-        const response = await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
+        const response = await this.dispatchInput(() => page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 }));
         if (!response) throw new QubiclError('browser_navigation_failed', 'The reload completed without a main-document response.', 502);
       }
       this.clearReferences();
@@ -659,7 +717,7 @@ export class BrowserManager {
     return this.enqueue(async () => {
       const pages = (await this.getContext()).pages();
       const page = this.requireTab(pages, target);
-      await page.bringToFront();
+      await this.dispatchInput(() => page.bringToFront());
       this.setActivePage(page);
       return pageState(page);
     });
@@ -671,10 +729,10 @@ export class BrowserManager {
       if (context.pages().length >= this.maxTabs) {
         throw new QubiclError('browser_tab_limit', `The browser already has ${context.pages().length} tabs, which reaches this computer's configured limit of ${this.maxTabs}. Close a tab or raise browser.maxTabs before an agent opens another.`, 429);
       }
-      const page = await context.newPage();
+      const page = await this.dispatchInput(() => context.newPage());
       await this.preparePage(context, page);
       this.setActivePage(page);
-      if (url) await page.goto(safeHttpUrl(url), { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      if (url) await this.dispatchInput(() => page.goto(safeHttpUrl(url), { waitUntil: 'domcontentloaded', timeout: 30_000 }));
       await this.enforceTabLimit(context, page);
       return pageState(page);
     });
@@ -687,9 +745,9 @@ export class BrowserManager {
       const resolvedTarget = target === -1 ? Math.max(0, pages.indexOf(this.activePage ?? pages.at(-1)!)) : target;
       const page = this.requireTab(pages, resolvedTarget);
       const wasActive = page === this.activePage;
-      await page.close();
+      await this.dispatchInput(() => page.close());
       this.pageLastActive.delete(page);
-      if (!context.pages().length) this.setActivePage(await context.newPage());
+      if (!context.pages().length) this.setActivePage(await this.dispatchInput(() => context.newPage()));
       else if (wasActive) this.setActivePage(context.pages().at(-1));
       this.clearReferences();
       return { tabs: await this.listTabs() };
@@ -702,13 +760,16 @@ export class BrowserManager {
       // Keep one target alive while resetting. Chromium may tear down or reject
       // Target.createTarget after its final page is closed, especially over CDP.
       const previousPages = context.pages();
-      const page = await context.newPage();
+      const page = await this.dispatchInput(() => context.newPage());
       await this.preparePage(context, page);
       this.setActivePage(page);
       const failedToClose: string[] = [];
       for (const previous of previousPages) {
-        try { await previous.close(); }
-        catch { failedToClose.push(this.tabIds.get(previous) ?? 'unknown'); }
+        try { await this.dispatchInput(() => previous.close()); }
+        catch (error) {
+          if (error instanceof QubiclError) throw error;
+          failedToClose.push(this.tabIds.get(previous) ?? 'unknown');
+        }
       }
       return { ...await pageState(page), resetComplete: failedToClose.length === 0, failedToClose };
     });
@@ -779,7 +840,7 @@ export class BrowserManager {
         const pointer = await browserViewerPointerForAction(page, action);
         const publication = pointer ? await this.beginViewerPointer(pointer, generation) : undefined;
         try {
-          await runComputerAction(page, action);
+          await this.dispatchInput(() => runComputerAction(page, action, (input) => this.dispatchInput(input)));
           if (dialogSequence !== this.dialogSequence) throw new QubiclError('browser_batch_interrupted', 'A dialog interrupted the action batch. Observe the page and issue only the remaining actions.', 409, { dispatch: 'started' });
           if (publication) await this.finishViewerPointer(publication, generation!, 'confirm');
         } catch (error) {
@@ -847,12 +908,25 @@ export class BrowserManager {
     this.referenceEpoch += 1;
     for (const handle of this.references.values()) void handle.dispose().catch(() => undefined);
     this.references.clear();
+    this.referenceFrames.clear();
+  }
+
+  private clearFrameReferences(frame: Frame): void {
+    this.referenceEpoch += 1;
+    for (const [ref, retainedFrame] of this.referenceFrames) {
+      if (retainedFrame !== frame) continue;
+      const handle = this.references.get(ref);
+      this.references.delete(ref);
+      this.referenceFrames.delete(ref);
+      if (handle) void handle.dispose().catch(() => undefined);
+    }
   }
 
   private async referencedElement(ref: string): Promise<ElementHandle<SVGElement | HTMLElement>> {
     const handle = this.references.get(ref);
     if (!handle || !await handle.evaluate((element) => element.isConnected).catch(() => false)) {
       this.references.delete(ref);
+      this.referenceFrames.delete(ref);
       if (handle) await handle.dispose().catch(() => undefined);
       throw new QubiclError('stale_browser_ref', 'Unknown or stale browser element ref; call browser_snapshot again.', 409);
     }
@@ -1025,8 +1099,11 @@ export class BrowserManager {
     page.on('console', (message) => this.addDiagnostic('console', `${message.type()}: ${message.text()}`));
     page.on('requestfailed', (request) => this.addDiagnostic('request-failed', `${request.method()} ${diagnosticUrl(request.url())}: ${request.failure()?.errorText ?? 'failed'}`));
     page.on('framenavigated', (frame) => {
-      if (frame === page.mainFrame() && page === this.activePage) this.clearReferences();
+      if (page !== this.activePage) return;
+      if (frame === page.mainFrame()) this.clearReferences();
+      else this.clearFrameReferences(frame);
     });
+    page.on('framedetached', (frame) => this.clearFrameReferences(frame));
     page.once('close', () => {
       this.pageLastActive.delete(page);
       this.tabIds.delete(page);
@@ -1351,74 +1428,79 @@ function browserButtonNumber(button: BrowserMouseButton): number {
   return 1;
 }
 
-async function runComputerAction(page: Page, action: BrowserComputerAction): Promise<void> {
+type InputDispatch = <T>(operation: () => Promise<T>) => Promise<T>;
+
+async function runComputerAction(page: Page, action: BrowserComputerAction, dispatch: InputDispatch): Promise<void> {
   switch (action.type) {
     case 'screenshot': return;
     case 'click':
     case 'double_click':
     case 'move':
-      await withModifiers(page, action.keys, async () => {
-        if (action.type === 'move') await page.mouse.move(action.x, action.y);
-        else await page.mouse.click(action.x, action.y, { button: action.button ?? 'left', clickCount: action.type === 'double_click' ? 2 : 1 });
+      await withModifiers(page, action.keys, dispatch, async () => {
+        if (action.type === 'move') await dispatch(() => page.mouse.move(action.x, action.y));
+        else await dispatch(() => page.mouse.click(action.x, action.y, { button: action.button ?? 'left', clickCount: action.type === 'double_click' ? 2 : 1 }));
       });
       return;
     case 'drag':
       if (action.path.length < 2 || action.path.length > MAX_DRAG_POINTS) throw new QubiclError('browser_actions_invalid', `Drag paths must contain 2 through ${MAX_DRAG_POINTS} points.`, 400);
-      await withModifiers(page, action.keys, async () => {
+      await withModifiers(page, action.keys, dispatch, async () => {
         const first = action.path[0]!;
-        await page.mouse.move(first.x, first.y);
-        await page.mouse.down({ button: action.button ?? 'left' });
+        await dispatch(() => page.mouse.move(first.x, first.y));
+        let pressed = false;
         try {
-          for (const point of action.path.slice(1)) await page.mouse.move(point.x, point.y, { steps: 4 });
+          await dispatch(async () => { pressed = true; await page.mouse.down({ button: action.button ?? 'left' }); });
+          for (const point of action.path.slice(1)) await dispatch(() => page.mouse.move(point.x, point.y, { steps: 4 }));
         } finally {
-          await page.mouse.up({ button: action.button ?? 'left' }).catch(() => undefined);
+          if (pressed) await page.mouse.up({ button: action.button ?? 'left' }).catch(() => undefined);
         }
       });
       return;
     case 'scroll':
-      await withModifiers(page, action.keys, async () => {
-        await page.mouse.move(action.x, action.y);
-        await page.mouse.wheel(action.scroll_x ?? 0, action.scroll_y ?? 600);
+      await withModifiers(page, action.keys, dispatch, async () => {
+        await dispatch(() => page.mouse.move(action.x, action.y));
+        await dispatch(() => page.mouse.wheel(action.scroll_x ?? 0, action.scroll_y ?? 600));
       });
       return;
     case 'keypress':
-      await computerKeypress(page, action.keys);
+      await computerKeypress(page, action.keys, dispatch);
       return;
     case 'type':
       if (action.text.length > MAX_TEXT_LENGTH) throw new QubiclError('browser_actions_invalid', `Browser text is limited to ${MAX_TEXT_LENGTH} characters.`, 400);
-      await page.keyboard.insertText(action.text);
+      await dispatch(() => page.keyboard.insertText(action.text));
       return;
     case 'wait':
       await page.waitForTimeout(action.milliseconds ?? 2000);
   }
 }
 
-async function withModifiers(page: Page, values: string[] | undefined, operation: () => Promise<void>): Promise<void> {
+async function withModifiers(page: Page, values: string[] | undefined, dispatch: InputDispatch, operation: () => Promise<void>): Promise<void> {
   const modifiers = [...new Set((values ?? []).map(normalizedKey))];
   if (modifiers.some((key) => !MODIFIER_KEYS.has(key))) {
     throw new QubiclError('browser_actions_invalid', 'Mouse action keys may contain only Control, Meta, Alt, and Shift.', 400);
   }
+  const pressed: string[] = [];
   try {
-    for (const key of modifiers) await page.keyboard.down(key);
+    for (const key of modifiers) await dispatch(async () => { pressed.push(key); await page.keyboard.down(key); });
     await operation();
   } finally {
-    for (const key of modifiers.toReversed()) await page.keyboard.up(key).catch(() => undefined);
+    for (const key of pressed.toReversed()) await page.keyboard.up(key).catch(() => undefined);
   }
 }
 
-async function computerKeypress(page: Page, values: string[]): Promise<void> {
+async function computerKeypress(page: Page, values: string[], dispatch: InputDispatch): Promise<void> {
   const keys = values.map(normalizedKey);
   const leadingModifiers = keys.slice(0, -1);
   if (keys.length > 1 && leadingModifiers.every((key) => MODIFIER_KEYS.has(key))) {
+    const pressed: string[] = [];
     try {
-      for (const key of leadingModifiers) await page.keyboard.down(key);
-      await page.keyboard.press(keys.at(-1)!);
+      for (const key of leadingModifiers) await dispatch(async () => { pressed.push(key); await page.keyboard.down(key); });
+      await dispatch(() => page.keyboard.press(keys.at(-1)!));
     } finally {
-      for (const key of leadingModifiers.toReversed()) await page.keyboard.up(key).catch(() => undefined);
+      for (const key of pressed.toReversed()) await page.keyboard.up(key).catch(() => undefined);
     }
     return;
   }
-  for (const key of keys) await page.keyboard.press(key);
+  for (const key of keys) await dispatch(() => page.keyboard.press(key));
 }
 
 const KEY_ALIASES = new Map([

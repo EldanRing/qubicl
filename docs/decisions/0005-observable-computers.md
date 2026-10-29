@@ -56,3 +56,12 @@ embedded charts from otherwise successful conversions. Revisit these individual
 controls when the converter changes, preserving visible chart content and testing
 that external linked images are not fetched.
 These choices are implemented, not release gates.
+
+Shared-computer observation and app publication lifetimes are independent of
+interactive input ownership. Repeated snapshots reuse unchanged DOM references;
+only genuinely new elements consume the bounded reference cache. Input ownership
+is checked by the session against the controller between input steps, including
+batched actions. Ordinary release and takeover preserve previews for retained
+apps, while explicit revocation and runtime/policy resets retain their authority.
+This separation prevents passive observers and handoffs from disrupting ongoing
+work without weakening input fencing.

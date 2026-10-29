@@ -233,7 +233,8 @@ export class RemoteBrowserManager extends BrowserManager {
   }
   private invoke<T>(method: string, args: unknown[]): Promise<T> {
     this.active = true;
-    return runnerRequest<T>(this.baseUrl, this.key, '/v1/browser/invoke', { method, args });
+    const owner = this.inputOwner();
+    return runnerRequest<T>(this.baseUrl, this.key, '/v1/browser/invoke', { method, args, ...(owner ? { owner } : {}) });
   }
 }
 

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ToolExecutor, type ControlAction } from '@qubicl/control/executor';
 import { ProcessManager } from '@qubicl/control/processes';
+import { BrowserManager } from '../../packages/control/dist/browser.js';
 import { invokeTool } from '../../packages/control/dist/contract.js';
 import { errorPayload } from '../../packages/control/dist/errors.js';
 import { creationTime } from '../../packages/control/dist/file-errors.js';
@@ -393,7 +394,7 @@ test('viewer pointer updates are generation-bound and cleared when agent control
 });
 
 test('successful browser point actions publish transformed viewer events without leaking internal receipts', async () => {
-  const browser = {
+  const browser = Object.assign(new BrowserManager(false), {
     clickWithViewerPointer: async () => ({
       result: { url: 'https://example.test/', title: 'Example' },
       pointerActions: [{ type: 'right_click', x: 310, y: 220, button: 3 }],
@@ -404,7 +405,7 @@ test('successful browser point actions publish transformed viewer events without
         ? [{ type: 'move', x: 410, y: 320, button: 1 }]
         : [{ type: 'click', x: 510, y: 420, button: 1 }],
     }),
-  };
+  });
   const executor = new ToolExecutor(undefined, { browser: browser as never });
   const lease = executor.leases.acquire(60);
   const semantic = await executor.call('browser_click', { lease, ref: 'g1e1', button: 'right' }) as Record<string, unknown>;
@@ -424,7 +425,7 @@ test('queued browser actions recheck ownership before dispatch and discard late 
   let releaseFirst!: () => void;
   const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
   const dispatched: string[] = [];
-  const browser = {
+  const browser = Object.assign(new BrowserManager(false), {
     count: () => 1,
     navigate: async (url: string) => {
       dispatched.push(url);
@@ -432,14 +433,18 @@ test('queued browser actions recheck ownership before dispatch and discard late 
       return { url, title: url };
     },
     shutdown: async () => undefined,
-  };
+  });
   const executor = new ToolExecutor(undefined, { browser: browser as never });
   const oldLease = executor.leases.acquire(60);
   const first = executor.call('browser_navigate', { lease: oldLease, url: 'https://example.test/first' });
   await new Promise((resolve) => setImmediate(resolve));
   const queued = executor.call('browser_navigate', { lease: oldLease, url: 'https://example.test/queued' });
-  const rejectedFirst = assert.rejects(first, /stale/i);
-  const rejectedQueued = assert.rejects(queued, /stale/i);
+  const rejectedFirst = assert.rejects(first, {
+    code: 'action_result_uncertain', details: { dispatch: 'started', cause: 'stale_lease' },
+  });
+  const rejectedQueued = assert.rejects(queued, {
+    code: 'stale_lease', details: { dispatch: 'not-started' },
+  });
 
   await executor.takeHumanControl();
   executor.releaseHumanControl();

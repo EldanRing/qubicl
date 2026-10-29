@@ -9,6 +9,7 @@ import { invokeTool, mcpResult } from './contract.js';
 import { loadComputerManifest } from './image-manifest.js';
 import { OpenTerminalCompatibility } from './open-terminal.js';
 import { parseViewerPointerUpdate } from './viewer-actions.js';
+import { verifyBrowserInputOwner } from './browser-ownership.js';
 import type { LeaseActor } from './lease.js';
 import { assertClientToolScope, clientCredentialFromFetchHeaders, clientCredentialFromNodeHeaders, scopedTools, type ClientCredentialContext } from './client-scope.js';
 
@@ -72,6 +73,11 @@ export const controlServer = createServer(async (request, response) => {
         tools: executor.enabledToolNames(),
         manifestSha256: loadedManifest.sha256,
       });
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/_qubicl/session/input-ownership') {
+      verifyBrowserInputOwner(request.headers['x-qubicl-pointer-key'], expectedPointerKey, await readJson(request, 4096), executor.leases);
+      json(response, 200, { authorized: true });
       return;
     }
     if (request.method === 'POST' && url.pathname === '/_qubicl/session/pointer') {

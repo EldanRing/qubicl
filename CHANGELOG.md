@@ -47,6 +47,22 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Home restore and clone preserve saved workload settings while allocating fresh
+  identities. Backup retention counts only checksum-verified archives and
+  reports incomplete or unsafe entries without deleting them.
+- App previews survive ordinary agent release and human takeover while their
+  apps remain available. Remote management preview tickets use the correct
+  gateway access scope.
+- Browser input rechecks interactive ownership between batch and compound
+  actions across the session boundary. Passive snapshots reuse references to
+  unchanged controls instead of invalidating another agent's observation.
+  Browser runner calls also preserve omitted optional arguments and acknowledge
+  shutdown without a response-serialization failure.
+- Full-installation imports discard source container-name overrides for active
+  computers and saved trash, keeping imported runtime names in the new
+  installation namespace without changing computer IDs or credentials.
+  Repeated export/import cycles preserve previous reports and create a fresh
+  current report without an exclusive-file collision.
 - Interactive terminals retain configured workload/proxy environment and share
   managed-task admission limits with processes and restarting services. Long
   task and output-retention deadlines support the full configured 30-day range;

@@ -1,10 +1,18 @@
 import assert from 'node:assert/strict';
+import { createServer, type IncomingMessage } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { BrowserType, ElementHandle, Locator, Page } from 'playwright-core';
 import { BrowserManager, INTERACTIVE_BROWSER_IGNORED_DEFAULT_ARGS, browserViewportToDisplayPoint } from '@qubicl/control/browser';
+import { ToolExecutor } from '@qubicl/control/executor';
+import { LeaseManager } from '../../packages/control/dist/lease.js';
+import { createInternalRunner } from '../../packages/control/dist/internal-runner.js';
+import { RemoteBrowserManager } from '../../packages/control/dist/remote-runners.js';
+import { verifyBrowserInputOwner } from '../../packages/control/dist/browser-ownership.js';
+import { errorPayload, QubiclError } from '../../packages/control/dist/errors.js';
 import type { ViewerPointerUpdate } from '@qubicl/control/viewer-actions';
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+X2NDWQAAAABJRU5ErkJggg==', 'base64');
@@ -155,23 +163,38 @@ test('snapshot refs retain node identity across insertion and reordering and rej
   assert.equal(original.disposals, 1);
 });
 
-test('snapshot handles are released on truncation, refresh, navigation, and shutdown', async () => {
+test('passive snapshots reuse live refs; retained handles expire only on eviction or document changes', async () => {
   const fake = new FakeBrowserRuntime(200, 'x'.repeat(80_000));
   fake.locators[0]!.visible = false;
   const manager = new BrowserManager(true, { browserType: fake.browserType, headless: true });
   try {
     const snapshot = await manager.snapshot() as { refs: Array<{ ref: string }> };
     assert.equal(fake.locators.filter((node) => node.disposals === 0).length, snapshot.refs.length);
-    await manager.snapshot();
-    assert.ok(fake.locators.every((node) => node.disposals >= 1));
-    await manager.navigate('https://example.test/next');
-    assert.ok(fake.locators.every((node) => node.disposals === 2));
+    for (let index = 0; index < 40; index += 1) {
+      const observed = await manager.snapshot() as { refs: Array<{ ref: string }> };
+      assert.deepEqual(observed.refs.map(({ ref }) => ref), snapshot.refs.map(({ ref }) => ref));
+    }
+    await manager.click(snapshot.refs[0]!.ref, 'left');
+    const original = fake.locators[1]!;
+    assert.equal(original.clicks, 1);
+    Object.assign(fake, { aria: '' });
+    // Newly observed nodes eventually evict the oldest refs, without retaining
+    // unbounded handles or breaking repeatedly observed unchanged controls.
+    for (let page = 0; page < 33; page += 1) {
+      fake.locators.splice(0, fake.locators.length, ...Array.from({ length: 200 }, () => new FakeLocator(0)));
+      await manager.snapshot();
+    }
     await assert.rejects(manager.click(snapshot.refs[0]!.ref, 'left'), { code: 'stale_browser_ref' });
-    await manager.snapshot();
+    assert.equal(original.disposals, 1);
+    const current = await manager.snapshot() as { refs: Array<{ ref: string }> };
+    await manager.navigate('https://example.test/next');
+    await assert.rejects(manager.click(current.refs[0]!.ref, 'left'), { code: 'stale_browser_ref' });
+    const next = await manager.snapshot() as { refs: Array<{ ref: string }> };
+    await manager.shutdown();
+    await assert.rejects(manager.click(next.refs[0]!.ref, 'left'), { code: 'stale_browser_ref' });
   } finally {
     await manager.shutdown();
   }
-  assert.ok(fake.locators.every((node) => node.disposals === 3));
 });
 
 test('browser viewport coordinates map through window chrome and display scale', () => {
@@ -194,6 +217,175 @@ test('browser viewport coordinates map through window chrome and display scale',
     devicePixelRatio: 1,
   }), undefined);
 });
+
+test('browser batches stop after takeover during input and retain cleanup of held keys/buttons', async (context) => {
+  const fake = new FakeBrowserRuntime();
+  const manager = new BrowserManager(true, { browserType: fake.browserType });
+  const executor = new ToolExecutor(undefined, { browser: manager });
+  context.after(() => executor.shutdown());
+  await manager.snapshot();
+  const connection = await fake.browserType.connectOverCDP('http://fake');
+  const page = connection.contexts()[0]!.pages()[0]!;
+  const owner = executor.leases.acquire(60);
+  context.mock.method(page.mouse, 'click', async () => {
+    fake.mouseEvents.push('first-click');
+    await executor.takeHumanControl();
+  });
+  await assert.rejects(executor.call('browser_computer', { lease: owner, actions: [
+    { type: 'click', x: 10, y: 20 }, { type: 'type', text: 'must not arrive' },
+  ] }), { code: 'action_result_uncertain' });
+  assert.deepEqual(fake.mouseEvents, ['first-click']);
+  assert.deepEqual(fake.keyboardEvents, []);
+
+  executor.releaseHumanControl();
+  const next = executor.leases.acquire(60);
+  context.mock.method(page.mouse, 'down', async () => {
+    fake.mouseEvents.push('down:left');
+    await executor.takeHumanControl();
+  });
+  await assert.rejects(manager.withInputOwnership(next, () => { executor.leases.verifyInteractive(next); }, () => manager.computer([
+    { type: 'drag', path: [{ x: 1, y: 2 }, { x: 3, y: 4 }], keys: ['Control'] },
+  ])), { code: 'stale_lease' });
+  assert.deepEqual(fake.mouseEvents, ['first-click', 'move:1:2', 'down:left', 'up:left']);
+  assert.deepEqual(fake.keyboardEvents, ['down:Control', 'up:Control']);
+});
+
+test('ownership is rechecked after pointer publication and before queued semantic input', async (context) => {
+  const leases = new LeaseManager();
+  const owner = leases.acquire(60);
+  let publicationStarted!: () => void;
+  const published = new Promise<void>((resolve) => { publicationStarted = resolve; });
+  let releasePublication!: () => void;
+  const blocked = new Promise<void>((resolve) => { releasePublication = resolve; });
+  const fake = new FakeBrowserRuntime();
+  const manager = new BrowserManager(true, {
+    browserType: fake.browserType,
+    publishViewerPointer: async (update) => {
+      if (update.phase === 'intent') { publicationStarted(); await blocked; }
+    },
+  });
+  context.after(() => manager.shutdown());
+  const snapshot = await manager.snapshot() as { refs: Array<{ ref: string }> };
+  const guarded = <T>(operation: () => Promise<T>): Promise<T> => manager.withInputOwnership(owner, () => { leases.verifyInteractive(owner); }, operation);
+  const first = guarded(() => manager.clickWithViewerPointer(snapshot.refs[0]!.ref, 'left', owner.generation));
+  await published;
+  const queued = guarded(() => manager.type(snapshot.refs[1]!.ref, 'stale input', true, true));
+  const firstRejected = assert.rejects(first, { code: 'stale_lease' });
+  const queuedRejected = assert.rejects(queued, { code: 'stale_lease' });
+  await leases.release(owner);
+  const current = leases.acquire(60);
+  const currentWork = manager.withInputOwnership(current, () => { leases.verifyInteractive(current); }, () => manager.type(snapshot.refs[1]!.ref, 'current input', false, true));
+  releasePublication();
+  await Promise.all([firstRejected, queuedRejected, currentWork]);
+  assert.equal(fake.locators[0]!.clicks, 0);
+  assert.deepEqual(fake.locators[1]!.fills, ['current input']);
+  assert.deepEqual(fake.locators[1]!.presses, []);
+  await leases.release(current);
+});
+
+test('completed dialog and permission changes remain accurately recorded when the lease ends during dispatch', async (context) => {
+  const fake = new FakeBrowserRuntime();
+  const manager = new BrowserManager(true, { browserType: fake.browserType });
+  context.after(() => manager.shutdown());
+  const leases = new LeaseManager();
+  let owner = leases.acquire(60);
+  const guarded = <T>(operation: () => Promise<T>): Promise<T> => manager.withInputOwnership(owner, () => { leases.verifyInteractive(owner); }, operation);
+  await manager.snapshot();
+  const connection = await fake.browserType.connectOverCDP('http://fake');
+  const browserContext = connection.contexts()[0]!;
+  Object.assign(browserContext, {
+    grantPermissions: async () => { await leases.release(owner); },
+    clearPermissions: async () => undefined,
+  });
+  await assert.rejects(guarded(() => manager.permissions('https://one.test', ['clipboard-read'], false)), { code: 'stale_lease' });
+  assert.deepEqual((await manager.permissions('https://one.test', [], false)).permissions, ['clipboard-read']);
+  // A rejected clear must not erase bookkeeping for the still-granted origin.
+  await assert.rejects(guarded(() => manager.permissions('https://one.test', [], true)), { code: 'stale_lease' });
+  assert.deepEqual((await manager.permissions('https://one.test', [], false)).permissions, ['clipboard-read']);
+
+  owner = leases.acquire(60);
+  const page = browserContext.pages()[0] as unknown as { listeners: Map<string, Array<(dialog: unknown) => void>> };
+  for (const listener of page.listeners.get('dialog') ?? []) listener({
+    type: () => 'alert', message: () => 'fixture', defaultValue: () => '',
+    accept: async () => { await leases.release(owner); },
+  });
+  const dialog = (await manager.listDialogs()).dialogs[0]!;
+  await assert.rejects(guarded(() => manager.respondDialog(dialog.id, 'accept')), { code: 'stale_lease' });
+  assert.deepEqual((await manager.listDialogs()).dialogs, []);
+});
+
+test('remote browser input proves current ownership through the authenticated control/session round trip', { timeout: 10_000 }, async (context) => {
+  const key = 'browser-session-test-key-0123456789';
+  let leases = new LeaseManager();
+  let checks = 0;
+  const control = createServer(async (request, response) => {
+    try {
+      assert.equal(request.url, '/_qubicl/session/input-ownership');
+      const owner = await browserRequestJson(request);
+      verifyBrowserInputOwner(request.headers['x-qubicl-pointer-key'], key, owner, leases);
+      checks += 1;
+      response.end(JSON.stringify({ authorized: true }));
+    } catch (error) {
+      response.writeHead(error instanceof QubiclError ? error.status : 500);
+      response.end(JSON.stringify(errorPayload(error)));
+    }
+  });
+  await new Promise<void>((resolve) => control.listen(0, '127.0.0.1', resolve));
+  context.after(() => new Promise<void>((resolve) => control.close(() => resolve())));
+  const controlUrl = `http://127.0.0.1:${(control.address() as AddressInfo).port}`;
+  const fake = new FakeBrowserRuntime();
+  const manager = new BrowserManager(true, { browserType: fake.browserType });
+  const environment = {
+    QUBICL_RUNTIME_ROLE: 'session', QUBICL_RUNNER_KEY: key, QUBICL_HOST_UID: String(process.getuid!()),
+    QUBICL_HOST_GID: String(process.getgid!()), QUBICL_COMPATIBILITY: 'browser',
+    QUBICL_POINTER_URL: `${controlUrl}/_qubicl/session/pointer`,
+  };
+  const saved = Object.fromEntries(Object.keys(environment).map((name) => [name, process.env[name]]));
+  Object.assign(process.env, environment);
+  let session: ReturnType<typeof createInternalRunner>;
+  try { session = createInternalRunner({ browser: manager }); }
+  finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  }
+  await new Promise<void>((resolve) => session.server.listen(0, '127.0.0.1', resolve));
+  context.after(async () => {
+    try { await executor.shutdown(); }
+    finally {
+      await session.shutdown();
+      await new Promise<void>((resolve) => session.server.close(() => resolve()));
+    }
+  });
+  const remote = new RemoteBrowserManager(`http://127.0.0.1:${(session.server.address() as AddressInfo).port}`, key);
+  const executor = new ToolExecutor(undefined, { browser: remote });
+  leases = executor.leases;
+  const owner = executor.leases.acquire(60);
+  await remote.snapshot(); // Passive requests need no owner proof.
+  const connection = await fake.browserType.connectOverCDP('http://fake');
+  const page = connection.contexts()[0]!.pages()[0]!;
+  context.mock.method(page.keyboard, 'insertText', async (value: string) => {
+    fake.keyboardEvents.push(`insert:${value}`);
+    await executor.takeHumanControl();
+  });
+  await assert.rejects(executor.call('browser_computer', { lease: owner, actions: [
+    { type: 'type', text: 'first' }, { type: 'type', text: 'second' },
+  ] }), { code: 'action_result_uncertain' });
+  assert.deepEqual(fake.keyboardEvents, ['insert:first']);
+  assert.ok(checks >= 1);
+  await assert.rejects(remote.typeFocused('unowned'), { code: 'stale_lease' });
+  const denied = await fetch(`${controlUrl}/_qubicl/session/input-ownership`, {
+    method: 'POST', headers: { 'x-qubicl-pointer-key': 'wrong-key' }, body: JSON.stringify(owner),
+  });
+  assert.equal(denied.status, 401);
+  await denied.arrayBuffer();
+});
+
+async function browserRequestJson(request: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+}
 
 test('browser pointer intent is published before dispatch and confirmed before slow result work', async (context) => {
   const fake = new FakeBrowserRuntime();
@@ -378,7 +570,11 @@ class FakePage {
       }) as Locator,
     } as unknown as Locator;
   }
-  async evaluate(_callback: unknown, argument?: { pointX?: number; pointY?: number; minimumMs?: number; maximumCharacters?: number; qubiclViewerMetrics?: boolean; qubiclScreenshotDimensions?: boolean }): Promise<unknown> {
+  async evaluate(_callback: unknown, argument?: { pointX?: number; pointY?: number; minimumMs?: number; maximumCharacters?: number; qubiclViewerMetrics?: boolean; qubiclScreenshotDimensions?: boolean; observed?: FakeLocator[]; retained?: Array<{ ref: string; node: FakeLocator }> }): Promise<unknown> {
+    if (argument?.observed && argument.retained) {
+      const byNode = new Map(argument.retained.map(({ ref, node }) => [node, ref]));
+      return argument.observed.map((node) => byNode.get(node) ?? null);
+    }
     if (argument && typeof argument.pointX === 'number') {
       return [{ tag: 'button', id: 'target', classes: ['primary'], role: 'button', name: 'Target', cursor: 'pointer', box: { x: 0, y: 0, width: 20, height: 20 } }];
     }

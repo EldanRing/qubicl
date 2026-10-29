@@ -187,7 +187,10 @@ export class ToolExecutor {
       compatibility: contract.manifest.compatibility,
       enabledCatalogSkills: () => this.policy.enabledCatalogSkills(),
       expectedRegistrySha256: () => this.policy.expectedSkillRegistrySha256(),
-      onRegistryIntegrityFailure: async () => { await this.leases.revokeAgentControl(); },
+      onRegistryIntegrityFailure: async () => {
+        try { await this.leases.revokeAgentControl(); }
+        finally { this.previews.clear(); }
+      },
     });
     this.broker = process.env.QUBICL_BROKER_URL && process.env.QUBICL_BROKER_KEY
       ? new RemoteBrokerManager(process.env.QUBICL_BROKER_URL, process.env.QUBICL_BROKER_KEY)
@@ -201,10 +204,11 @@ export class ToolExecutor {
       try {
         return await this.processes.terminateOwner(proof);
       } finally {
-        // Capability URLs must be invalidated even if process fencing fails.
-        // Lease acquisition remains fail-closed through LeaseManager's
-        // rejected revocation state.
-        this.previews.clear();
+        // Input ownership does not own app publications: retained tasks keep
+        // their while-listening previews, and file/share/management credentials
+        // keep their separately scoped lifetimes. Epoch changes still revoke
+        // every capability, even without an agent or if fencing fails.
+        if (!proof || proof.epoch !== this.leases.epoch) this.previews.clear();
       }
     });
   }
@@ -599,7 +603,8 @@ export class ToolExecutor {
       case 'browser_dialogs':
         return respond(await this.browser.listDialogs());
       case 'browser_respond_dialog':
-        return respond(await this.browser.respondDialog(input.dialogId as string, input.action as 'accept' | 'dismiss', input.promptText as string | undefined));
+        return respond(await this.browser.withInputOwnership(owner, () => { if (owner) this.leases.verifyInteractive(owner); },
+          () => this.browser.respondDialog(input.dialogId as string, input.action as 'accept' | 'dismiss', input.promptText as string | undefined)));
       case 'browser_permissions':
         return respond(await runBrowser(() => this.browser.permissions(input.origin as string, input.permissions as string[], input.clear as boolean, input.scope as 'origin' | 'context')));
       case 'browser_diagnostics':
@@ -915,7 +920,7 @@ export class ToolExecutor {
     const execute = async (): Promise<T> => {
       if (owner) beforeDispatch(() => this.leases.verify(owner));
       return afterDispatch(async () => {
-        const result = await operation();
+        const result = await this.browser.withInputOwnership(owner, () => { if (owner) this.leases.verifyInteractive(owner); }, operation);
         if (owner) this.leases.verify(owner);
         return result;
       });
@@ -936,7 +941,11 @@ export class ToolExecutor {
 
   async reloadPolicy(): Promise<Record<string, unknown>> {
     const loaded = await this.policy.load();
-    const revocation = loaded.changed ? await this.leases.revokeAgentControl() : { terminatedManagedProcesses: 0 };
+    let revocation = { terminatedManagedProcesses: 0 };
+    if (loaded.changed) {
+      try { revocation = await this.leases.revokeAgentControl(); }
+      finally { this.previews.clear(); }
+    }
     return { ...loaded, ...revocation, tools: this.policy.enabledTools(), catalogSkills: this.policy.enabledCatalogSkills(), reconnectRequired: loaded.changed };
   }
 

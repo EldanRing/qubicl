@@ -557,15 +557,74 @@ export async function createBackup(
   }
 }
 
-/** Prune only backups bound to one immutable source computer identity. */
+export interface BackupPruneReport {
+  removed: BackupManifest[];
+  retained: BackupManifest[];
+  preserved: Array<{ id: string; reason: string }>;
+}
+
+interface VerifiedPruneCandidate {
+  manifest: BackupManifest;
+  directory: string;
+  archive: string;
+  directoryIdentity: import('node:fs').BigIntStats;
+  archiveIdentity: import('node:fs').BigIntStats;
+}
+
+function sameArchiveIdentity(left: import('node:fs').BigIntStats, right: import('node:fs').BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size
+    && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs
+    && left.mode === right.mode && left.uid === right.uid && left.nlink === right.nlink;
+}
+
+async function verifiedPruneCandidate(state: LoadedState, id: string, manifest: BackupManifest): Promise<VerifiedPruneCandidate> {
+  const directory = backupDirectory(state, id);
+  if (!await ownedBackupDirectory(directory)) throw new Error('Backup directory is missing.');
+  const directoryIdentity = await lstat(directory, { bigint: true });
+  const archive = join(directory, manifest.archive);
+  const handle = await open(archive, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  try {
+    const archiveIdentity = await handle.stat({ bigint: true });
+    const expectedUid = process.getuid ? BigInt(process.getuid()) : archiveIdentity.uid;
+    if (!archiveIdentity.isFile() || archiveIdentity.nlink !== 1n || archiveIdentity.uid !== expectedUid || (archiveIdentity.mode & 0o077n) !== 0n) {
+      throw new Error('Archive must be a private operator-owned regular file with one link.');
+    }
+    const hash = createHash('sha256');
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let position = 0;
+    while (BigInt(position) < archiveIdentity.size) {
+      const { bytesRead } = await handle.read(buffer, 0, Number(archiveIdentity.size - BigInt(position) < BigInt(buffer.length) ? archiveIdentity.size - BigInt(position) : BigInt(buffer.length)), position);
+      if (!bytesRead) throw new Error('Archive changed while its checksum was read.');
+      hash.update(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+    if (!sameArchiveIdentity(archiveIdentity, await handle.stat({ bigint: true }))
+      || !sameArchiveIdentity(archiveIdentity, await lstat(archive, { bigint: true }))) {
+      throw new Error('Archive changed while its checksum was read.');
+    }
+    if (hash.digest('hex') !== manifest.sha256) throw new Error('Archive checksum does not match its manifest.');
+    return { manifest, directory, archive, directoryIdentity, archiveIdentity };
+  } finally { await handle.close(); }
+}
+
+async function assertPruneCandidateUnchanged(candidate: VerifiedPruneCandidate): Promise<void> {
+  const [directory, archive] = await Promise.all([
+    lstat(candidate.directory, { bigint: true }), lstat(candidate.archive, { bigint: true }),
+  ]);
+  if (!directory.isDirectory() || directory.dev !== candidate.directoryIdentity.dev || directory.ino !== candidate.directoryIdentity.ino
+    || !sameArchiveIdentity(candidate.archiveIdentity, archive)) {
+    throw new Error(`Backup ${candidate.manifest.id} changed during retention planning; pruning stopped.`);
+  }
+}
+
+/** Prune only checksum-verified archives bound to one immutable source identity. */
 export async function pruneComputerBackups(
   state: LoadedState,
   computerId: string,
   keep: number,
 ): Promise<BackupManifest[]> {
   if (!UUID_PATTERN.test(computerId)) throw new Error('Backup pruning requires an immutable computer ID.');
-  if (!Number.isInteger(keep) || keep < 0) throw new Error('--keep must be a non-negative integer.');
-  return pruneVerifiedBackups(state, ({ source }) => source.id === computerId, keep);
+  return (await pruneVerifiedBackups(state, ({ source }) => source.id === computerId, keep)).removed;
 }
 
 export async function pruneBackupsBySelector(
@@ -573,10 +632,19 @@ export async function pruneBackupsBySelector(
   selector: string | undefined,
   keep: number,
 ): Promise<BackupManifest[]> {
+  return (await pruneBackupsBySelectorDetailed(state, selector, keep)).removed;
+}
+
+export async function pruneBackupsBySelectorDetailed(
+  state: LoadedState,
+  selector: string | undefined,
+  keep: number,
+): Promise<BackupPruneReport> {
+  if (!Number.isInteger(keep) || keep < 0) throw new Error('--keep must be a non-negative integer.');
   if (!selector) return pruneVerifiedBackups(state, () => true, keep);
   const configured = state.config.computers.find(({ id, name }) => id === selector || name === selector);
-  if (configured) return pruneComputerBackups(state, configured.id, keep);
-  if (UUID_PATTERN.test(selector)) return pruneComputerBackups(state, selector, keep);
+  const directId = configured?.id ?? (UUID_PATTERN.test(selector) ? selector : undefined);
+  if (directId) return pruneVerifiedBackups(state, ({ source }) => source.id === directId, keep);
 
   const sourceIds = new Set<string>();
   for (const entry of await readdir(state.paths.backups, { withFileTypes: true })) {
@@ -590,51 +658,64 @@ export async function pruneBackupsBySelector(
     throw new Error(`Backup name ${selector} belongs to multiple historical computer IDs; use an immutable source ID.`);
   }
   const sourceId = [...sourceIds][0];
-  return sourceId ? pruneComputerBackups(state, sourceId, keep) : [];
+  return sourceId ? pruneVerifiedBackups(state, ({ source }) => source.id === sourceId, keep)
+    : { removed: [], retained: [], preserved: [] };
 }
 
 async function pruneVerifiedBackups(
   state: LoadedState,
   include: (manifest: BackupManifest) => boolean,
   keep: number,
-): Promise<BackupManifest[]> {
-  const manifests: BackupManifest[] = [];
-  for (const entry of await readdir(state.paths.backups, { withFileTypes: true })) {
+): Promise<BackupPruneReport> {
+  if (!Number.isInteger(keep) || keep < 0) throw new Error('--keep must be a non-negative integer.');
+  const candidates: VerifiedPruneCandidate[] = [];
+  const report: BackupPruneReport = { removed: [], retained: [], preserved: [] };
+  const entries = (await readdir(state.paths.backups, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     try {
       const { manifest } = await readManifest(state, entry.name);
-      if (include(manifest)) manifests.push(manifest);
-    } catch { /* preserve malformed entries */ }
+      if (include(manifest)) candidates.push(await verifiedPruneCandidate(state, entry.name, manifest));
+    } catch (error) {
+      report.preserved.push({ id: entry.name, reason: errorMessage(error) });
+    }
   }
-  const doomed = manifests
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id))
-    .slice(keep);
-  for (const backup of doomed) await durableRemoveDirectory(backupDirectory(state, backup.id));
-  return doomed;
+  candidates.sort((left, right) => Date.parse(right.manifest.createdAt) - Date.parse(left.manifest.createdAt) || left.manifest.id.localeCompare(right.manifest.id));
+  // Check retained archives too: a changed keeper must never authorize deleting
+  // a good older backup. This checks the hashed file identity without rehashing.
+  for (const candidate of candidates) await assertPruneCandidateUnchanged(candidate);
+  report.retained = candidates.slice(0, keep).map(({ manifest }) => manifest);
+  for (const candidate of candidates.slice(keep)) {
+    await assertPruneCandidateUnchanged(candidate);
+    await durableRemoveDirectory(candidate.directory);
+    report.removed.push(candidate.manifest);
+  }
+  return report;
+}
+
+/** Allocate new host identity/credentials while retaining saved workload settings. */
+export function createRestoredComputerConfig(state: LoadedState, name: string, source: ComputerConfig): ComputerConfig {
+  const saved = ComputerConfigSchema.parse(structuredClone(source));
+  const allocated = addConfiguredComputer(state, name, {
+    preset: saved.preset, compatibility: saved.compatibility, image: saved.image,
+    capabilityContractVersion: saved.capabilityContractVersion, capabilities: saved.capabilities,
+    cpus: saved.cpus, memory: saved.memory,
+  });
+  const restored = ComputerConfigSchema.parse({
+    ...saved,
+    id: allocated.id, name: allocated.name, runtimeName: allocated.runtimeName, createdAt: allocated.createdAt,
+  });
+  // SSH has its own server identity and allocated endpoint; enabling it on the
+  // restored computer must generate those independently of the source.
+  delete restored.ssh;
+  state.config.computers[state.config.computers.indexOf(allocated)] = restored;
+  return restored;
 }
 
 async function restoreBackup(state: LoadedState, id: string, name: string, args: ParsedArgs, start = false): Promise<ComputerConfig> {
   assertValidName(name);
   const verified = await locateBackup(state, id);
-  const defaults = {
-    preset: verified.manifest.source.preset,
-    compatibility: verified.manifest.source.compatibility,
-    image: verified.manifest.source.image,
-    capabilityContractVersion: verified.manifest.source.capabilityContractVersion,
-    capabilities: verified.manifest.source.capabilities,
-    cpus: verified.manifest.source.cpus,
-    memory: verified.manifest.source.memory,
-  };
-  const computer = addConfiguredComputer(state, name, defaults);
-  if (verified.manifest.source.controlProtocolVersion === undefined) delete computer.controlProtocolVersion;
-  else computer.controlProtocolVersion = verified.manifest.source.controlProtocolVersion;
-  computer.network = structuredClone(verified.manifest.source.network);
-  computer.environment = structuredClone(verified.manifest.source.environment);
-  // Restores and clones receive a fresh server identity and independently
-  // allocated client endpoint when the operator next enables SSH.
-  delete computer.ssh;
-  computer.toolPolicy = structuredClone(verified.manifest.source.toolPolicy);
-  computer.skillPolicy = structuredClone(verified.manifest.source.skillPolicy);
+  const computer = createRestoredComputerConfig(state, name, verified.manifest.source);
   const staged = restoreStage(state.paths, computer.id);
   const home = join(staged, 'home');
   const transaction = createStateTransaction('backup-restore', state, {
@@ -734,8 +815,12 @@ export async function backupCommand(
       if (!Number.isInteger(keep) || keep! < 0) throw new Error('--keep must be a non-negative integer.');
       await recoverPendingBackupCreation(state);
       const filter = args.positionals[1];
-      const doomed = await pruneBackupsBySelector(state, filter, keep!);
-      operationOutput('log', `Pruned ${doomed.length} verified backup${doomed.length === 1 ? '' : 's'}; malformed entries were preserved.`);
+      const report = await pruneBackupsBySelectorDetailed(state, filter, keep!);
+      operationOutput('log', JSON.stringify({
+        pruned: report.removed.map(({ id }) => id), retained: report.retained.map(({ id }) => id),
+        preserved: report.preserved,
+      }, null, 2));
+      operationOutput('log', `Pruned ${report.removed.length} checksum-verified backup${report.removed.length === 1 ? '' : 's'}; retained ${report.retained.length}; preserved ${report.preserved.length} incomplete, invalid, or unsafe entries.`);
       return;
     }
     throw new Error('Backup action must be create, list, verify, restore, or prune.');

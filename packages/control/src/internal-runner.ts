@@ -7,6 +7,7 @@ import { errorPayload, QubiclError } from './errors.js';
 import type { LeaseProof } from './lease.js';
 import { ProcessManager, parseServiceOptions, type ProcessLifecycle, type ProcessOutputMode, type StopSignal } from './processes.js';
 import { BrowserManager } from './browser.js';
+import { createBrowserInputVerifier } from './browser-ownership.js';
 import { discoverListeningPorts } from './ports.js';
 import { readEffectiveResourceLimits } from './resource-limits.js';
 import { controlDesktop, readClipboard, takeScreenshot, writeClipboard, type ControlAction, type DesktopScreenshotOptions } from './executor.js';
@@ -19,7 +20,7 @@ export interface InternalRunner {
   shutdown(): Promise<void>;
 }
 
-export function createInternalRunner(): InternalRunner {
+export function createInternalRunner(options: { browser?: BrowserManager } = {}): InternalRunner {
   const role = process.env.QUBICL_RUNTIME_ROLE;
   const key = process.env.QUBICL_RUNNER_KEY;
   if (role !== 'executor' && role !== 'session') throw new Error('Internal runner role must be executor or session.');
@@ -44,13 +45,14 @@ export function createInternalRunner(): InternalRunner {
     : undefined;
   const pointerPublisher = role === 'session' ? configuredViewerPointerPublisher() : undefined;
   const browser = role === 'session'
-    ? new BrowserManager(browserForCompatibility(requiredCompatibility()), {
+    ? options.browser ?? new BrowserManager(browserForCompatibility(requiredCompatibility()), {
       executable: process.env.QUBICL_BROWSER_EXECUTABLE ?? '/usr/local/bin/qubicl-chromium',
       environment: process.env,
       maxTabs: configuredInteger('QUBICL_BROWSER_MAX_TABS', 24, 1, 128),
       ...(pointerPublisher ? { publishViewerPointer: pointerPublisher } : {}),
     })
     : undefined;
+  const verifyBrowserInput = createBrowserInputVerifier(process.env.QUBICL_POINTER_URL, key);
 
   const server = createServer(async (request, response) => {
     try {
@@ -64,7 +66,7 @@ export function createInternalRunner(): InternalRunner {
         await handleExecutor(processes!, request, response, body);
         return;
       }
-      await handleSession(applications!, browser!, request, response, body);
+      await handleSession(applications!, browser!, request, response, body, verifyBrowserInput);
     } catch (error) {
       send(response, error instanceof QubiclError ? error.status : 500, errorPayload(error));
     }
@@ -220,6 +222,7 @@ async function handleSession(
   request: IncomingMessage,
   response: ServerResponse,
   body: Record<string, unknown>,
+  verifyBrowserInput: (owner: LeaseProof | undefined) => Promise<void>,
 ): Promise<void> {
   switch (`${request.method} ${request.url}`) {
     case 'GET /v1/status':
@@ -236,9 +239,13 @@ async function handleSession(
       return;
     case 'POST /v1/browser/invoke': {
       const method = browserMethod(body.method);
-      const args = array(body.args, 'args');
+      // JSON represents omitted positional arguments as null. Browser methods
+      // have optional arguments but no nullable positional parameters.
+      const args = array(body.args, 'args').map((value) => value === null ? undefined : value);
+      const owner = body.owner === undefined ? undefined : proof(body.owner);
       const callable = browser[method] as (...values: unknown[]) => Promise<unknown>;
-      send(response, 200, await callable.apply(browser, args));
+      const result = await browser.withInputOwnership(owner, () => verifyBrowserInput(owner), () => callable.apply(browser, args));
+      send(response, 200, result ?? { completed: true });
       return;
     }
     case 'POST /v1/desktop/screenshot':

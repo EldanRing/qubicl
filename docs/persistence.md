@@ -137,6 +137,15 @@ qubicl backup prune research --keep 5 --yes
 
 `--stopped` requires the source computer to be stopped. Optional `--encrypt --passphrase-file FILE` uses a local passphrase without persisting it in Qubicl state. The dashboard can create, verify, and restore encrypted backups while keeping the passphrase only in the accepted operation. Archives have checksummed manifests, explicit retention, and contain only the durable home—not runtime roots, credentials, or gateway TLS state. Verification and restore copy the exact archive through a no-follow, size-bounded descriptor, validate its complete regular-file/directory/link graph, repeat the metadata and byte identity checks during extraction, and no-follow walk the staged tree before promotion. Absolute Linux symlinks (including Python environment interpreter links) are preserved as opaque guest-path data and created only after regular-file extraction. Host inspection and extraction never follow these targets; the guest image must supply them when used. Archive members beneath any symlink, external hard-link targets, escaping relative links, relative-link cycles, traversal, duplicate or canonically aliased paths, special or sparse entries, unsafe permissions, and over-budget metadata or expansion fail closed. Backups containing absolute symlinks require Qubicl 0.7 or later to verify and restore. Migration snapshots are not backups of computer homes, and secret-free `export` intentionally omits credentials, gateway exposure, and file contents.
 
+Home-only restore and clone preserve the saved computer configuration, including
+software recipes, task and storage policies, browser limits and devcontainer
+hooks. Computer/runtime identity and credentials are newly allocated; SSH
+configuration and restored server keys are cleared so enabling SSH creates an
+independent endpoint. Home-backup pruning verifies private regular archives and
+their manifest checksums before applying retention. Invalid or incomplete entries
+remain available for diagnosis and do not count toward the newest valid backups
+being kept; the result lists each pruned, retained and preserved backup.
+
 ## Full-installation export and import
 
 For a stopped installation, `qubicl installation export --output FILE
@@ -153,9 +162,14 @@ identity, computer inventory, and an optional target before any import.
 new target directory, assigns a new installation ID, retains computer IDs and
 client credentials, rewrites owner markers for the importing operator, disables
 the imported dashboard and its remote exposure, starts nothing, and leaves the
-source installation and bundle unchanged. The generated `import-report.json`
+source installation and bundle unchanged. Active computers and saved trash lose
+their source container-name overrides; their runtime names derive from the new
+installation ID, preventing collisions with the original installation.
+The generated `import-report.json`
 lists the host-specific gateway, SSH, certificate, image, and service checks to
 perform before starting the imported installation.
+Subsequent imports archive the previous report as `import-report-*.json` and link
+it from the new report; the exported state retains that migration history.
 
 
 ## State format 5 and management recovery

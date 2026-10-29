@@ -9,7 +9,7 @@ import { backupPassphraseFromArgs, decryptBackupFile, encryptBackupFile } from '
 import { managedComputerRuntimeObservation, managedGatewayRuntimeObservation, validateDocker } from './docker.js';
 import { operationOutput } from './operation-context.js';
 import { extractInspectedBackupArchive, inspectBackupArchive } from './safe-backup-archive.js';
-import { loadState, prepareStateDirectories, saveState, statePaths } from './state.js';
+import { loadState, prepareStateDirectories, readMetadata, saveMetadata, saveMetadataInDirectory, saveState, statePaths, type LoadedState } from './state.js';
 import { readDashboardConfiguration, saveDashboardConfiguration } from './dashboard/runtime.js';
 
 const MANIFEST_NAME = 'installation-manifest.json';
@@ -101,6 +101,7 @@ async function importInstallation(bundle: string, args: ParsedArgs): Promise<voi
     const dashboard = await readDashboardConfiguration(extracted).catch(() => undefined);
     inspected.state.config.installationId = newInstallationId;
     await prepareStateDirectories(inspected.state.paths);
+    await rebaseImportedRuntimeNames(inspected.state);
     await saveState(inspected.state);
     if (dashboard) {
       dashboard.installationId = newInstallationId;
@@ -115,12 +116,15 @@ async function importInstallation(bundle: string, args: ParsedArgs): Promise<voi
       await replaceImportedOwnerMarker(extracted, computer.id, uid, gid);
     }
     await rm(join(extracted, MANIFEST_NAME), { force: false });
+    const previousImportReport = await preserveImportedReport(extracted);
     await writeFile(join(extracted, 'import-report.json'), `${JSON.stringify({
       schemaVersion: 1,
       importedAt: new Date().toISOString(),
       sourceInstallationId: priorInstallationId,
       installationId: newInstallationId,
       sourceVersion: inspected.manifest.sourceVersion,
+      ...(previousImportReport ? { previousImportReport } : {}),
+      runtimeNames: 'regenerated under the imported installation namespace, including saved trash metadata',
       dashboard: dashboard ? 'disabled until explicitly enabled on this host; remote exposure removed' : 'not configured',
       gatewayExposure: inspected.state.config.gateway.exposure ? 'configuration and sealed TLS material retained; verify host address, DNS, certificate validity, and port before use' : 'disabled',
       next: [`QUBICL_HOME=${targetRoot} qubicl doctor --json`, `QUBICL_HOME=${targetRoot} qubicl storage show ${inspected.state.config.computers[0]?.name ?? 'COMPUTER'}`],
@@ -136,6 +140,42 @@ async function importInstallation(bundle: string, args: ParsedArgs): Promise<voi
       sourcePreserved: true,
     }, null, 2));
   } finally { await rm(stagingParent, { recursive: true, force: true }); }
+}
+
+async function preserveImportedReport(root: string): Promise<string | undefined> {
+  const previous = join(root, 'import-report.json');
+  let info;
+  try { info = await lstat(previous); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error('The imported installation report must be a regular file.');
+  // Keep the previous host's report as history without following archive links
+  // or overwriting it. Each import gets a fresh report at the documented path.
+  const archivedName = `import-report-${randomUUID()}.json`;
+  await assertAbsent(join(root, archivedName), 'Import report history destination already exists.');
+  await rename(previous, join(root, archivedName));
+  return archivedName;
+}
+
+async function rebaseImportedRuntimeNames(state: LoadedState): Promise<void> {
+  for (const computer of state.config.computers) {
+    // Explicit names belong to the source Docker installation. Let the normal
+    // naming function derive names from this installation's new identity.
+    delete computer.runtimeName;
+    await saveMetadata(state.paths, computer);
+  }
+  // A later trash restore must not reintroduce a source container name either.
+  for (const entry of await readdir(state.paths.trash, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const directory = join(state.paths.trash, entry.name);
+    let metadata;
+    try { metadata = await readMetadata(join(directory, 'metadata.yaml')); }
+    catch { continue; } // Preserve unrelated/malformed records just as findTrash does.
+    delete metadata.runtimeName;
+    await saveMetadataInDirectory(directory, metadata);
+  }
 }
 
 async function replaceImportedOwnerMarker(root: string, computerId: string, uid: number, gid: number): Promise<void> {
@@ -194,7 +234,7 @@ function importPlan(manifest: InstallationManifest, config: Awaited<ReturnType<t
     reconciliation: {
       installationIdentity: 'a new installation ID will be assigned; computer IDs and client credentials remain unchanged',
       ownership: 'extracted files and home ownership markers will use the importing operator UID/GID',
-      runtimes: 'nothing starts automatically; exact images must be locally available or acquired by a later explicit command',
+      runtimes: 'container names are regenerated under the new installation namespace; nothing starts automatically; exact images must be locally available or acquired by a later explicit command',
       gateway: { port: config.gateway.port, exposure: config.gateway.exposure ? 'retained but must be revalidated for this host' : 'disabled' },
       ssh: config.computers.filter(({ ssh }) => ssh?.enabled).map(({ name, ssh }) => ({ computer: name, port: ssh!.port, action: 'verify port availability before start; identity is retained' })),
       dashboard: 'disabled on import; local service registration and remote TLS setup must be enabled explicitly',

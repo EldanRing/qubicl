@@ -9,6 +9,20 @@ page before deciding what to do next. Older servers without dispatch receipts
 are handled conservatively: their errors are returned without an automatic retry.
 A receipt is evidence about dispatch, not proof that the application accepted it.
 
+The session runner checks current interactive ownership with the controller
+before each input, including individual batch actions and compound-action steps.
+Human takeover stops remaining input; cleanup releases modifiers and mouse
+buttons already pressed by that operation. A failed ownership check stops input
+instead of relying on a cached lease. An input already dispatched can still have
+taken effect, so an interrupted operation must be observed before continuing.
+
+Passive snapshots reuse refs for the same DOM nodes and do not invalidate the
+controller's previous snapshot. References remain bounded to 6,400 distinct
+elements, evicting the least recently observed when genuinely new elements fill
+that capacity. Snapshot metadata reports this retention policy. Navigation,
+frame replacement, tab changes and disconnected nodes still invalidate affected
+refs; refresh the snapshot after `stale_browser_ref`.
+
 JavaScript alert, confirm and prompt dialogs return `browser_waiting_for_dialog`
 with a dialog ID. `browser_dialogs` and authorized `browser_respond_dialog` bypass
 the blocked action queue. They do not accept or dismiss dialogs automatically.

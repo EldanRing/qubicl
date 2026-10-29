@@ -46,6 +46,10 @@ share. Explicit revocation or expiry also closes the corresponding active
 connections. A failed listener inspection preserves publications until a
 successful check establishes that the app stopped. If an app interrupts an HTTP
 transfer, the preview closes the response so the client can detect the failure.
+Agent release, lease expiry and human takeover preserve publications for retained
+apps. Session-scoped apps still stop with their lease, and their previews disappear
+when the listener stops. Explicit unpublish, runtime shutdown and policy revocation
+can revoke publications; file and share expiry remain independent of input ownership.
 The preview never binds the computer port directly to the host.
 
 ## Optional remote gateway
@@ -89,6 +93,14 @@ links, duplicate/aliased paths, and over-budget archives fail closed. Archives
 are not whole-container snapshots. Quiescing pauses the computer container for
 archive creation and always attempts to resume it.
 
+Home restore and clone preserve the saved software recipe, task/storage policies,
+browser tab limit, devcontainer settings, environment and access policies. They
+allocate a new computer ID, runtime name and credentials; SSH is disabled and its
+server keys are regenerated when enabled. Pruning counts only private archives
+whose SHA-256 matches their manifest. Missing, corrupt and unsafe entries are
+preserved for review and never displace a verified backup in `--keep` retention.
+The command reports exact pruned, retained and preserved IDs with reasons.
+
 The Chromium profile is part of the durable home, so full-home backups,
 checkpoints, restores, and clones include its cookies, site data, history,
 preferences, and sessions. Resetting browser tabs does not erase that data. To
@@ -123,6 +135,11 @@ QUBICL_HOME=/new/qubicl-state qubicl doctor
 Import assigns a new installation ID, preserves computer IDs, client
 credentials, homes, browser profiles, and SSH identities, disables the imported
 dashboard and its remote exposure, starts nothing, and writes an import report.
+Source container-name overrides are removed from active and trashed computer
+metadata so future runtimes use the new installation namespace.
+Importing a previously imported installation preserves its old report under a
+unique `import-report-*.json` name and writes the current report at
+`import-report.json`, so further export/import cycles remain supported.
 The source installation and bundle remain unchanged.
 
 ## Tasks, terminals, and storage

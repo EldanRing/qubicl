@@ -575,8 +575,10 @@ export class PreviewManager {
     if (!token || !/^[A-Za-z0-9_-]{43}$/u.test(token)) return undefined;
     const hash = digest(token);
     const ticket = this.managementTickets.get(hash);
+    const surface = request.headers['x-qubicl-access-surface'];
+    const access = surface === 'external' ? 'remote' : surface === 'local' ? 'local' : undefined;
     if (!ticket || ticket.publicationId !== publication.id || ticket.expiresAt <= Date.now()
-      || request.headers['x-qubicl-access-surface'] !== ticket.access) return undefined;
+      || access !== ticket.access) return undefined;
     this.managementTickets.delete(hash);
     const cookieToken = randomBytes(32).toString('base64url');
     if (this.managementSessions.size >= MAX_MANAGEMENT_SESSIONS) this.managementSessions.delete(this.managementSessions.keys().next().value!);
