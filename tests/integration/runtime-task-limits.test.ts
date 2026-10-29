@@ -16,7 +16,7 @@ const thirtyDays = 30 * 24 * 60 * 60 * 1000;
 test('managed PTYs retain configured variables and workload proxies without inheriting controller secrets', async (context) => {
   const home = await mkdtemp(join(tmpdir(), 'qubicl-pty-env-'));
   context.after(() => rm(home, { recursive: true, force: true }));
-  const proxy = 'http://fixture-user:fixture-key@proxy.example:3128';
+  const proxy = 'http://fixture-user:fixture-key@proxy.test:3128';
   const manager = new ProcessManager({ home, outputDirectory: home, pty: { helperPath }, environment: {
     QUBICL_WORKLOAD_ENV_JSON: JSON.stringify({ APP_MODE: 'configured value', NODE_OPTIONS: '--bad-option', LD_PRELOAD: '/bad-library', QUBICL_INTERNAL_KEY: 'configured-control-value' }),
     QUBICL_PROXY_URL: proxy, QUBICL_INTERNAL_KEY: 'private-control-value', AWS_SECRET_ACCESS_KEY: 'inherited-host-value',
@@ -125,11 +125,11 @@ test('the actual lifecycle hook receives configured workload environment without
   const result = await promisify(execFile)('/bin/bash', ['-c', script], { env: {
     PATH: process.env.PATH,
     QUBICL_WORKLOAD_ENV_JSON: JSON.stringify({ APP_MODE: 'configured value', QUOTED_VALUE: 'line one\nline two "$HOME"', NODE_OPTIONS: '--bad-option' }),
-    QUBICL_PROXY_URL: 'http://fixture-user:fixture-key@proxy.example:3128',
+    QUBICL_PROXY_URL: 'http://fixture-user:fixture-key@proxy.test:3128',
     QUBICL_INTERNAL_KEY: 'private-control-value', AWS_SECRET_ACCESS_KEY: 'inherited-host-value',
     QUBICL_DEVCONTAINER_GUEST_JSON: JSON.stringify({ workspaceFolder: home, hooks: { postStartCommand: 'printf "%s|%s|%s|%s|%s|%s" "$APP_MODE" "$HTTPS_PROXY" "${QUBICL_INTERNAL_KEY-unset}" "${AWS_SECRET_ACCESS_KEY-unset}" "${QUBICL_WORKLOAD_ENV_JSON-unset}" "$QUOTED_VALUE"' } }),
   } });
-  assert.equal(result.stdout, 'configured value|http://fixture-user:fixture-key@proxy.example:3128|unset|unset|unset|line one\nline two "$HOME"');
+  assert.equal(result.stdout, 'configured value|http://fixture-user:fixture-key@proxy.test:3128|unset|unset|unset|line one\nline two "$HOME"');
 });
 
 test('the actual internal executor startup forwards only the four task policy settings into its sanitized subprocess', async (context) => {

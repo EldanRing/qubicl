@@ -46,3 +46,18 @@ and remove them as soon as upstream ships the fix, or re-review before expiry.
 Expiry governs release evidence, not the runtime lifetime of installed computers.
 The findings and accepted risks remain in candidate scans and release notes.
 Brotli is separately upgraded to 1.2.1; it receives no exception.
+
+
+## 0.8.0 revalidation — 2026-10-29
+
+The same exact package/version and four computer-preset scope applies to the
+initial-tier 0.8.0 candidate. Official npm dist-tags still select 12.2.1 for
+latest/next-12 and 11.21.1 for next-11. The retained npm 12.2.1 archive and
+node-gyp downloader match the hashes above; the bundled Undici remains 6.29.0.
+The new desktop applications and control tools do not change this npm-private
+consumer. Candidate scans must still identify the exact affected bytes and
+apply the scoped records; this review does not approve other findings.
+
+The original expiry remains `2026-11-12T01:36:44Z`; preparing 0.8 does not extend
+it. The accepted availability risks and TLS applicability limits remain as
+stated above and must stay disclosed in the 0.8 release notes.

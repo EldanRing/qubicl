@@ -1,6 +1,6 @@
 # Observable computers and workstation applications
 
-Status: accepted for 0.8; implemented and locally verified on Linux x64; not released.
+Status: accepted for 0.8; implemented and locally verified on Linux x64.
 
 Qubicl already provides a persistent computer. The reviewed gaps concerned
 reliable observation, targeting and continuation, rather than replacing its

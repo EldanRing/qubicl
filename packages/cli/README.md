@@ -107,12 +107,12 @@ never with `sudo`.
 | `computer` | Browser plus a lightweight XFCE desktop, editors, document tools, SSH | ✓ | 2 CPU / 3g |
 | `workstation` | Development, LibreOffice, GIMP, Inkscape, Blender, FreeCAD, Kdenlive | ✓ | 2 CPU / 4g |
 
-The new apps, native accessibility tools, authenticated browser reading and
-research filters are development additions for 0.8; published 0.7 images do not
-include them yet. Creative applications and their default skills belong only to
-workstation. Other graphical presets gain native window inspection.
+Qubicl 0.8 adds native accessibility tools, authenticated browser reading and
+research filters. Creative applications and their default skills belong only to
+workstation. Other graphical presets gain native window inspection. Existing 0.7
+computers need a managed upgrade to receive these capabilities.
 
-The same development branch adds safer browser actions, guarded file saves,
+Qubicl 0.8 also adds safer browser actions, guarded file saves,
 service readiness, document-preserving edits and verifiable render manifests.
 Office helpers support independent chart-slide copies, native table restructuring
 with dependent charts/formulas, and final/original/markup tracked-change reads.

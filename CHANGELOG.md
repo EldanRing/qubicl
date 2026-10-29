@@ -4,6 +4,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
+## 0.8.0 - 2026-10-29
+
 ### Added
 
 - Optional file-save content hashes and atomic create-only writes; local service
