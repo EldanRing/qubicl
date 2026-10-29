@@ -440,7 +440,7 @@ function requiredLinkpath(entry: ReadEntry, name: string, limits: Readonly<Backu
     throw archiveError(`link target for ${JSON.stringify(name)} is longer than ${limits.maxPathBytes} bytes`);
   }
   if (entry.linkpath.includes('\\')) throw archiveError(`link ${JSON.stringify(name)} uses an ambiguous backslash target`);
-  if (posix.isAbsolute(entry.linkpath) || windowsAbsolute(entry.linkpath)) {
+  if (windowsAbsolute(entry.linkpath) || (entry.type !== 'SymbolicLink' && posix.isAbsolute(entry.linkpath))) {
     throw archiveError(`link ${JSON.stringify(name)} targets an absolute path`);
   }
   return entry.linkpath;
@@ -567,6 +567,10 @@ function assertConfinedAcyclicSymlink(
   limits: Readonly<BackupArchiveLimits>,
   linkStep: () => void,
 ): void {
+  // Absolute symlinks name paths in the guest, such as a venv's interpreter.
+  // They are opaque data on the host: extraction skips all links, rejects
+  // members beneath them, and materializes symlinks only after regular files.
+  if (posix.isAbsolute(entry.linkpath!)) return;
   const resolved = dirnameArchivePath(entry.name).split('/').filter(Boolean);
   let resolvedBytes = Buffer.byteLength(resolved.join('/'), 'utf8');
   let pending = entry.linkpath!.split('/');
@@ -597,6 +601,7 @@ function assertConfinedAcyclicSymlink(
     const prefixKey = unicodeCollisionKey(prefix);
     const candidate = entriesByCanonicalName.get(prefixKey);
     if (candidate?.kind !== 'symlink') continue;
+    if (posix.isAbsolute(candidate.linkpath!)) return;
     if (followed.has(prefixKey)) throw archiveError(`symlink cycle includes ${JSON.stringify(prefix)}`);
     if (followed.size >= limits.maxLinkChain) {
       throw archiveError(`symlink chain from ${JSON.stringify(entry.name)} is too deep`);

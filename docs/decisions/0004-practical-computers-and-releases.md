@@ -27,6 +27,10 @@ when an existing SSH connection was sufficient.
    package reinstallation; startup does not download packages. `upgrade --all`
    manages recipe images while leaving unrelated custom images manual. Package removal rebuilds from the base; explicit refresh bypasses
    the apt layer cache. Bulk recovery retains exact prepared image bytes.
+   Home backups preserve absolute Linux symlinks needed by these environments.
+   Host restore treats their targets as opaque guest paths, creates links after
+   file extraction, and rejects writes beneath links or external hard links.
+   Review this boundary if extraction starts following links or uses host targets.
 4. Desktop launches accept executable names, symlinks, and absolute executable
    paths. They run directly as the workload user with observable identity,
    bounded processes, confined document paths, and existing ownership rules.

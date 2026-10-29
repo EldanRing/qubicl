@@ -48,6 +48,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Preserve absolute guest symlinks in home backups, including durable Python
+  environment interpreters, without following their targets during host restore.
 - Recover unchanged image archives from failed candidates whose security scan
   policy was rejected; require fresh scans when complete evidence was not saved.
 - Reattach gateway control networks for retained stopped computers after gateway

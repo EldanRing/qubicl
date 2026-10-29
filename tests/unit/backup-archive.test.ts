@@ -58,6 +58,32 @@ test('valid Qubicl-home archives preserve files and confined link chains indepen
   }
 });
 
+test('backup restores absolute guest symlinks and venv aliases without following host targets', async () => {
+  const host = await mkdtemp(join(tmpdir(), 'qubicl-backup-host-target-'));
+  const sentinel = join(host, 'sentinel');
+  await writeFile(sentinel, 'host contents stay unchanged');
+  const fixture = await archiveFixture([
+    { path: 'qubicl/.local/share/qubicl/python/3.13/bin/python3', type: 'SymbolicLink', linkpath: '/usr/bin/python3.13' },
+    { path: 'qubicl/.local/share/qubicl/python/3.13/bin/python', type: 'SymbolicLink', linkpath: 'python3' },
+    { path: 'qubicl/host-target', type: 'SymbolicLink', linkpath: sentinel },
+    { path: 'qubicl/project.txt', type: 'File', body: 'durable project' },
+  ]);
+  try {
+    const destination = join(fixture.root, 'restored');
+    await mkdir(destination);
+    const plan = await inspectBackupArchive(fixture.archive);
+    await extractInspectedBackupArchive(fixture.archive, destination, plan);
+    assert.equal(await readlink(join(destination, 'qubicl/.local/share/qubicl/python/3.13/bin/python3')), '/usr/bin/python3.13');
+    assert.equal(await readlink(join(destination, 'qubicl/.local/share/qubicl/python/3.13/bin/python')), 'python3');
+    assert.equal(await readlink(join(destination, 'qubicl/host-target')), sentinel);
+    assert.equal(await readFile(sentinel, 'utf8'), 'host contents stay unchanged');
+    assert.equal(await readFile(join(destination, 'qubicl/project.txt'), 'utf8'), 'durable project');
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+    await rm(host, { recursive: true, force: true });
+  }
+});
+
 test('archive inspection rejects traversal, aliases, collisions, unsafe links, cycles, and special entries', async (context) => {
   const cases: Array<{ name: string; entries: ArchiveEntry[]; pattern: RegExp }> = [
     { name: 'parent traversal', entries: [{ path: '../escape', type: 'File', body: 'x' }], pattern: /traversal path/ },
@@ -88,7 +114,18 @@ test('archive inspection rejects traversal, aliases, collisions, unsafe links, c
       pattern: /beneath non-directory/,
     },
     { name: 'symlink traversal', entries: [{ path: 'link', type: 'SymbolicLink', linkpath: '../escape' }], pattern: /escapes the archive root/ },
-    { name: 'absolute symlink', entries: [{ path: 'link', type: 'SymbolicLink', linkpath: '/outside' }], pattern: /targets an absolute path/ },
+    { name: 'absolute hardlink', entries: [{ path: 'link', type: 'Link', linkpath: '/outside' }], pattern: /targets an absolute path/ },
+    { name: 'Windows absolute symlink', entries: [{ path: 'link', type: 'SymbolicLink', linkpath: 'C:/outside' }], pattern: /targets an absolute path/ },
+    {
+      name: 'absolute symlink ancestor after child',
+      entries: [{ path: 'parent/child', type: 'File', body: 'x' }, { path: 'parent', type: 'SymbolicLink', linkpath: '/outside' }],
+      pattern: /beneath non-directory/,
+    },
+    {
+      name: 'hardlink through absolute symlink',
+      entries: [{ path: 'link', type: 'Link', linkpath: 'outside' }, { path: 'outside', type: 'SymbolicLink', linkpath: '/outside' }],
+      pattern: /does not resolve to a regular file/,
+    },
     { name: 'hardlink traversal', entries: [{ path: 'link', type: 'Link', linkpath: '../outside' }], pattern: /traversal path/ },
     {
       name: 'missing hardlink target',
