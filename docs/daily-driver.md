@@ -286,6 +286,21 @@ first mutation leaves a recovery journal and reports the completed prefix; fix
 the stated prerequisite and rerun a normal lifecycle command rather than
 deleting the journal.
 
+For the 0.8 development upgrade, update the gateway as well as the computers:
+`qubicl upgrade research` updates only that computer, while `qubicl upgrade --all`
+includes the gateway. Existing tool allowlists remain unchanged. After upgrading,
+enable the new browser/native observation and action tools when wanted:
+
+```sh
+qubicl tools research \
+  --enable browser_read,list_desktop_windows,desktop_snapshot,desktop_element_action,desktop_window_action \
+  --yes
+```
+
+This adds only the named tools to the existing policy. New computers receive
+their preset's default tool set. Existing skill selections also remain unchanged;
+use `qubicl skills research` to select newly bundled compatible skills.
+
 `qubicl recover status` is read-only and names every recognized migration,
 state, backup, lifecycle, and upgrade journal, its phase, and the exact
 roll-forward command. Recorded operations are not labelled cancellable when a

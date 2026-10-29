@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   ComputerConfigSchema,
   ConfigSchema,
+  buildComputerManifest,
   createDevelopmentCatalog,
   defaultSecrets,
   presetDefaults,
@@ -42,8 +43,114 @@ import {
   prepareUpgradeSoftware,
   recoverPendingUpgradeAll,
   validateUpgradeInvocation,
+  resolveUpgradePlanningCatalog,
+  acquireAndInspectExactTarget,
 } from '../../packages/cli/dist/lifecycle-command.js';
 import { prepareStateDirectories, saveState, statePaths, type LoadedState } from '../../packages/cli/dist/state.js';
+
+test('development bulk upgrade reviews local immutable IDs and rejects changed tags before acceptance or recovery', async () => {
+  const fixture = upgradeFixture(false);
+  fixture.catalog = createDevelopmentCatalog();
+  const original = structuredClone(fixture.catalog);
+  const local = new Map([
+    [fixture.catalog.gateway.requested, sha('1')],
+    [fixture.catalog.presets.browser.image.requested, sha('2')],
+    [fixture.catalog.presets['file-system'].image.requested, sha('3')],
+  ]);
+  const inspected: string[] = [];
+  const resolve = async () => resolveUpgradePlanningCatalog(fixture.config, 'linux/amd64', fixture.catalog, async (reference) => {
+    inspected.push(reference);
+    const id = local.get(reference);
+    if (!id) throw new Error('Required local image is missing');
+    return id;
+  });
+  const catalog = await resolve();
+  assert.deepEqual(fixture.catalog, original, 'planning must not mutate the build catalog');
+  assert.deepEqual(inspected.sort(), [...local.keys()].sort(), 'only required curated images are inspected once');
+  const plan = buildUpgradeAllPlan({ ...planningInput(fixture), catalog, presentExactTargets: new Set(local.values()) });
+  assert.deepEqual(plan.exactTargets.map(({ exactTarget }) => exactTarget).sort(), [...local.values()].sort());
+  assert(plan.exactTargets.every(({ present }) => present));
+  const lines: string[] = [];
+  printUpgradeAllPreview(plan, (line) => lines.push(line));
+  for (const id of local.values()) assert(lines.some((line) => line.includes(id)));
+
+  local.set(fixture.catalog.gateway.requested, sha('4'));
+  const changed = buildUpgradeAllPlan({ ...planningInput(fixture), catalog: await resolve() });
+  let mutations = 0;
+  await assert.rejects(executeUpgradeAll(plan, fixture.config, {
+    confirm: async () => true, replan: async () => changed,
+    acquireAndInspect: async () => { throw new Error('must not acquire a changed plan'); },
+    applyGatewayAndDefaults: async () => { mutations++; }, applyComputer: async () => { mutations++; },
+  }), /changed after preview/);
+  assert.throws(() => assertAcceptedUpgradeAllRecovery(acceptedUpgradeAllPlan(plan), changed), /changed after acceptance/);
+  assert.equal(mutations, 0);
+  local.delete(fixture.catalog.gateway.requested);
+  await assert.rejects(resolve(), /local image is missing/);
+
+  const releaseCatalog = { ...releaseLikeCatalog(false), development: false };
+  assert.equal(await resolveUpgradePlanningCatalog(fixture.config, 'linux/amd64', releaseCatalog, async () => {
+    throw new Error('release catalog must not resolve mutable tags');
+  }), releaseCatalog);
+});
+
+test('development bulk acquisition pins reviewed bytes and refuses replacement during inspection while release digest checks stay strict', async () => {
+  const fixture = upgradeFixture(false);
+  const catalog = createDevelopmentCatalog();
+  const local = new Map([
+    [catalog.gateway.requested, sha('1')],
+    [catalog.presets.browser.image.requested, sha('2')],
+    [catalog.presets['file-system'].image.requested, sha('3')],
+  ]);
+  const inspectLocal = async (reference: string) => local.get(reference)!;
+  const resolved = await resolveUpgradePlanningCatalog(fixture.config, 'linux/amd64', catalog, inspectLocal);
+  const plan = buildUpgradeAllPlan({ ...planningInput(fixture), catalog: resolved });
+  const seen: string[] = [];
+  const dependencies = {
+    catalog, inspectLocal,
+    acquireGateway: async (options: Parameters<typeof import('../../packages/cli/dist/docker.js')['acquireCatalogGatewayContract']>[0]) => {
+      const id = options!.catalog!.gateway.platforms['linux/amd64']!.resolved as `sha256:${string}`;
+      assert.equal(options!.offline, true); seen.push(id);
+      return { identity: { requested: catalog.gateway.requested, resolved: `qubicl/gateway@${sha('a')}`, contentId: id }, compatibility: {} };
+    },
+    acquirePreset: async (preset: Parameters<typeof import('../../packages/cli/dist/docker.js')['acquireCatalogPreset']>[0], options: Parameters<typeof import('../../packages/cli/dist/docker.js')['acquireCatalogPreset']>[1]) => {
+      const image = options!.catalog!.presets[preset].image;
+      const id = image.platforms['linux/amd64']!.resolved as `sha256:${string}`;
+      assert.equal(options!.offline, true); seen.push(id);
+      return { identity: { requested: image.requested, resolved: `qubicl/${preset}@${sha('b')}`, contentId: id }, compatibility: {}, labels: {}, manifest: buildComputerManifest(preset, catalog.releaseVersion, catalog.revision) };
+    },
+  };
+  let mutations = 0;
+  await executeUpgradeAll(plan, fixture.config, {
+    confirm: async () => true, replan: async () => plan,
+    acquireAndInspect: (target) => acquireAndInspectExactTarget(target, 'linux/amd64', false, dependencies),
+    applyGatewayAndDefaults: async () => { assert.equal(seen.length, 3); mutations++; },
+    applyComputer: async () => { mutations++; },
+  });
+  assert(mutations > 0);
+  assert.deepEqual(seen.sort(), [...local.values()].sort());
+
+  const gateway = plan.exactTargets.find((target) => target.consumers.some(({ kind }) => kind === 'gateway'))!;
+  await assert.rejects(acquireAndInspectExactTarget(gateway, 'linux/amd64', true, {
+    ...dependencies,
+    acquireGateway: async (options) => {
+      const result = await dependencies.acquireGateway(options);
+      local.set(catalog.gateway.requested, sha('4'));
+      return result;
+    },
+  }), /changed after preview/);
+  await assert.rejects(acquireAndInspectExactTarget(gateway, 'linux/amd64', true, {
+    ...dependencies, acquireGateway: async () => { throw new Error('must not inspect replaced tag'); },
+  }), /changed after preview/);
+
+  const releaseCatalog = { ...fixture.catalog, development: false };
+  const releasePlan = buildUpgradeAllPlan({ ...planningInput(fixture), catalog: releaseCatalog });
+  const releaseGateway = releasePlan.exactTargets.find((target) => target.consumers.some(({ kind }) => kind === 'gateway'))!;
+  await assert.rejects(acquireAndInspectExactTarget(releaseGateway, 'linux/amd64', true, {
+    catalog: releaseCatalog,
+    inspectLocal: async () => { throw new Error('release acquisition must not inspect tags'); },
+    acquireGateway: async () => ({ identity: { requested: releaseCatalog.gateway.requested, resolved: `wrong/repository@${sha('a')}`, contentId: sha('1') }, compatibility: {} }),
+  }), /reviewed exact target/);
+});
 
 test('upgrade-all preview is deterministic, deduplicated, honest about unknown sizes, and read-only', () => {
   const fixture = upgradeFixture();

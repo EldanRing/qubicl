@@ -1,5 +1,9 @@
 # Browser action safety
 
+Existing computers retain their enabled tools. Follow the
+[0.8 upgrade sequence](daily-driver.md#lifecycle-and-local-update-review) to update
+the gateway and enable `browser_read` alongside the new native tools.
+
 The 0.8 development contract distinguishes actions rejected before dispatch from
 actions with uncertain results. A stale/background lease error includes
 `details.dispatch: "not-started"` only when the server established non-execution.

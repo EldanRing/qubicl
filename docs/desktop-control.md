@@ -5,6 +5,10 @@ These additions are implemented on the development branch for 0.8. Published
 images expose native inspection; managed app launching remains available on
 computer and workstation.
 
+Existing computers retain their enabled tools. Follow the
+[0.8 upgrade sequence](daily-driver.md#lifecycle-and-local-update-review) to update
+the gateway and add the new native tools to the saved policy.
+
 `list_desktop_windows` returns X11 client-window IDs, titles, process IDs,
 geometry, stacking order, visibility, window types, modal/transient relationships
 and a `geometryToken`. Follow `nextCursor` to read more windows. This is a live

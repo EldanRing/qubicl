@@ -21,6 +21,7 @@ import {
   type ComputerDefaults,
   type ImageCatalog,
   type QubiclConfig,
+  type Preset,
   type RuntimeContainerBinding,
 } from '@qubicl/core';
 import type { ParsedArgs } from './args.js';
@@ -30,6 +31,7 @@ import {
   acquireCatalogGatewayContract,
   acquireCatalogPreset,
   acquireCustomImage,
+  docker,
   imageDrift,
   imageExists,
   managedComputerRuntimeObservation,
@@ -119,7 +121,8 @@ export async function collectUpgradeAllPlan(
   platform: DockerPlatform,
   options: { ignoreUpgradeJournal?: boolean } = {},
 ): Promise<UpgradeAllPlan> {
-  const exactTargets = curatedExactTargets(state.config, platform);
+  const catalog = await resolveUpgradePlanningCatalog(state.config, platform);
+  const exactTargets = curatedExactTargets(state.config, platform, catalog);
   const [gatewayRuntime, gatewayDrift, pending, pendingBackup, pendingUpgrade, pendingComputerLifecycle, presence, computerObservations] = await Promise.all([
     managedGatewayRuntimeObservation(state),
     imageDrift(state.config.gateway.image),
@@ -138,7 +141,7 @@ export async function collectUpgradeAllPlan(
   ]);
   return buildUpgradeAllPlan({
     config: state.config,
-    catalog: IMAGE_CATALOG,
+    catalog,
     platform,
     runtime: {
       gateway: { ...gatewayRuntime, contentDrift: gatewayDrift.drifted },
@@ -152,6 +155,45 @@ export async function collectUpgradeAllPlan(
     },
     recovery: recoveryObservation(pending, pendingBackup, pendingUpgrade, pendingComputerLifecycle),
   });
+}
+
+/** Resolve local development tags before review; never pull, build, or run images. */
+export async function resolveUpgradePlanningCatalog(
+  config: QubiclConfig,
+  platform: DockerPlatform,
+  catalog: ImageCatalog = IMAGE_CATALOG,
+  inspectLocal: (reference: string) => Promise<`sha256:${string}`> = localImageContentId,
+): Promise<ImageCatalog> {
+  if (!catalog.development) return catalog;
+  const resolved = structuredClone(catalog);
+  const presets = new Set<Preset>();
+  if (config.defaults.preset !== 'custom') presets.add(config.defaults.preset);
+  for (const computer of config.computers) {
+    const preset = computer.software?.basePreset ?? computer.preset;
+    if (preset !== 'custom') presets.add(preset);
+  }
+  const images = [resolved.gateway, ...[...presets].map((preset) => resolved.presets[preset].image)];
+  const inspected = new Map<string, Promise<`sha256:${string}`>>();
+  await Promise.all(images.map(async (image) => {
+    const variant = image.platforms[platform];
+    if (!variant) throw new Error(`Image ${image.requested} is unavailable for ${platform}.`);
+    let pending = inspected.get(image.requested);
+    if (!pending) {
+      pending = inspectLocal(image.requested);
+      inspected.set(image.requested, pending);
+    }
+    variant.resolved = requiredContentId(await pending, image.requested);
+  }));
+  return resolved;
+}
+
+async function localImageContentId(reference: string): Promise<`sha256:${string}`> {
+  let contentId: string;
+  try { contentId = (await docker(['image', 'inspect', '--format', '{{.Id}}', reference])).trim(); }
+  catch (cause) {
+    throw new Error(`Development upgrade requires local image ${reference}. Build the required development images before reviewing upgrade --all; no image was pulled or built.`, { cause });
+  }
+  return requiredContentId(contentId, reference);
 }
 
 export async function lifecycleUpdateStatus(
@@ -582,11 +624,40 @@ export function printUpgradeAllPreview(plan: UpgradeAllPlan, write: (line: strin
   }
 }
 
-async function acquireAndInspectExactTarget(
+export async function acquireAndInspectExactTarget(
   target: ExactUpgradeTarget,
   platform: DockerPlatform,
   offline: boolean,
+  dependencies: {
+    catalog?: ImageCatalog;
+    inspectLocal?: (reference: string) => Promise<`sha256:${string}`>;
+    acquireGateway?: typeof acquireCatalogGatewayContract;
+    acquirePreset?: typeof acquireCatalogPreset;
+    acquireCustom?: typeof acquireCustomImage;
+  } = {},
 ): Promise<AcquiredUpgradeTarget> {
+  const catalog = dependencies.catalog ?? IMAGE_CATALOG;
+  const acquisitionCatalog = structuredClone(catalog);
+  const inspectLocal = dependencies.inspectLocal ?? localImageContentId;
+  const developmentReferences = new Set<string>();
+  if (catalog.development) {
+    for (const consumer of target.consumers) {
+      const image = consumer.kind === 'gateway' ? acquisitionCatalog.gateway
+        : consumer.preset ? acquisitionCatalog.presets[consumer.preset].image : undefined;
+      if (!image) continue;
+      requiredContentId(target.exactTarget, target.exactTarget);
+      image.platforms[platform]!.resolved = target.exactTarget;
+      developmentReferences.add(image.requested);
+    }
+  }
+  const verifyDevelopmentTags = async (): Promise<void> => {
+    for (const reference of developmentReferences) {
+      if (await inspectLocal(reference) !== target.exactTarget) {
+        throw new Error(`Development image ${reference} changed after preview; reviewed exact target was ${target.exactTarget}. Review the new plan before upgrading.`);
+      }
+    }
+  };
+  await verifyDevelopmentTags();
   const inspections = new Map<string, {
     contentId: `sha256:${string}`;
     consumerIds: string[];
@@ -602,8 +673,8 @@ async function acquireAndInspectExactTarget(
       continue;
     }
     if (consumer.kind === 'gateway') {
-      const inspection = await acquireCatalogGatewayContract({ catalog: IMAGE_CATALOG, platform, offline, stderr: true });
-      assertAcquiredIdentity(target, inspection.identity.resolved);
+      const inspection = await (dependencies.acquireGateway ?? acquireCatalogGatewayContract)({ catalog: acquisitionCatalog, platform, offline: catalog.development || offline, stderr: true });
+      assertAcquiredIdentity(target, catalog.development ? requiredContentId(inspection.identity.contentId, target.exactTarget) : inspection.identity.resolved);
       inspections.set(key, {
         contentId: requiredContentId(inspection.identity.contentId, target.exactTarget),
         consumerIds: [consumer.id],
@@ -615,9 +686,11 @@ async function acquireAndInspectExactTarget(
       continue;
     }
     const inspection = consumer.preset
-      ? await acquireCatalogPreset(consumer.preset, { catalog: IMAGE_CATALOG, platform, offline, stderr: true })
-      : await acquireCustomImage(consumer.image.requested, { platform, offline, stderr: true }, target.exactTarget);
-    if (consumer.preset || target.exactTarget.includes('@sha256:')) assertAcquiredIdentity(target, inspection.identity.resolved);
+      ? await (dependencies.acquirePreset ?? acquireCatalogPreset)(consumer.preset, { catalog: acquisitionCatalog, platform, offline: catalog.development || offline, stderr: true })
+      : await (dependencies.acquireCustom ?? acquireCustomImage)(consumer.image.requested, { platform, offline, stderr: true }, target.exactTarget);
+    if (consumer.preset || target.exactTarget.includes('@sha256:')) {
+      assertAcquiredIdentity(target, catalog.development && consumer.preset ? requiredContentId(inspection.identity.contentId, target.exactTarget) : inspection.identity.resolved);
+    }
     if (consumer.image.contentId && consumer.image.contentId !== inspection.identity.contentId) throw new Error(`Custom recipe base ${target.exactTarget} changed content; review a named upgrade.`);
     inspections.set(key, {
       contentId: requiredContentId(inspection.identity.contentId, target.exactTarget),
@@ -628,6 +701,7 @@ async function acquireAndInspectExactTarget(
         : {}),
     });
   }
+  await verifyDevelopmentTags();
   const contentIds = new Set([...inspections.values()].map(({ contentId }) => contentId));
   if (contentIds.size !== 1) throw new Error(`Exact target ${target.exactTarget} produced inconsistent content IDs across contract inspections.`);
   const contentId = [...contentIds][0]!;
@@ -715,11 +789,11 @@ async function confirmUpgradeAll(assumeYes: boolean): Promise<boolean> {
   }
 }
 
-function curatedExactTargets(config: QubiclConfig, platform: DockerPlatform): string[] {
-  const targets = new Set([catalogImageIdentity(IMAGE_CATALOG.gateway, platform).resolved]);
-  if (config.defaults.preset !== 'custom') targets.add(presetDefaults(config.defaults.preset, platform, IMAGE_CATALOG).image.resolved);
+function curatedExactTargets(config: QubiclConfig, platform: DockerPlatform, catalog: ImageCatalog = IMAGE_CATALOG): string[] {
+  const targets = new Set([catalogImageIdentity(catalog.gateway, platform).resolved]);
+  if (config.defaults.preset !== 'custom') targets.add(presetDefaults(config.defaults.preset, platform, catalog).image.resolved);
   for (const computer of config.computers) {
-    if (computer.preset !== 'custom' || computer.software) targets.add(softwareBaseDefaults(computer, IMAGE_CATALOG, platform).image.resolved);
+    if (computer.preset !== 'custom' || computer.software) targets.add(softwareBaseDefaults(computer, catalog, platform).image.resolved);
   }
   return [...targets].sort();
 }

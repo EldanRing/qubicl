@@ -49,6 +49,11 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 - Agent-facing instructions and architecture docs describe retained browser refs
   and the tasks, services and previews preserved by an ordinary lease release.
+- Upgrade guidance covers the gateway update and explicit enabling of new 0.8
+  tools while preserving existing operator allowlists.
+- Installation-wide upgrades from a development checkout resolve local image
+  tags to immutable content before preview and reject tag changes before applying
+  the plan; published catalog digest checks remain unchanged.
 - Standalone Excel-to-CSV exports use the same typed-formula metadata and ISO
   duration values as workbook inspection instead of Python object representations.
 - Worksheet copies preserve independently editable charts, images, native tables,
