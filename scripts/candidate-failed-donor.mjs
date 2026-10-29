@@ -36,6 +36,30 @@ export async function inspectFailedCandidateDonor(root, directory, { version, re
   const repository = normalizeRepository(typeof workspace.repository === 'string' ? workspace.repository : workspace.repository?.url);
   const catalog = assertCatalogIdentity(JSON.parse(await readFile(join(source, 'image-catalog.json'), 'utf8')),
     { version, revision: inputs.revision, source: repository });
+  // A policy rejection can happen before the scan summary/bindings are saved.
+  // Preserve useful image bytes without treating incomplete scans as evidence.
+  // Fresh scans and normal OCI/source-provenance verification remain mandatory.
+  if (!names.has('trivy-bindings.json') || !names.has('trivy-summary.json')) {
+    const artifacts = [];
+    for (const name of ['image-catalog.json', 'oci-efficiency.json', ...IMAGE_NAMES.map((image) => `qubicl-${image}.oci.tar`)]) {
+      assert(names.has(name), `Failed staging is missing ${name}.`);
+      const path = join(source, name);
+      const info = await stat(path);
+      artifacts.push({ name, bytes: info.size, sha256: await sha256(path) });
+    }
+    return {
+      baseline: {
+        version, revision: inputs.revision, source: repository,
+        modes: { images: true, scans: false }, artifacts,
+        imageInputs: { name: IMAGE_INPUTS_NAME, sha256: createHash('sha256').update(inputsBytes).digest('hex') },
+        imageCatalog: { name: 'image-catalog.json', sha256: artifacts.find((entry) => entry.name === 'image-catalog.json').sha256 },
+        tools: {},
+      },
+      previous: inputs,
+      scansFresh: false,
+      scanReason: 'Failed staging has no complete scan-policy evidence; retained images require fresh scans.',
+    };
+  }
   const bindingsBytes = await readFile(join(source, 'trivy-bindings.json'));
   const bindings = JSON.parse(bindingsBytes);
   assert([2, 3].includes(bindings.schemaVersion),

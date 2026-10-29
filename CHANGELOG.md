@@ -48,12 +48,17 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Recover unchanged image archives from failed candidates whose security scan
+  policy was rejected; require fresh scans when complete evidence was not saved.
 - Reattach gateway control networks for retained stopped computers after gateway
   or stopped-computer replacement without starting them or creating absent runtimes.
 - Keep manifest dry runs read-only and reject pending transactions before apply.
 
 ### Security
 
+- Update the web environment to Brotli 1.2.1. Retain upstream npm 12.2.1 with
+  narrow, time-limited review records for its bundled Undici; disclose the
+  remaining native-addon download denial-of-service risks.
 - Update the MCP Node adapter, Zod and its HTTP-server dependency to patched
   compatible versions for request-size, validation-memory and static-path issues.
 - Use upstream npm 12.2.1 in computer images instead of modifying its private

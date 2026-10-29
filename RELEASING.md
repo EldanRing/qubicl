@@ -127,6 +127,11 @@ append `--execute`. That recovery path currently requires the same release
 version. A complete candidate can donate unchanged images across versions.
 Source changes require a new commit and plan; never edit an immutable candidate.
 
+When a preserved failed candidate has image archives and provenance but no
+complete passing scan evidence, `--reuse-failed` may retain unchanged image
+bytes and requires fresh scans. A rejected scan never becomes a passing report
+through reuse; complete vulnerability and artifact verification still apply.
+
 ## Release set and qualification
 
 Place the complete member under `RELEASE_DIRECTORY/linux-x64`. Optional native

@@ -31,12 +31,13 @@ export async function createReleasePlan(root, { reuse, reuseFailed, now = new Da
     const repository = typeof workspace.repository === 'string' ? workspace.repository : workspace.repository?.url;
     if (baseline.source !== normalizeRepository(repository)) throw new Error('--reuse requires a candidate from the same source repository.');
     await git('merge-base', '--is-ancestor', baseline.revision, revision);
-    if (!baseline.modes?.images || !baseline.modes?.scans) throw new Error('--reuse requires a complete image/scanner candidate.');
+    if (!baseline.modes?.images || (!baseline.modes?.scans && !failedDonor)) throw new Error('--reuse requires a complete image/scanner candidate.');
     const artifacts = new Map((baseline.artifacts ?? []).map((entry) => [entry.name, entry]));
     for (const name of [
-      'image-catalog.json', 'trivy-bindings.json', 'oci-efficiency.json',
+      'image-catalog.json', 'oci-efficiency.json',
       ...RELEASE_IMAGES.map((image) => `qubicl-${image}.oci.tar`),
-      ...RELEASE_IMAGES.flatMap((image) => ['linux-amd64', 'linux-arm64'].map((platform) => `trivy-${image}-${platform}.json`)),
+      ...(baseline.modes.scans ? ['trivy-bindings.json',
+        ...RELEASE_IMAGES.flatMap((image) => ['linux-amd64', 'linux-arm64'].map((platform) => `trivy-${image}-${platform}.json`))] : []),
     ]) {
       const artifact = artifacts.get(name);
       if (!Number.isInteger(artifact?.bytes) || !/^[a-f0-9]{64}$/u.test(artifact?.sha256 ?? '')) throw new Error(`--reuse candidate lacks exact ${name} identity.`);
@@ -70,6 +71,7 @@ export async function createReleasePlan(root, { reuse, reuseFailed, now = new Da
       previous.schemaVersion = 2;
     }
     try {
+      if (!baseline.modes.scans) throw new Error(failedDonor.scanReason);
       const evidence = await readFile(join(directory, 'trivy-bindings.json'));
       if (digest(evidence) !== artifacts.get('trivy-bindings.json').sha256) throw new Error('Reusable Trivy binding does not match its candidate manifest.');
       const bindings = JSON.parse(evidence.toString('utf8'));
