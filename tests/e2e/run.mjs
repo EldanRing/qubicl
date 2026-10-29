@@ -339,8 +339,8 @@ try {
   await exec('docker', ['exec', computerSessionRuntime(computerContract), 'pgrep', '-x', 'chromium']);
   const computerSshPort = await freePort();
   await commandCli(['ssh', 'enable', computerContract.name, '--port', `${computerSshPort}`]);
-  const computerSshKey = join(root, 'computers', computerContract.id, 'ssh', 'id_ed25519');
-  const computerSsh = await exec('ssh', ['-i', computerSshKey, '-p', `${computerSshPort}`, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null', 'qubicl@127.0.0.1', 'printf computer-ssh-ok']);
+  const computerSshConfig = await managedSshConfig(computerContract);
+  const computerSsh = await exec('ssh', [...computerSshConfig.options, computerSshConfig.host, 'printf computer-ssh-ok']);
   assert.equal(computerSsh.stdout, 'computer-ssh-ok');
   await commandCli(['ssh', 'disable', computerContract.name]);
   await commandCli(['stop', computerContract.name]);
@@ -878,18 +878,13 @@ try {
     'exec', computerSshRuntime(computer), 'ssh-keygen', '-lf',
     '/home/qubicl/.local/share/qubicl/ssh-host-keys/ssh_host_ed25519_key.pub',
   ])).stdout.trim();
-  const sshKey = join(root, 'computers', computer.id, 'ssh', 'id_ed25519');
-  const sshOptions = [
-    '-i', sshKey, '-p', `${sshPort}`, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
-    '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
-  ];
-  const sshResult = await exec('ssh', [...sshOptions, 'qubicl@127.0.0.1', 'printf ssh-ok']);
+  const sshConfig = await managedSshConfig(computer);
+  const sshResult = await exec('ssh', [...sshConfig.options, sshConfig.host, 'printf ssh-ok']);
   assert.equal(sshResult.stdout, 'ssh-ok');
   const scpSource = join(root, 'scp-source.txt');
   await writeFile(scpSource, 'scp-ok');
   await exec('scp', [
-    '-i', sshKey, '-P', `${sshPort}`, '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no',
-    '-o', 'UserKnownHostsFile=/dev/null', scpSource, 'qubicl@127.0.0.1:/home/qubicl/scp-result.txt',
+    ...sshConfig.options, scpSource, `${sshConfig.host}:/home/qubicl/scp-result.txt`,
   ]);
   assert.equal(await readFile(join(root, 'computers', computer.id, 'home', 'qubicl', 'scp-result.txt'), 'utf8'), 'scp-ok');
 
@@ -908,8 +903,12 @@ try {
   await commandCli(['purge', sshPeer.name, '--yes']);
 
   await commandCli(['ssh', 'rotate', computer.name]);
+  const rotatedSshConfig = await managedSshConfig(computer);
+  assert.notEqual(rotatedSshConfig.identityFile, sshConfig.identityFile);
+  await assert.rejects(stat(sshConfig.identityFile), { code: 'ENOENT' });
+  assert.equal((await exec('ssh', [...rotatedSshConfig.options, rotatedSshConfig.host, 'printf rotated-ssh-ok'])).stdout, 'rotated-ssh-ok');
   await commandCli(['ssh', 'disable', computer.name]);
-  await assert.rejects(stat(sshKey), { code: 'ENOENT' });
+  await assert.rejects(stat(rotatedSshConfig.identityFile), { code: 'ENOENT' });
 
   const workflowLease = await call('acquire_lease', { durationSeconds: 120 });
   await call('exec_command', {
@@ -1326,6 +1325,20 @@ function execCliWithInput(args, input, options = {}) {
     });
     child.stdin.end(input);
   });
+}
+
+async function managedSshConfig(computer) {
+  const { stdout } = await execCli(['ssh', 'config', computer.name], { env });
+  const host = `qubicl-${computer.name}`;
+  const config = stdout.split('\n\n', 1)[0] + '\n';
+  assert(config.startsWith(`Host ${host}\n`), 'CLI must return an OpenSSH Host block.');
+  const file = join(root, `${computer.id}-ssh.conf`);
+  await writeFile(file, config, { mode: 0o600 });
+  const options = ['-F', file, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10'];
+  const parsed = await exec('ssh', ['-G', ...options, host]);
+  const identityFile = parsed.stdout.match(/^identityfile (.+)$/m)?.[1];
+  assert(identityFile, 'Generated SSH config must select a managed identity.');
+  return { options, host, identityFile };
 }
 
 async function commandCli(args) {
