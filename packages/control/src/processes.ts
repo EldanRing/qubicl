@@ -1600,8 +1600,21 @@ export class ProcessManager {
 }
 
 function stripPersistedTask(record: PersistedTaskRecord): ManagementProcessSummary {
-  const { version: _version, outputPath: _outputPath, ...summary } = record;
-  return summary;
+  // Persistence metadata (including outputTruncated) belongs to output reads,
+  // not the public process-list contract. Project fields rather than spreading
+  // a saved record so future storage additions cannot leak into runner IPC.
+  return {
+    id: record.id,
+    label: record.label,
+    lifecycle: record.lifecycle,
+    status: record.status,
+    startedAt: record.startedAt,
+    ...(record.finishedAt === undefined ? {} : { finishedAt: record.finishedAt }),
+    owner: record.owner,
+    ownerGeneration: record.ownerGeneration,
+    ...(record.exitCode === undefined ? {} : { exitCode: record.exitCode }),
+    ...(record.signal === undefined ? {} : { signal: record.signal }),
+  };
 }
 
 function parsePersistedTask(line: string): PersistedTaskRecord | undefined {

@@ -10,6 +10,46 @@ import { RemoteProcessManager } from '../../packages/control/dist/remote-runners
 
 const owner = { id: 'service-lifecycle', generation: 1, epoch: 'service-lifecycle' };
 
+test('completed task history crosses runner IPC without leaking storage fields and retains output truncation after restart', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'qubicl-history-summary-'));
+  const options = { home, outputDirectory: home, persistTaskRecords: true, maxFullOutputBytes: 4 };
+  let manager = new ProcessManager(options);
+  context.after(async () => { await manager.shutdown(); await rm(home, { recursive: true, force: true }); });
+  const truncated = await manager.exec('printf 123456; exit 7', home, 1000, 1024, owner, undefined, 'combined', 'task', 'truncated history');
+  const complete = await manager.exec('printf ok', home, 1000, 1024, owner, undefined, 'combined', 'task', 'complete history');
+  assert.equal(truncated.running, false);
+  assert.equal(complete.running, false);
+  assert.equal(manager.count(), 0);
+
+  const server = createServer((request, response) => {
+    assert.equal(request.headers['x-qubicl-runner-key'], 'history-fixture-key');
+    assert(['GET /v1/process/agent-list', 'GET /v1/process/management-list'].includes(`${request.method} ${request.url}`));
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify(request.url === '/v1/process/agent-list' ? manager.listForAgent() : manager.listForManagement()));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  context.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  const remote = new RemoteProcessManager(`http://127.0.0.1:${(server.address() as AddressInfo).port}`, 'history-fixture-key');
+  const verify = async () => {
+    const summaries = await remote.listForAgent();
+    assert.deepEqual(await remote.listForManagement(), summaries);
+    assert.equal(summaries.length, 2);
+    assert.equal(summaries.find(({ id }) => id === truncated.processId)?.exitCode, 7);
+    assert.equal(summaries.find(({ id }) => id === complete.processId)?.exitCode, 0);
+    assert(summaries.every(({ status, finishedAt }) => status === 'exited' && typeof finishedAt === 'string'));
+    assert(summaries.every((summary) => !('outputTruncated' in summary) && !('outputPath' in summary) && !('version' in summary)));
+    const page = manager.readOutput(truncated.processId, 0, 100, undefined, 'utf8');
+    assert.equal(page.truncated, true);
+    assert.equal(page.data, '1234');
+    assert.equal(manager.readOutput(complete.processId, 0, 100, undefined, 'utf8').truncated, false);
+    return summaries;
+  };
+  const before = await verify();
+  await manager.shutdown();
+  manager = new ProcessManager(options);
+  assert.deepEqual(await verify(), before);
+});
+
 test('saved services beyond concurrency queue visibly, reserve available slots, and can be stopped before launch', async (context) => {
   const home = await mkdtemp(join(tmpdir(), 'qubicl-service-queue-'));
   let restored: ProcessManager | undefined;
