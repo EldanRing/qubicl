@@ -1,6 +1,6 @@
 import { lstat, mkdir, realpath, rm } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
-import { basename, extname, join, relative, resolve, sep } from 'node:path';
+import { basename, join, relative, resolve, sep } from 'node:path';
 import { lookup } from 'node:dns/promises';
 import type {
   Browser,
@@ -184,6 +184,9 @@ export class BrowserManager {
   private launchState: BrowserHealth['state'] = 'not_started';
   private geometryGeneration = 1;
   private geometrySignature = '';
+  private readonly permissionGrants = new Map<string, string[]>();
+  private dialogSequence = 0;
+  private readonly dialogWaiters = new Set<(id: string) => void>();
   private readonly downloads = new Map<string, BrowserDownloadRecord>();
   private readonly activeDownloads = new Map<string, Download>();
   private readonly dialogs = new Map<string, { record: BrowserDialogRecord; dialog: Dialog; page: Page }>();
@@ -238,7 +241,7 @@ export class BrowserManager {
       const record = this.downloads.get(id);
       if (!record) throw new QubiclError('browser_download_not_found', `Browser download ${id} was not found.`, 404);
       const download = this.activeDownloads.get(id);
-      if (download) await download.cancel().catch(() => undefined);
+      if (download) await download.cancel();
       if (record.status === 'in-progress') {
         record.status = 'cancelled';
         record.completedAt = new Date().toISOString();
@@ -267,21 +270,21 @@ export class BrowserManager {
   }
 
   listDialogs(): Promise<{ dialogs: BrowserDialogRecord[] }> {
-    return this.enqueue(async () => ({ dialogs: [...this.dialogs.values()].map(({ record }) => ({ ...record })) }));
+    return Promise.resolve({ dialogs: [...this.dialogs.values()].map(({ record }) => ({ ...record })) });
   }
 
   respondDialog(id: string, action: 'accept' | 'dismiss', promptText?: string): Promise<{ id: string; action: 'accepted' | 'dismissed' }> {
-    return this.enqueue(async () => {
+    return (async () => {
       const pending = this.dialogs.get(id);
       if (!pending) throw new QubiclError('browser_dialog_not_found', `Browser dialog ${id} is no longer pending.`, 404);
-      this.dialogs.delete(id);
       if (action === 'accept') await pending.dialog.accept(promptText);
       else await pending.dialog.dismiss();
-      return { id, action: action === 'accept' ? 'accepted' : 'dismissed' };
-    });
+      this.dialogs.delete(id);
+      return { id, action: action === 'accept' ? 'accepted' as const : 'dismissed' as const };
+    })();
   }
 
-  permissions(origin: string, permissions: string[], clear: boolean): Promise<{ origin: string; permissions: string[]; cleared: boolean }> {
+  permissions(origin: string, permissions: string[], clear: boolean, scope: 'origin' | 'context' = 'origin'): Promise<{ origin: string; permissions: string[]; cleared: boolean; scope: string }> {
     return this.enqueue(async () => {
       const url = new URL(origin);
       if (!['http:', 'https:'].includes(url.protocol) || url.origin !== origin || url.username || url.password) {
@@ -290,9 +293,17 @@ export class BrowserManager {
       const allowed = new Set(['geolocation', 'notifications', 'clipboard-read', 'clipboard-write', 'camera', 'microphone']);
       if (permissions.some((permission) => !allowed.has(permission))) throw new QubiclError('browser_permission_invalid', 'Select a supported browser permission.', 400);
       const context = await this.getContext();
-      if (clear) await context.clearPermissions();
-      if (permissions.length) await context.grantPermissions(permissions, { origin });
-      return { origin, permissions, cleared: clear };
+      if (clear) {
+        if (scope === 'context') this.permissionGrants.clear();
+        else this.permissionGrants.delete(origin);
+        await context.clearPermissions();
+        for (const [other, grants] of this.permissionGrants) await context.grantPermissions(grants, { origin: other });
+      }
+      if (permissions.length) {
+        await context.grantPermissions(permissions, { origin });
+        this.permissionGrants.set(origin, [...new Set([...(this.permissionGrants.get(origin) ?? []), ...permissions])]);
+      }
+      return { origin, permissions: this.permissionGrants.get(origin) ?? [], cleared: clear, scope };
     });
   }
 
@@ -303,8 +314,8 @@ export class BrowserManager {
   setViewport(width: number, height: number): Promise<PageState & { viewport: { width: number; height: number; deviceScaleFactor: 1 }; geometryGeneration: number }> {
     return this.enqueue(async () => {
       const page = await this.getPage();
+      await this.updateGeometry(page);
       await page.setViewportSize({ width, height });
-      this.geometrySignature = '';
       const geometryGeneration = await this.updateGeometry(page);
       return { ...await pageState(page), viewport: { width, height, deviceScaleFactor: 1 }, geometryGeneration };
     });
@@ -440,7 +451,7 @@ export class BrowserManager {
                 clean(element.getAttribute('title')),
                 clean(element.getAttribute('placeholder')),
                 text,
-                clean(input.value),
+                input.type === 'password' ? '' : clean(input.value),
               ].find(Boolean) ?? '';
               return {
                 tag: element.tagName.toLowerCase(),
@@ -454,7 +465,11 @@ export class BrowserManager {
           }));
           for (const candidate of batch) if (candidate) candidatesWithDetails.push(candidate);
         }
-        const aria = await frame.locator('body').ariaSnapshot({ timeout: 5000 }).catch(() => '');
+        // Playwright's ARIA text can include password values, even though our refs do not.
+        // Do not read raw ARIA text in that case. Browser reading still exposes page prose.
+        const passwordPresent = (await Promise.all(frames.map((item) => item.locator('input[type=password]').count().catch(() => 1)))).some((count) => count > 0);
+        const aria = passwordPresent ? 'Password fields present: raw accessibility text omitted for privacy. Use the element refs below and browser_read for page prose.'
+          : await frame.locator('body').ariaSnapshot({ timeout: 5000 }).catch(() => '');
         const scroll = await page.evaluate(() => ({ x: Math.round(window.scrollX), y: Math.round(window.scrollY) }))
           .catch(() => ({ x: 0, y: 0 }));
         const state = await pageState(page);
@@ -572,11 +587,7 @@ export class BrowserManager {
     return this.act(async (page) => {
       const locator = await this.referencedElement(ref);
       if (clear) {
-        await locator.fill(text).catch(async () => {
-          await locator.click();
-          await page.keyboard.press('ControlOrMeta+A');
-          await page.keyboard.type(text);
-        });
+        await locator.fill(text);
       } else {
         await locator.click();
         await locator.press('End').catch(() => undefined);
@@ -590,7 +601,8 @@ export class BrowserManager {
   select(ref: string, value: string): Promise<PageState> {
     return this.act(async (page) => {
       const locator = await this.referencedElement(ref);
-      await locator.selectOption({ label: value }).catch(() => locator.selectOption(value));
+      const hasLabel = await locator.evaluate((node, label) => Array.from((node as HTMLSelectElement).options ?? []).some((option) => option.label === label), value);
+      await locator.selectOption(hasLabel ? { label: value } : { value });
       return page;
     });
   }
@@ -684,7 +696,7 @@ export class BrowserManager {
     });
   }
 
-  reset(): Promise<PageState> {
+  reset(): Promise<PageState & { resetComplete: boolean; failedToClose: string[] }> {
     return this.enqueue(async () => {
       const context = await this.getContext();
       // Keep one target alive while resetting. Chromium may tear down or reject
@@ -693,8 +705,12 @@ export class BrowserManager {
       const page = await context.newPage();
       await this.preparePage(context, page);
       this.setActivePage(page);
-      for (const previous of previousPages) await previous.close().catch(() => undefined);
-      return pageState(page);
+      const failedToClose: string[] = [];
+      for (const previous of previousPages) {
+        try { await previous.close(); }
+        catch { failedToClose.push(this.tabIds.get(previous) ?? 'unknown'); }
+      }
+      return { ...await pageState(page), resetComplete: failedToClose.length === 0, failedToClose };
     });
   }
 
@@ -759,10 +775,12 @@ export class BrowserManager {
       await this.assertGeometry(page, geometryGeneration);
       const pointerActions: ViewerPointerAction[] = [];
       for (const action of actions) {
+        const dialogSequence = this.dialogSequence;
         const pointer = await browserViewerPointerForAction(page, action);
         const publication = pointer ? await this.beginViewerPointer(pointer, generation) : undefined;
         try {
           await runComputerAction(page, action);
+          if (dialogSequence !== this.dialogSequence) throw new QubiclError('browser_batch_interrupted', 'A dialog interrupted the action batch. Observe the page and issue only the remaining actions.', 409, { dispatch: 'started' });
           if (publication) await this.finishViewerPointer(publication, generation!, 'confirm');
         } catch (error) {
           if (publication) await this.finishViewerPointer(publication, generation!, 'cancel');
@@ -842,13 +860,18 @@ export class BrowserManager {
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.dialogs.size) return Promise.reject(new QubiclError('browser_waiting_for_dialog', 'Resolve the pending dialog before issuing more browser operations.', 409, { dispatch: 'not-started', dialogId: this.dialogs.keys().next().value }));
     if (this.queuedOperations >= MAX_BROWSER_QUEUE_DEPTH) {
       return Promise.reject(new QubiclError('browser_queue_full', `The browser already has ${MAX_BROWSER_QUEUE_DEPTH} queued operations. Wait for current work or take control to cancel it.`, 429));
     }
     this.queuedOperations += 1;
+    let started = false;
+    let cancelled = false;
     const execute = async (): Promise<T> => {
+      if (cancelled || this.dialogs.size) throw new QubiclError('browser_waiting_for_dialog', 'This queued operation was not dispatched because a dialog interrupted the queue. Resolve the dialog and reassess the action.', 409, { dispatch: 'not-started' });
       if (!this.enabled) throw new QubiclError('browser_unsupported', 'This computer does not provide the browser capability.', 404);
       try {
+        started = true;
         return await operation();
       } catch (error) {
         if (error instanceof QubiclError) throw error;
@@ -857,7 +880,15 @@ export class BrowserManager {
     };
     const next = this.operationQueue.then(execute, execute).finally(() => { this.queuedOperations -= 1; });
     this.operationQueue = next.catch(() => undefined);
-    return next;
+    let notify!: (id: string) => void;
+    const dialog = new Promise<never>((_resolve, reject) => {
+      notify = (id) => {
+        if (!started) cancelled = true;
+        reject(new QubiclError('browser_waiting_for_dialog', started ? 'The operation is waiting for a JavaScript dialog. Resolve it with browser_respond_dialog; do not repeat the action.' : 'A dialog interrupted the queue before this operation started. Resolve it and reassess the requested action.', 409, { dispatch: started ? 'started' : 'not-started', dialogId: id }));
+      };
+      this.dialogWaiters.add(notify);
+    });
+    return Promise.race([next, dialog]).finally(() => this.dialogWaiters.delete(notify));
   }
 
   private async updateGeometry(page: Page): Promise<number> {
@@ -976,10 +1007,6 @@ export class BrowserManager {
     await page.setViewportSize({ width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT }).catch(() => undefined);
     page.on('download', (download) => { void this.retainDownload(download); });
     page.on('dialog', (dialog) => {
-      if (this.dialogs.size >= 32) {
-        void dialog.dismiss().catch(() => undefined);
-        return;
-      }
       const id = randomBytes(12).toString('base64url');
       this.dialogs.set(id, {
         record: {
@@ -992,6 +1019,8 @@ export class BrowserManager {
         dialog,
         page,
       });
+      this.dialogSequence += 1;
+      for (const notify of this.dialogWaiters) notify(id);
     });
     page.on('console', (message) => this.addDiagnostic('console', `${message.type()}: ${message.text()}`));
     page.on('requestfailed', (request) => this.addDiagnostic('request-failed', `${request.method()} ${diagnosticUrl(request.url())}: ${request.failure()?.errorText ?? 'failed'}`));
@@ -1020,10 +1049,12 @@ export class BrowserManager {
     const record: BrowserDownloadRecord = { id, status: 'in-progress', suggestedFilename, startedAt: new Date().toISOString() };
     this.downloads.set(id, record);
     this.activeDownloads.set(id, download);
-    while (this.downloads.size > 200) this.downloads.delete(this.downloads.keys().next().value!);
+    this.trimDownloadHistory();
     try {
       await mkdir(this.downloadDirectory, { recursive: true, mode: 0o700 });
-      const path = await availableDownloadPath(this.downloadDirectory, suggestedFilename);
+      const directory = join(this.downloadDirectory, id);
+      await mkdir(directory, { mode: 0o700 });
+      const path = join(directory, suggestedFilename);
       await download.saveAs(path);
       const failure = await download.failure();
       if (record.status === 'cancelled') return;
@@ -1042,7 +1073,15 @@ export class BrowserManager {
     } finally {
       record.completedAt ??= new Date().toISOString();
       this.activeDownloads.delete(id);
+      this.downloads.delete(id);
+      this.downloads.set(id, record);
+      this.trimDownloadHistory();
     }
+  }
+
+  private trimDownloadHistory(): void {
+    const completed = [...this.downloads.values()].filter((record) => !this.activeDownloads.has(record.id));
+    for (const record of completed.slice(0, Math.max(0, completed.length - 200))) this.downloads.delete(record.id);
   }
 
   private async getPage(): Promise<Page> {
@@ -1359,8 +1398,8 @@ async function withModifiers(page: Page, values: string[] | undefined, operation
   if (modifiers.some((key) => !MODIFIER_KEYS.has(key))) {
     throw new QubiclError('browser_actions_invalid', 'Mouse action keys may contain only Control, Meta, Alt, and Shift.', 400);
   }
-  for (const key of modifiers) await page.keyboard.down(key);
   try {
+    for (const key of modifiers) await page.keyboard.down(key);
     await operation();
   } finally {
     for (const key of modifiers.toReversed()) await page.keyboard.up(key).catch(() => undefined);
@@ -1371,8 +1410,8 @@ async function computerKeypress(page: Page, values: string[]): Promise<void> {
   const keys = values.map(normalizedKey);
   const leadingModifiers = keys.slice(0, -1);
   if (keys.length > 1 && leadingModifiers.every((key) => MODIFIER_KEYS.has(key))) {
-    for (const key of leadingModifiers) await page.keyboard.down(key);
     try {
+      for (const key of leadingModifiers) await page.keyboard.down(key);
       await page.keyboard.press(keys.at(-1)!);
     } finally {
       for (const key of leadingModifiers.toReversed()) await page.keyboard.up(key).catch(() => undefined);
@@ -1476,19 +1515,6 @@ function safeDownloadFilename(value: string): string {
   return name && name !== '.' && name !== '..' ? name : 'download';
 }
 
-async function availableDownloadPath(directory: string, filename: string): Promise<string> {
-  const extension = extname(filename);
-  const stem = filename.slice(0, filename.length - extension.length) || 'download';
-  for (let index = 0; index < 10_000; index += 1) {
-    const candidate = join(directory, index === 0 ? filename : `${stem} (${index})${extension}`);
-    try { await lstat(candidate); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return candidate;
-      throw error;
-    }
-  }
-  throw new QubiclError('browser_download_collision', 'Could not choose an unused durable download filename.', 409);
-}
 
 function diagnosticUrl(value: string): string {
   try { const url = new URL(value); return `${url.origin}${url.pathname}`.slice(0, 1_000); }

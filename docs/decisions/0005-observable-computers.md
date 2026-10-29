@@ -35,3 +35,11 @@ The changes use development control protocol 12. Package versions and published
 verification and remaining release/platform qualification belong in the
 maintenance records; [desktop control](../desktop-control.md) and
 [web research](../web-research.md) describe implemented behavior.
+
+The subsequent audit implementation preserves original data when a conversion,
+edit or update cannot establish success. Dispatch receipts control automatic
+retries; operation uncertainty requires observation. File save guards and service
+readiness/restarts are optional. Render manifests identify captured source bytes
+and exact generated pages without claiming visual fidelity. Known unsupported
+Office structures must fail or produce explicit incomplete-view warnings rather
+than silently corrupting output. These choices are implemented, not release gates.

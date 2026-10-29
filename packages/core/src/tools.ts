@@ -39,10 +39,10 @@ const desktopTarget = { targetWindowId, geometryToken: desktopGeometryToken };
 const desktopRef = z.string().regex(/^[a-df0-9x]{24}e\d{1,4}$/);
 const desktopObservation = z.enum(['none', 'windows', 'snapshot', 'screenshot']).default('none');
 export const DesktopApplicationNameSchema = z.string().min(1).max(4096).refine(
-  (value) => /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u.test(value) || (value.startsWith('/') && !/\p{Cc}/u.test(value)),
-  'must be an executable name or absolute executable path',
+  (value) => /^desktop:[A-Za-z0-9][A-Za-z0-9._+-]*\.desktop$/u.test(value) || /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u.test(value) || (value.startsWith('/') && !/\p{Cc}/u.test(value)),
+  'must be a desktop:entry.desktop ID, executable name or absolute executable path',
 ).describe(
-  'A built-in alias, installed executable name, or absolute executable path. Runs directly as the workload user.',
+  'A discovered desktop:entry.desktop ID preserves launcher arguments and file codes. Built-in aliases and explicit executable paths remain supported.',
 );
 export type DesktopApplicationName = z.infer<typeof DesktopApplicationNameSchema>;
 const desktopApplicationPath = z.string().min(1).max(4096).describe(
@@ -153,6 +153,10 @@ export const toolDefinitions = {
       command: z.string().min(1),
       label: z.string().trim().min(1).max(120).default('Task'),
       lifecycle: z.enum(['task', 'session', 'service']).default('task'),
+      service: z.object({
+        readiness: z.object({ type: z.enum(['tcp', 'http']), port: z.number().int().min(1).max(65535), host: z.enum(['127.0.0.1', '::1']).optional(), path: z.string().startsWith('/').max(2048).optional(), expectedStatus: z.number().int().min(100).max(599).optional(), timeoutMs: z.number().int().min(1).max(300_000).optional(), intervalMs: z.number().int().min(100).max(60_000).optional(), probeTimeoutMs: z.number().int().min(1).max(10_000).optional() }).optional(),
+        restart: z.object({ maxAttempts: z.number().int().min(0).max(10), backoffMs: z.number().int().min(100).max(30_000).optional() }).optional(),
+      }).optional().describe('Optional local readiness probe and bounded restart-on-failure policy; requires service lifecycle. No crash restarts unless explicitly configured.'),
       cwd: path.default('/home/qubicl'),
       yieldTimeMs: z.number().int().min(0).max(30_000).default(10_000),
       maxOutputBytes: z.number().int().min(1024).max(50_000).default(MODEL_TEXT_BUDGET_BYTES),
@@ -378,7 +382,7 @@ export const toolDefinitions = {
   },
   write_file: {
     description: 'Atomically write UTF-8 or base64; same-path mutations serialize.',
-    input: leaseOnly.extend({ path, content: z.string(), encoding: z.enum(['utf8', 'base64']).default('utf8'), createParents: z.boolean().default(true) }),
+    input: leaseOnly.extend({ path, content: z.string(), encoding: z.enum(['utf8', 'base64']).default('utf8'), createParents: z.boolean().default(true), expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('Require the complete-file SHA-256 returned by read_file before replacing it.'), createOnly: z.boolean().default(false).describe('Fail atomically if any destination already exists.') }),
     lease: true,
   },
   edit_file: {
@@ -402,8 +406,12 @@ export const toolDefinitions = {
     lease: true,
   },
   take_screenshot: {
-    description: 'Capture the desktop as native PNG plus dimensions.',
-    input: observationOnly,
+    description: 'Capture the desktop or a bounded screen region/window as native PNG. Crops return their screen origin for coordinate mapping.',
+    input: observationOnly.extend({
+      region: z.strictObject({ x: z.number().int().min(0), y: z.number().int().min(0), width: z.number().int().min(1).max(16384), height: z.number().int().min(1).max(16384) }).optional(),
+      windowId: z.number().int().min(1).max(0xffff_ffff).optional(),
+      geometryToken: desktopGeometryToken,
+    }),
     lease: false,
   },
   control_computer: {
@@ -557,11 +565,12 @@ export const toolDefinitions = {
     lease: true,
   },
   browser_permissions: {
-    description: 'Grant specific browser permissions to one exact origin, or clear prior grants.',
+    description: 'Grant permissions to one exact origin. clear revokes that origin; scope=context explicitly resets all tool-managed grants.',
     input: leaseOnly.extend({
       origin: z.url({ protocol: /^https?$/ }).max(2048),
       permissions: z.array(z.enum(['geolocation', 'notifications', 'clipboard-read', 'clipboard-write', 'camera', 'microphone'])).max(6).default([]),
       clear: z.boolean().default(false),
+      scope: z.enum(['origin', 'context']).default('origin'),
     }),
     lease: true,
   },
@@ -637,7 +646,7 @@ export const toolDefinitions = {
     lease: true,
   },
   open_desktop_application: {
-    description: 'Open a built-in alias or installed system desktop executable as the workload user. Paths remain confined to the durable home.',
+    description: 'Open a discovered desktop-entry ID with its original launcher arguments, a built-in alias or an explicit executable as the workload user. Paths remain confined to the durable home.',
     input: leaseOnly.extend({
       application: DesktopApplicationNameSchema,
       paths: z.array(desktopApplicationPath).max(8).default([]),
@@ -645,7 +654,7 @@ export const toolDefinitions = {
     lease: true,
   },
   list_desktop_applications: {
-    description: 'List running apps and a bounded catalog of safe built-in or installed desktop executables without document paths.',
+    description: 'List running apps and installed desktop-entry IDs, preserving distinct launchers and reporting bundled workflow capabilities/package versions.',
     input: observationOnly,
     lease: false,
   },

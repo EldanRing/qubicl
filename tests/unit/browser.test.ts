@@ -62,7 +62,7 @@ test('browser manager provides the Terminal1 semantic, tab, and screenshot-groun
   await manager.wait(0);
   assert.deepEqual(fake.locators[0]!.fills, ['typed']);
   assert.deepEqual(fake.locators[0]!.presses, ['Enter', 'Control+A']);
-  assert.deepEqual(fake.locators[1]!.selections, [{ label: 'Selected' }]);
+  assert.deepEqual(fake.locators[1]!.selections, [{ value: 'Selected' }]);
 
   const screenshot = await manager.screenshot(false);
   assert.equal(screenshot.mimeType, 'image/png');
@@ -362,6 +362,7 @@ class FakePage {
     return this.runtime.locators[index] as unknown as ElementHandle<SVGElement | HTMLElement> ?? null;
   }
   locator(selector: string): Locator {
+    if (selector === 'input[type=password]') return { count: async () => 0 } as unknown as Locator;
     if (selector === 'body') {
       return { ariaSnapshot: async () => this.runtime.aria } as unknown as Locator;
     }
@@ -565,4 +566,48 @@ test('JSON escaping and Unicode stay inside the snapshot response budget', async
     assert.equal(snapshot.refs.length, 1);
     assert.ok(!snapshot.snapshot.includes('�'));
   } finally { await manager.shutdown(); }
+});
+
+test('failed modifier setup releases keys and failed fill does not repeat input', async (context) => {
+  const fake = new FakeBrowserRuntime();
+  const manager = new BrowserManager(true, { browserType: fake.browserType });
+  context.after(() => manager.shutdown());
+  await manager.snapshot();
+  const page = await (manager as unknown as { getPage(): Promise<Page> }).getPage();
+  page.keyboard.down = async (key) => { fake.keyboardEvents.push(`down:${key}`); if (key === 'Alt') throw new Error('key failure'); };
+  for (const action of [{ type: 'click' as const, x: 10, y: 10, keys: ['Control', 'Alt'] }, { type: 'keypress' as const, keys: ['Control', 'Alt', 'A'] }]) {
+    fake.keyboardEvents.length = 0;
+    await assert.rejects(manager.computer([action]), /key failure/);
+    assert.ok(fake.keyboardEvents.includes('up:Control'));
+    assert.ok(fake.keyboardEvents.includes('up:Alt'));
+  }
+  fake.locators[0]!.fill = async () => { throw new Error('fill uncertain'); };
+  await assert.rejects(manager.type('g1e1', 'value', false, true), /fill uncertain/);
+  assert.equal(fake.locators[0]!.clicks, 0);
+});
+
+test('tab reset reports close failures', async (context) => {
+  const fake = new FakeBrowserRuntime();
+  const manager = new BrowserManager(true, { browserType: fake.browserType });
+  context.after(() => manager.shutdown());
+  await manager.snapshot();
+  const page = await (manager as unknown as { getPage(): Promise<Page> }).getPage();
+  page.close = async () => { throw new Error('close failed'); };
+  const reset = await manager.reset();
+  assert.equal(reset.resetComplete, false);
+  assert.equal(reset.failedToClose.length, 1);
+});
+
+test('pending dialogs are never automatically dismissed by history limits', async (context) => {
+  const fake = new FakeBrowserRuntime();
+  const manager = new BrowserManager(true, { browserType: fake.browserType });
+  context.after(() => manager.shutdown());
+  await manager.snapshot();
+  const page = await (manager as unknown as { getPage(): Promise<{listeners: Map<string, Array<(dialog: unknown) => void>>}> }).getPage();
+  let dismisses = 0;
+  for (let index = 0; index < 33; index += 1) {
+    for (const listener of page.listeners.get('dialog') ?? []) listener({type:()=> 'alert', message:()=> 'fixture', defaultValue:()=> '', dismiss:async()=> {dismisses += 1;}});
+  }
+  assert.equal((await manager.listDialogs()).dialogs.length,33);
+  assert.equal(dismisses,0);
 });

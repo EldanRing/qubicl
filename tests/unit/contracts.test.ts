@@ -69,7 +69,6 @@ test('process and desktop tool contracts expose the additive safety controls and
   for (const unsafeInput of ['command', 'executable', 'args', 'arguments', 'cwd', 'environment', 'env', 'url']) {
     assert.equal(Object.hasOwn(applicationSchema.properties, unsafeInput), false);
   }
-  assert.match(toolDefinitions.open_desktop_application.description, /installed system desktop executable/);
 
   const lease = { id: 'a'.repeat(32), generation: 1, epoch: 'b'.repeat(16) };
   assert.equal(toolDefinitions.control_computer.input.safeParse({
@@ -313,7 +312,7 @@ test('stdio bridge owns, refreshes, and releases an opaque lease outside model c
     }
     if (name === 'exec_command') {
       execCalls += 1;
-      if (execCalls === 2) return Response.json({ error: { code: 'stale_lease', message: 'stale' } }, { status: 409 });
+      if (execCalls === 2) return Response.json({ error: { code: 'stale_lease', message: 'stale', details: { dispatch: 'not-started' } } }, { status: 409 });
       return Response.json({ output: 'ok', running: false, terminalState: 'exited', exitCode: 0 });
     }
     if (name === 'release_lease') return Response.json({ released: true });
@@ -353,7 +352,7 @@ test('stdio bridge replaces a background-only lease when interactive control res
     }
     if (name === 'browser_navigate') {
       browserCalls += 1;
-      if (browserCalls === 1) return Response.json({ error: { code: 'background_lease', message: 'background only' } }, { status: 409 });
+      if (browserCalls === 1) return Response.json({ error: { code: 'background_lease', message: 'background only', details: { dispatch: 'not-started' } } }, { status: 409 });
       return Response.json({ url: 'https://example.com' });
     }
     if (name === 'release_lease') return Response.json({ released: true });

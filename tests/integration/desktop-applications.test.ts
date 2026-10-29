@@ -201,8 +201,8 @@ test('allowlisted desktop-session applications survive takeover while generic co
     availableApplications: Array<{ application: string; label: string; source: string }>;
   };
   assert.equal(observed.applications.length, 1);
-  assert.deepEqual(observed.availableApplications.find(({ application }) => application === 'user-gui'), {
-    application: 'user-gui', label: 'User GUI', source: 'user',
+  assert.deepEqual(observed.availableApplications.find(({ application }) => application === 'desktop:user-gui.desktop'), {
+    application: 'desktop:user-gui.desktop', label: 'User GUI', source: 'user', desktopEntryId: 'user-gui.desktop', executable: await realpath(userGui),
   });
   assert.equal(observed.availableApplications.some(({ label }) => label === 'Hidden GUI'), false);
   const backgroundLease = executor.leases.acquire(60);
@@ -302,5 +302,5 @@ test('installed desktop applications may resolve outside bin directories and lau
   assert.equal(linked.executable, app);
   const absolute = await manager.open(app, []);
   assert.equal(absolute.executable, app);
-  assert.equal((await manager.available()).some(({ application }) => application === app), true);
+  assert.equal((await manager.available()).some(({ application, executable }) => application === 'desktop:app.desktop' && executable === app), true);
 });

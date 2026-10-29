@@ -307,3 +307,10 @@ qualification records actual results and discloses unavailable or failed checks.
 Dashboard mocks do not establish real-client or physical-device behavior. See
 [release conformance evidence](#release-conformance-evidence); the historical
 full-client matrix is not an extra requirement on the new qualification path.
+
+## 0.8 reliability additions
+
+See [browser action safety](browser-control.md) for dispatch receipts, dialogs,
+permissions and download behavior; [files, tasks and services](runtime-reliability.md)
+for optimistic saves, Unicode output and readiness; and [artifact verification](artifact-verification.md)
+for common rendering manifests and Office/PDF validation limits.

@@ -5,11 +5,11 @@ import { browserForCompatibility, type DesktopApplicationName, type Preset } fro
 import { DesktopApplicationManager } from './desktop-applications.js';
 import { errorPayload, QubiclError } from './errors.js';
 import type { LeaseProof } from './lease.js';
-import { ProcessManager, type ProcessLifecycle, type ProcessOutputMode, type StopSignal } from './processes.js';
+import { ProcessManager, parseServiceOptions, type ProcessLifecycle, type ProcessOutputMode, type StopSignal } from './processes.js';
 import { BrowserManager } from './browser.js';
 import { discoverListeningPorts } from './ports.js';
 import { readEffectiveResourceLimits } from './resource-limits.js';
-import { controlDesktop, readClipboard, takeScreenshot, writeClipboard, type ControlAction } from './executor.js';
+import { controlDesktop, readClipboard, takeScreenshot, writeClipboard, type ControlAction, type DesktopScreenshotOptions } from './executor.js';
 import type { ViewerPointerUpdate } from './viewer-actions.js';
 
 const MAX_BODY_BYTES = 25_000_000;
@@ -122,6 +122,7 @@ async function handleExecutor(
         body.outputMode === 'split' ? 'split' : 'combined' as ProcessOutputMode,
         (body.lifecycle === 'task' || body.lifecycle === 'service' ? body.lifecycle : 'session') as ProcessLifecycle,
         typeof body.label === 'string' ? body.label : 'Task',
+        parseServiceOptions(body.service),
       ));
       return;
     case 'GET /v1/process/agent-list':
@@ -241,7 +242,7 @@ async function handleSession(
       return;
     }
     case 'POST /v1/desktop/screenshot':
-      send(response, 200, await takeScreenshot());
+      send(response, 200, await takeScreenshot(body as DesktopScreenshotOptions));
       return;
     case 'POST /v1/desktop/native':
       send(response, 200, await nativeDesktop.invoke(string(body.method, 'method') as NativeDesktopMethod, object(body.input, 'input')));

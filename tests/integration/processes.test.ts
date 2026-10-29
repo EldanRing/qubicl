@@ -1663,8 +1663,8 @@ test('edit_file preserves UTF-8 BOM and CRLF while enforcing safe exact matches'
       ],
     }) as { replacements: number; diff: string };
     assert.equal(result.replacements, 2);
-    assert.match(result.diff, /-alpha/);
-    assert.match(result.diff, /\+first/);
+    assert.match(result.diff, /-\ufeffalpha/);
+    assert.match(result.diff, /\+\ufefffirst/);
     assert.equal((await readFile(path)).equals(Buffer.concat([
       Buffer.from([0xef, 0xbb, 0xbf]),
       Buffer.from('first\r\nsecond\r\nthird\r\n', 'utf8'),

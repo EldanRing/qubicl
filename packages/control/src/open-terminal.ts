@@ -557,6 +557,7 @@ export class OpenTerminalCompatibility {
         return await this.executor.call(name, { ...withoutLease, lease: proof }, { clientCredential });
       } catch (error) {
         if (!(error instanceof QubiclError)
+          || error.details?.dispatch !== 'not-started'
           || !['stale_lease', 'background_lease'].includes(error.code)
           || attempt > 0) throw error;
         if (sameProof(state.proof, proof)) {

@@ -482,7 +482,7 @@ export class BoundedFileSystem {
   async writeFile(
     value: string,
     data: Uint8Array,
-    options: { createParents: boolean; operation?: 'write' | 'edit'; expectedIdentity?: FileIdentity; expectedNamedIdentity?: FileIdentity },
+    options: { createParents: boolean; createOnly?: boolean; operation?: 'write' | 'edit'; expectedIdentity?: FileIdentity; expectedNamedIdentity?: FileIdentity },
   ): Promise<void> {
     const path = this.absolutePath(value);
     if (path === this.root) throw fileError('EISDIR', path);
@@ -496,6 +496,7 @@ export class BoundedFileSystem {
         try { destinationInfo = await lstat(destinationPath); }
         catch (error) { if (errnoCode(error) !== 'ENOENT') throw error; }
         if (destinationInfo?.isDirectory()) throw fileError('EISDIR', path);
+        if (options.createOnly && destinationInfo) throw fileError('EEXIST', path);
         if (options.expectedNamedIdentity) {
           if (!destinationInfo || !sameIdentity(await identityAt(destinationPath), options.expectedNamedIdentity)) {
             throw changedError(path);
@@ -532,7 +533,7 @@ export class BoundedFileSystem {
           }
           let quarantined: QuarantinedEntry | undefined;
           try {
-            quarantined = await this.quarantineNamedEntry(
+            quarantined = options.createOnly ? undefined : await this.quarantineNamedEntry(
               named.parent,
               named.name,
               path,

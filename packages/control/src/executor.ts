@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { annotateUntrustedToolResult, clientScopesAllowTool, isInteractiveInputTool, isToolName, MODEL_TEXT_BUDGET_BYTES, requiredClientScopesForTool, toolDefinitions, type ComputerManifest, type DesktopApplicationName, type ToolName } from '@qubicl/core';
 import type { z } from 'zod';
 import { QubiclError } from './errors.js';
@@ -22,6 +23,7 @@ import {
   type ProcessLifecycle,
   type ProcessOutputMode,
   type StopSignal,
+  type ServiceOptions,
 } from './processes.js';
 import { readEffectiveResourceLimits } from './resource-limits.js';
 import { developmentComputerManifest } from './image-manifest.js';
@@ -116,7 +118,7 @@ type DesktopApplicationController = Pick<DesktopApplicationManager, 'open' | 'cl
 interface DesktopController {
   native?(method: NativeDesktopMethod, input: Record<string, unknown>): Promise<Record<string, unknown>>;
   shutdown?(): void;
-  screenshot(): Promise<unknown>;
+  screenshot(options?: DesktopScreenshotOptions): Promise<unknown>;
   control(action: ControlAction): Promise<unknown>;
   readClipboard(): Promise<{ text: string; truncated?: boolean }>;
   writeClipboard(text: string): Promise<{ written: true }>;
@@ -224,7 +226,7 @@ export class ToolExecutor {
               500,
             );
           }
-          throw boundaryError;
+          throw new QubiclError('action_result_uncertain', 'The operation was dispatched before ownership changed. Observe its effects before deciding whether to repeat it.', 409, { dispatch: 'started', cause: boundaryError instanceof QubiclError ? boundaryError.code : 'ownership_changed' });
         }
       }
       const result = annotateUntrustedToolResult(name, executed);
@@ -251,8 +253,8 @@ export class ToolExecutor {
     const input = parsed.data;
     let owner: LeaseProof | undefined;
     if (toolDefinitions[name].lease) {
-      owner = this.leases.verify(input.lease as LeaseProof, true);
-      if (isInteractiveInputTool(name) || (name === 'publish_port' && input.openInBrowser === true)) this.leases.verifyInteractive(owner);
+      owner = beforeDispatch(() => this.leases.verify(input.lease as LeaseProof, true));
+      if (isInteractiveInputTool(name) || (name === 'publish_port' && input.openInBrowser === true)) beforeDispatch(() => this.leases.verifyInteractive(owner!));
     }
     const respond = (value: unknown): unknown => value;
     const respondBrowser = <T>(value: BrowserViewerResult<T>): T => {
@@ -353,6 +355,7 @@ export class ToolExecutor {
           input.outputMode as ProcessOutputMode,
           input.lifecycle as ProcessLifecycle,
           input.label as string,
+          input.service as ServiceOptions | undefined,
         );
         return respond(result);
       }
@@ -473,8 +476,24 @@ export class ToolExecutor {
         const target = this.workspacePath(input.path as string);
         const data = Buffer.from(input.content as string, input.encoding as BufferEncoding);
         return respond(await fileOperation(this.durableRoot, { operation: 'write', path: target }, async () => {
-          await withFileMutation(target, () => this.files.writeFile(target, data, { createParents: input.createParents as boolean }));
-          return { path: target, bytesWritten: data.length };
+          await withFileMutation(target, async () => {
+            let previous: Awaited<ReturnType<BoundedFileSystem['readFile']>> | undefined;
+            if (input.expectedSha256 !== undefined) {
+              try { previous = await this.files.readFile(target, MAX_TEXT_SOURCE_BYTES + 1); }
+              catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+                throw new QubiclError('file_conflict', 'The expected file no longer exists.', 409, { path: target, exists: false });
+              }
+              if (previous.info.size > MAX_TEXT_SOURCE_BYTES || previous.data.length > MAX_TEXT_SOURCE_BYTES) throw new QubiclError('file_too_large', `Optimistic saves require files no larger than ${MAX_TEXT_SOURCE_BYTES} bytes; use a bounded external merge for larger files.`, 413);
+              const currentSha256 = createHash('sha256').update(previous.data).digest('hex');
+              if (currentSha256 !== input.expectedSha256) throw new QubiclError('file_conflict', 'The file changed since it was read; read it again and merge before saving.', 409, { path: target, currentSha256, size: previous.data.length });
+            }
+            await this.files.writeFile(target, data, {
+              createParents: input.createParents as boolean, createOnly: input.createOnly as boolean,
+              ...(previous ? { expectedIdentity: previous.identity, expectedNamedIdentity: previous.namedIdentity } : {}),
+            });
+          });
+          return { path: target, bytesWritten: data.length, sha256: createHash('sha256').update(data).digest('hex') };
         }));
       }
       case 'edit_file': {
@@ -512,7 +531,7 @@ export class ToolExecutor {
         }));
       }
       case 'take_screenshot':
-        return respond(await this.desktop.screenshot());
+        return respond(await this.desktop.screenshot(input as DesktopScreenshotOptions));
       case 'list_desktop_windows':
         return respond(await runDesktop(() => this.nativeDesktopCall('windows', input)));
       case 'desktop_snapshot':
@@ -578,11 +597,11 @@ export class ToolExecutor {
       case 'browser_cancel_download':
         return respond(await runBrowser(() => this.browser.cancelDownload(input.downloadId as string)));
       case 'browser_dialogs':
-        return respond(await runBrowser(() => this.browser.listDialogs()));
+        return respond(await this.browser.listDialogs());
       case 'browser_respond_dialog':
-        return respond(await runBrowser(() => this.browser.respondDialog(input.dialogId as string, input.action as 'accept' | 'dismiss', input.promptText as string | undefined)));
+        return respond(await this.browser.respondDialog(input.dialogId as string, input.action as 'accept' | 'dismiss', input.promptText as string | undefined));
       case 'browser_permissions':
-        return respond(await runBrowser(() => this.browser.permissions(input.origin as string, input.permissions as string[], input.clear as boolean)));
+        return respond(await runBrowser(() => this.browser.permissions(input.origin as string, input.permissions as string[], input.clear as boolean, input.scope as 'origin' | 'context')));
       case 'browser_diagnostics':
         return respond(await runBrowser(() => this.browser.browserDiagnostics()));
       case 'browser_set_viewport':
@@ -877,10 +896,12 @@ export class ToolExecutor {
     if (this.pendingDesktopOperations >= 32) throw new QubiclError('desktop_busy', 'Desktop request queue is full. Wait for the pending observation or action.', 429);
     this.pendingDesktopOperations += 1;
     const next = this.desktopOperationQueue.then(async () => {
-      if (owner) this.leases.verifyInteractive(owner);
-      const result = await operation();
-      if (owner) this.leases.verifyInteractive(owner);
-      return result;
+      if (owner) beforeDispatch(() => this.leases.verifyInteractive(owner));
+      return afterDispatch(async () => {
+        const result = await operation();
+        if (owner) this.leases.verifyInteractive(owner);
+        return result;
+      });
     });
     this.desktopOperationQueue = next.catch(() => undefined);
     return next.finally(() => { this.pendingDesktopOperations -= 1; });
@@ -892,10 +913,12 @@ export class ToolExecutor {
     }
     this.pendingBrowserOperations += 1;
     const execute = async (): Promise<T> => {
-      if (owner) this.leases.verify(owner);
-      const result = await operation();
-      if (owner) this.leases.verify(owner);
-      return result;
+      if (owner) beforeDispatch(() => this.leases.verify(owner));
+      return afterDispatch(async () => {
+        const result = await operation();
+        if (owner) this.leases.verify(owner);
+        return result;
+      });
     };
     const next = this.browserOperationQueue.then(execute, execute);
     this.browserOperationQueue = next.catch(() => undefined);
@@ -1038,7 +1061,7 @@ function configuredDesktopController(): DesktopController {
     const remote = new RemoteDesktopManager(sessionUrl, sessionKey);
     return {
       native: (method, input) => remote.native(method, input),
-      screenshot: () => remote.screenshot(),
+      screenshot: (options) => remote.screenshot(options),
       control: (action) => remote.control(action as unknown as Record<string, unknown>),
       readClipboard: () => remote.readClipboard(),
       writeClipboard: (text) => remote.writeClipboard(text),
@@ -1167,7 +1190,7 @@ async function readToolFile(
   const mimeType = encoding === 'auto' ? supportedImageMimeType(data) : undefined;
   if (mimeType) {
     if (data.length > maxBytes) throw new QubiclError('file_too_large', `${target} is ${data.length} bytes; the image read limit is ${maxBytes}.`, 413);
-    return { path: target, size: data.length, encoding: 'base64', mimeType, ...imageDimensions(data, mimeType), data: data.toString('base64') };
+    return { path: target, size: data.length, sha256: createHash('sha256').update(data).digest('hex'), encoding: 'base64', mimeType, ...imageDimensions(data, mimeType), data: data.toString('base64') };
   }
   let text: string;
   try { text = new TextDecoder('utf-8', { fatal: true }).decode(data); }
@@ -1188,6 +1211,7 @@ async function readToolFile(
     path: target,
     size: data.length,
     encoding: 'utf8',
+    sha256: createHash('sha256').update(data).digest('hex'),
     content: bounded.content,
     startLine: offset,
     endLine: consumedLines ? nextOffset - 1 : offset - 1,
@@ -1225,7 +1249,7 @@ async function editFile(files: BoundedFileSystem, target: string, edits: EditOpe
       expectedIdentity: read.identity,
       expectedNamedIdentity: read.namedIdentity,
     });
-    const rendered = renderEditDiff(target, original, resolved);
+    const rendered = renderEditDiff(target, original, resolved, hasBom);
     const boundedDiff = truncateUtf8(rendered, MAX_EDIT_DIFF_BYTES);
     return {
       path: target,
@@ -1264,25 +1288,27 @@ function normalizeLineEndings(text: string, lineEnding: '\n' | '\r\n'): string {
   return text.replaceAll('\r\n', '\n').replaceAll('\r', '\n').replaceAll('\n', lineEnding);
 }
 
-function renderEditDiff(path: string, original: string, edits: ResolvedEdit[]): string {
-  const lines = [`--- ${path}`, `+++ ${path}`];
-  let lineDelta = 0;
-  for (const edit of edits) {
-    const oldStart = countLines(original.slice(0, edit.start));
-    const oldLines = edit.oldText.replaceAll('\r\n', '\n').split('\n');
-    const newLines = edit.newText.replaceAll('\r\n', '\n').split('\n');
-    const newStart = oldStart + lineDelta;
-    lines.push(`@@ -${oldStart},${oldLines.length} +${newStart},${newLines.length} @@`);
-    lines.push(...oldLines.map((line) => `-${line}`), ...newLines.map((line) => `+${line}`));
-    lineDelta += newLines.length - oldLines.length;
+function renderEditDiff(path: string, original: string, edits: ResolvedEdit[], hasBom = false): string {
+  let updated = original;
+  for (const edit of edits.toReversed()) updated = updated.slice(0, edit.start) + edit.newText + updated.slice(edit.end);
+  if (hasBom) { original = '\ufeff' + original; updated = '\ufeff' + updated; }
+  const split = (text: string): string[] => text.match(/[^\n]*\n|[^\n]+$/gu) ?? [];
+  const before = split(original), after = split(updated);
+  let start = 0, tail = 0;
+  while (start < Math.min(before.length, after.length) && before[start] === after[start]) start += 1;
+  if (start === before.length && start === after.length) return '';
+  while (tail < Math.min(before.length, after.length) - start && before[before.length - tail - 1] === after[after.length - tail - 1]) tail += 1;
+  start = Math.max(0, start - 3);
+  tail = Math.max(0, tail - 3);
+  const oldLines = before.slice(start, before.length - tail), newLines = after.slice(start, after.length - tail);
+  const lines = [`--- ${path}`, `+++ ${path}`, `@@ -${oldLines.length ? start + 1 : start},${oldLines.length} +${newLines.length ? start + 1 : start},${newLines.length} @@`];
+  for (const [prefix, source] of [['-', oldLines], ['+', newLines]] as const) {
+    for (const line of source) {
+      lines.push(prefix + (line.endsWith('\n') ? line.slice(0, -1) : line));
+      if (!line.endsWith('\n')) lines.push('\\ No newline at end of file');
+    }
   }
   return `${lines.join('\n')}\n`;
-}
-
-function countLines(text: string): number {
-  let lines = 1;
-  for (const character of text) if (character === '\n') lines += 1;
-  return lines;
 }
 
 function truncateCompleteLines(lines: string[], maxBytes: number): { content: string; lines: number; longLineTruncated: boolean } {
@@ -1322,13 +1348,43 @@ function imageDimensions(data: Buffer, mimeType: string): { width?: number; heig
   return {};
 }
 
-export async function takeScreenshot(): Promise<unknown> {
+export interface DesktopScreenshotOptions {
+  region?: { x: number; y: number; width: number; height: number };
+  windowId?: number;
+  geometryToken?: string;
+}
+
+export function boundedScreenshotRegion(region: NonNullable<DesktopScreenshotOptions['region']>, screen: { width: number; height: number }): string {
+  if (![region.x, region.y, region.width, region.height, screen.width, screen.height].every(Number.isSafeInteger)
+    || region.x < 0 || region.y < 0 || region.width < 1 || region.height < 1
+    || region.x + region.width > screen.width || region.y + region.height > screen.height) {
+    throw new QubiclError('desktop_screenshot_region_invalid', 'The screenshot region must fit inside the visible screen.', 400);
+  }
+  return `${region.x},${region.y},${region.width},${region.height}`;
+}
+
+export async function takeScreenshot(options: DesktopScreenshotOptions = {}): Promise<unknown> {
+  if ((options.windowId && options.region) || (options.windowId && !options.geometryToken) || (options.geometryToken && !options.windowId)) {
+    throw new QubiclError('desktop_screenshot_target_invalid', 'Choose a screen region or a window ID with its observed geometry token.', 400);
+  }
+  let region = options.region;
+  if (options.windowId) {
+    const observed = await nativeDesktop.validate({ windowId: options.windowId, geometryToken: options.geometryToken });
+    region = (observed.window as { geometry: NonNullable<DesktopScreenshotOptions['region']> }).geometry;
+  }
+  const captureArguments = ['--silent'];
+  if (region) {
+    const dimensions = (await run('xdotool', ['getdisplaygeometry'])).stdout.trim().split(/\s+/u).map(Number);
+    captureArguments.push('--autoselect', boundedScreenshotRegion(region, { width: dimensions[0]!, height: dimensions[1]! }));
+  }
   const directory = await mkdtemp(join(tmpdir(), 'qubicl-screenshot-'));
   const target = join(directory, 'screen.png');
   try {
-    await run('scrot', ['--silent', target]);
+    await run('scrot', [...captureArguments, target]);
+    if (options.windowId) await nativeDesktop.validate({ windowId: options.windowId, geometryToken: options.geometryToken });
     const data = await readFile(target);
-    return { mimeType: 'image/png', width: data.readUInt32BE(16), height: data.readUInt32BE(20), data: data.toString('base64') };
+    return { mimeType: 'image/png', width: data.readUInt32BE(16), height: data.readUInt32BE(20), data: data.toString('base64'),
+      ...(region ? { origin: { x: region.x, y: region.y }, coordinateSpace: 'screen', ...(options.windowId ? { windowId: options.windowId, geometryToken: options.geometryToken } : {}) } : {}) };
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1568,4 +1624,24 @@ export async function writeClipboard(text: string): Promise<void> {
   child.unref();
   await new Promise((resolve) => setTimeout(resolve, 50));
   if (child.exitCode && child.exitCode !== 0) throw new QubiclError('clipboard_failed', `xclip exited with code ${child.exitCode}.`, 500);
+}
+
+function beforeDispatch<T>(verify: () => T): T {
+  try { return verify(); }
+  catch (error) {
+    if (error instanceof QubiclError && ['stale_lease', 'background_lease'].includes(error.code)) {
+      throw new QubiclError(error.code, error.message, error.status, { ...error.details, dispatch: 'not-started' });
+    }
+    throw error;
+  }
+}
+
+async function afterDispatch<T>(operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); }
+  catch (error) {
+    if (error instanceof QubiclError && ['stale_lease', 'background_lease'].includes(error.code)) {
+      throw new QubiclError('action_result_uncertain', 'The action may have executed before ownership changed. Observe before retrying.', 409, { dispatch: 'started', cause: error.code });
+    }
+    throw error;
+  }
 }

@@ -1,3 +1,4 @@
+import { utf8Page } from './utf8-page.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -128,7 +129,7 @@ export class PtyManager {
 
   list(): PtySummary[] { return [...this.sessions.values()].map(summary).sort((a, b) => a.startedAt.localeCompare(b.startedAt)); }
 
-  listForManagement(): Array<{ id: string; status: 'running' | 'exited' | 'signaled'; startedAt: string; finishedAt?: string; label: string; lifecycle: 'session' | 'task'; owner: 'agent' | 'computer'; ownerGeneration: number }> {
+  listForManagement(): Array<{ id: string; exitCode?: number; signal?: NodeJS.Signals; status: 'running' | 'exited' | 'signaled'; startedAt: string; finishedAt?: string; label: string; lifecycle: 'session' | 'task'; owner: 'agent' | 'computer'; ownerGeneration: number }> {
     return [...this.sessions.values()].map((session) => ({
       id: session.id,
       status: session.finishedAt === undefined ? 'running' : session.signal ? 'signaled' : 'exited',
@@ -138,6 +139,8 @@ export class PtyManager {
       lifecycle: session.lifecycle,
       owner: session.lifecycle === 'session' ? 'agent' : 'computer',
       ownerGeneration: session.owner.generation,
+      ...(session.exitCode === undefined ? {} : { exitCode: session.exitCode }),
+      ...(session.signal === undefined ? {} : { signal: session.signal }),
     }));
   }
 
@@ -149,8 +152,9 @@ export class PtyManager {
     const requested = Math.max(0, Math.min(offset, session.totalOutput));
     const start = Math.max(requested, session.outputOffset);
     const local = start - session.outputOffset;
-    const data = session.output.subarray(local, Math.min(session.output.length, local + maxBytes));
-    return { ...summary(session), offset: start, nextOffset: start + data.length, truncated: requested < session.outputOffset || start + data.length < session.totalOutput, encoding, data: data.toString(encoding) };
+    const page = encoding === 'utf8' ? utf8Page(session.output, local, maxBytes, session.finishedAt !== undefined) : { offset: local, nextOffset: Math.min(session.output.length, local + maxBytes), data: session.output.subarray(local, local + maxBytes) };
+    const actualOffset = session.outputOffset + page.offset, nextOffset = session.outputOffset + page.nextOffset;
+    return { ...summary(session), offset: actualOffset, nextOffset, truncated: requested < session.outputOffset || nextOffset < session.totalOutput, encoding, data: page.data.toString(encoding) };
   }
 
   async write(id: string, owner: LeaseProof, input: string): Promise<{ terminalId: string; acceptedBytes: number }> {
@@ -232,7 +236,8 @@ export class PtyManager {
   }
 
   private dropOutput(session: PtySession, requested: number): void {
-    const removed = Math.min(Math.max(requested, 0), session.output.length);
+    let removed = Math.min(Math.max(requested, 0), session.output.length);
+    while (removed < session.output.length && (session.output[removed]! & 0xc0) === 0x80) removed += 1;
     if (!removed) return;
     session.output = session.output.subarray(removed);
     session.outputOffset += removed;

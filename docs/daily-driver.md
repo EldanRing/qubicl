@@ -262,3 +262,10 @@ revalidated; it never performs a global or dangling-image prune.
 
 `qubicl status NAME` reports the computer's single CPU, memory, and PID boundary.
 Ordinary system tools in a container may still show host/VM-derived totals.
+
+## 0.8 reliability additions
+
+See [browser action safety](browser-control.md) for dispatch receipts, dialogs,
+permissions and download behavior; [files, tasks and services](runtime-reliability.md)
+for optimistic saves, Unicode output and readiness; and [artifact verification](artifact-verification.md)
+for common rendering manifests and Office/PDF validation limits.

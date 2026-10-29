@@ -138,7 +138,8 @@ export class TransparentLeaseBridge {
       const proof = await this.ensureLease();
       const result = await this.post(name, { ...input, lease: proof });
       const code = errorCode(result.value);
-      if (result.ok || !['stale_lease', 'background_lease'].includes(code ?? '') || attempt > 0) return result;
+      const details = (result.value.error as { details?: { dispatch?: string } } | undefined)?.details;
+      if (result.ok || details?.dispatch !== 'not-started' || !['stale_lease', 'background_lease'].includes(code ?? '') || attempt > 0) return result;
       if (sameProof(this.lease, proof)) {
         if (code === 'background_lease') await this.release();
         else this.lease = undefined;

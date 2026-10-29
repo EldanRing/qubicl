@@ -6,9 +6,12 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Added
 
+- Optional file-save content hashes and atomic create-only writes; local service
+  readiness/health probes and bounded opt-in crash restarts.
+- Desktop-entry launcher identities, application capability records, and cropped
+  desktop/window screenshots for inspecting detailed work.
 - Shared PDF/DOCX/XLSX/PPTX rendering with captured-source hashes, exact page
   manifests, formula diagnostics and explicit fidelity limitations.
-
 - Native desktop window inventory, bounded AT-SPI snapshots with exact element
   refs and semantic actions, and explicit screenshot fallback for apps with
   incomplete accessibility.
@@ -30,7 +33,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 - CSV import preserves identifiers and literal formulas by default, supports
   explicit column types, and reports conversions. Cached-value CSV exports
   reject unavailable formula results unless explicitly allowed.
-
+- Browser permission revocation defaults to the named origin; context-wide reset
+  is explicit. Dialogs report pending state and can be resolved outside blocked
+  action queues. Tab reset reports incomplete closure.
 - Desktop app close defaults to a normal window request so Save/Discard/Cancel
   dialogs can be handled. Explicit termination retains unsaved-data acknowledgement;
   the legacy `discardUnsavedChanges: true` call still selects termination.
@@ -42,6 +47,11 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Ownership changes after dispatch cannot trigger automatic action retries.
+  Modifier setup failures release held keys; browser fill/select errors do not
+  repeat input, and dialog interruptions stop the remaining action batch.
+- Browser resize invalidates old geometry. Concurrent same-name downloads retain
+  independent files; cancellation failures and active transfers remain tracked.
 - Spreadsheet restructuring preserves structured/external references, table
   filters, row/column dimensions and removed validation/table ranges.
 - Word replacement processes original matches once without losing inline objects;
@@ -51,10 +61,18 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   explicit backgrounds and rejects grouped charts; footer IDs remain unique.
 - PDF flattening merges appearances and removes widgets/forms instead of merely
   setting read-only flags. Rendering excludes stale pages from earlier runs.
+- File edit diffs are replayable, terminal/task output pagination preserves UTF-8,
+  retained history includes exit codes, and failed skill updates preserve originals.
 
 - Browser snapshots continue at the first omitted control after count or byte
   truncation, including hidden candidates, and account for frame metadata in
   their response budget. Small pages no longer lose their continuation cursor.
+
+### Security
+
+- Password input values cannot become browser element names. Raw accessibility
+  text is omitted when password fields are present because the pinned browser
+  library exposes those values; safe refs and authenticated page reading remain.
 
 ## 0.7.0 - 2026-10-28
 

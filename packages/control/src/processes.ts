@@ -1,3 +1,6 @@
+import { createConnection } from 'node:net';
+import { request as httpRequest } from 'node:http';
+import { utf8Page } from './utf8-page.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import {
@@ -125,13 +128,34 @@ interface ManagedProcess {
   expiryTimer?: NodeJS.Timeout;
   lifetimeTimer?: NodeJS.Timeout;
   timeoutTimer?: NodeJS.Timeout;
+  serviceOptions?: ServiceOptions;
+  serviceState?: ServiceState;
+  serviceTimer?: NodeJS.Timeout;
+  restartTimer?: NodeJS.Timeout;
+  finishCallback?: () => void;
+  readyPromise?: Promise<void>;
+  readyResolve?: () => void;
 }
 
 export type StopSignal = 'SIGTERM' | 'SIGINT' | 'SIGHUP';
 export type ProcessOutputMode = 'combined' | 'split';
 export type ProcessLifecycle = 'session' | 'task' | 'service';
 
+export interface ServiceOptions {
+  readiness?: { type: 'tcp' | 'http'; port: number; host?: '127.0.0.1' | '::1'; path?: string; expectedStatus?: number; timeoutMs?: number; intervalMs?: number; probeTimeoutMs?: number };
+  restart?: { maxAttempts: number; backoffMs?: number };
+}
+export interface ServiceState {
+  state: 'starting' | 'ready' | 'unhealthy' | 'exited' | 'unverified';
+  restartAttempts: number;
+  lastCheckedAt?: string;
+  lastError?: string;
+  nextRestartAt?: string;
+  lastExitCode?: number;
+}
+
 export interface ProcessResult {
+  service?: ServiceState;
   processId: string;
   label: string;
   lifecycle: ProcessLifecycle;
@@ -180,7 +204,10 @@ export interface CompatibilityProcessOutput extends CompatibilityProcessSummary 
 
 /** Safe host-operator metadata. It deliberately excludes commands, paths, output, and lease proofs. */
 export interface ManagementProcessSummary {
+  service?: ServiceState;
   id: string;
+  exitCode?: number;
+  signal?: NodeJS.Signals;
   status: 'running' | 'exited' | 'signaled' | 'timed-out' | 'stopped' | 'interrupted';
   startedAt: string;
   finishedAt?: string;
@@ -210,6 +237,7 @@ export interface ProcessOutputPage {
 }
 
 interface PersistedServiceDefinition {
+  service?: ServiceOptions;
   version: 1;
   id: string;
   label: string;
@@ -334,17 +362,20 @@ export class ProcessManager {
     outputMode: ProcessOutputMode = 'combined',
     lifecycle: ProcessLifecycle = 'session',
     label = 'Task',
+    service?: ServiceOptions,
   ): Promise<ProcessResult> {
+    service = parseServiceOptions(service);
+    if (service && lifecycle !== 'service') throw new QubiclError('invalid_arguments', 'Service readiness/restart settings require lifecycle service.');
     const id = lifecycle === 'service' ? randomBytes(12).toString('base64url') : undefined;
-    if (id) this.persistServiceDefinition({ version: 1, id, label, command, cwd, maxOutputBytes, outputMode, ...(timeoutMs === undefined ? {} : { timeoutMs }), ownerGeneration: owner.generation });
+    if (id) this.persistServiceDefinition({ version: 1, id, label, command, cwd, maxOutputBytes, outputMode, ...(service ? { service } : {}), ...(timeoutMs === undefined ? {} : { timeoutMs }), ownerGeneration: owner.generation });
     let managed: ManagedProcess;
     try {
-      managed = this.start(command, cwd, owner, maxOutputBytes, timeoutMs, outputMode, null, false, lifecycle, label, id);
+      managed = this.start(command, cwd, owner, maxOutputBytes, timeoutMs, outputMode, null, false, lifecycle, label, id, service);
     } catch (error) {
       if (id) this.removeServiceDefinition(id);
       throw error;
     }
-    await Promise.race([managed.finished, delay(yieldTimeMs)]);
+    await Promise.race([managed.finished, delay(yieldTimeMs), ...(managed.readyPromise ? [managed.readyPromise] : [])]);
     const result = this.consume(managed);
     if (!result.running && lifecycle !== 'service') await this.discard(managed, true);
     return result;
@@ -512,19 +543,22 @@ export class ProcessManager {
     const output = this.openRetainedOutput(id);
     try {
       const start = safeTail === undefined ? Math.min(safeOffset, output.size) : Math.max(0, output.size - safeTail);
-      const length = Math.min(safeMaximum, output.size - start);
-      const data = Buffer.alloc(length);
-      const bytes = length ? readExactlySync(output.descriptor, data, start) : 0;
+      const readStart = encoding === 'utf8' ? Math.max(0, start - 3) : start;
+      const length = Math.min(safeMaximum + (encoding === 'utf8' ? 6 : 0), output.size - readStart);
+      const buffer = Buffer.alloc(length);
+      const bytes = length ? readExactlySync(output.descriptor, buffer, readStart) : 0;
       if (bytes !== length) throw new QubiclError('process_output_unavailable', `Managed task ${id} output changed while it was read.`, 409);
+      const page = encoding === 'utf8' ? utf8Page(buffer, start - readStart, safeMaximum, output.complete && readStart + bytes === output.size) : { offset: 0, nextOffset: bytes, data: buffer };
+      const actualOffset = readStart + page.offset, nextOffset = readStart + page.nextOffset;
       return {
         processId: id,
-        offset: start,
-        nextOffset: start + bytes,
+        offset: actualOffset,
+        nextOffset,
         size: output.size,
         complete: output.complete,
-        truncated: output.truncated || start + bytes < output.size,
+        truncated: output.truncated || nextOffset < output.size,
         encoding,
-        data: data.toString(encoding),
+        data: page.data.toString(encoding),
       };
     } finally {
       closeSync(output.descriptor);
@@ -617,6 +651,7 @@ export class ProcessManager {
     lifecycle: ProcessLifecycle,
     label: string,
     idOverride?: string,
+    serviceOptions?: ServiceOptions,
   ): ManagedProcess {
     if (this.count() >= this.maxProcesses) {
       throw new QubiclError('process_limit', `This computer already has ${this.maxProcesses} managed processes. Read or stop an existing process before starting another.`, 429);
@@ -697,21 +732,13 @@ export class ProcessManager {
       requestedSignal: null,
       terminationReason: null,
       forcedKill: false,
+      ...(lifecycle === 'service' ? { ...(serviceOptions ? { serviceOptions } : {}), serviceState: { state: serviceOptions?.readiness ? 'starting' : 'unverified', restartAttempts: 0 } as ServiceState, finishCallback: finish } : {}),
     };
-    child.stdout.on('data', (chunk: Buffer) => this.append(managed, managed.stdout, 'stdout', chunk));
-    child.stderr.on('data', (chunk: Buffer) => this.append(managed, managed.stderr, 'stderr', chunk));
-    child.on('error', (error) => {
-      this.append(managed, managed.stderr, 'stderr', Buffer.from(`${error.message}\n`));
-      managed.exitCode = -1;
-      this.complete(managed);
-      finish();
-    });
-    child.on('close', (code, signal) => {
-      if (managed.exitCode === null) managed.exitCode = code;
-      managed.signal = signal;
-      this.complete(managed);
-      finish();
-    });
+    this.attachChild(managed, child, finish);
+    if (serviceOptions?.readiness) {
+      managed.readyPromise = new Promise<void>((resolve) => { managed.readyResolve = resolve; });
+      this.monitorService(managed);
+    }
     this.processes.set(id, managed);
     if (lifecycle === 'task') this.persistTask(managed);
     if (compatibilitySession || lifecycle === 'task') {
@@ -731,6 +758,87 @@ export class ProcessManager {
       managed.timeoutTimer.unref();
     }
     return managed;
+  }
+
+  private attachChild(managed: ManagedProcess, child: ChildProcessWithoutNullStreams, finish: () => void): void {
+    child.stdout.on('data', (chunk: Buffer) => this.append(managed, managed.stdout, 'stdout', chunk));
+    child.stderr.on('data', (chunk: Buffer) => this.append(managed, managed.stderr, 'stderr', chunk));
+    child.on('error', (error) => {
+      this.append(managed, managed.stderr, 'stderr', Buffer.from(`${error.message}\n`));
+      managed.exitCode = -1;
+    });
+    child.once('close', (code, signal) => {
+      if (managed.child !== child || managed.completed) return;
+      if (managed.exitCode === null) managed.exitCode = code;
+      managed.signal = signal;
+      if (managed.serviceTimer) clearTimeout(managed.serviceTimer);
+      for (const member of processGroupMembers(child.pid)) managed.observedGroupMembers.set(member.pid, member.startTime);
+      const restart = managed.serviceOptions?.restart;
+      const state = managed.serviceState;
+      if (state && restart && !managed.terminationReason && (managed.exitCode !== 0 || signal !== null) && state.restartAttempts < restart.maxAttempts) {
+        if (managed.exitCode !== null) state.lastExitCode = managed.exitCode;
+        const waitMs = Math.min(30_000, (restart.backoffMs ?? 1000) * 2 ** state.restartAttempts);
+        state.restartAttempts += 1;
+        state.state = 'starting';
+        state.nextRestartAt = new Date(Date.now() + waitMs).toISOString();
+        managed.restartTimer = setTimeout(() => { void this.restartService(managed, finish); }, waitMs);
+        managed.restartTimer.unref();
+        this.notify(managed);
+        return;
+      }
+      this.complete(managed);
+      finish();
+    });
+  }
+
+  private async restartService(managed: ManagedProcess, finish: () => void): Promise<void> {
+    // Fence any surviving old process-group members before reusing this service handle.
+    try {
+      await this.terminateCompletedGroup(managed);
+      if (managed.completed || managed.terminationReason) return;
+      delete managed.restartTimer;
+      const child = spawn('/bin/bash', ['-lc', managed.command], { cwd: managed.cwd, detached: true, env: this.environment,
+        ...(this.spawnUid === undefined ? {} : { uid: this.spawnUid, gid: this.spawnGid }), stdio: ['pipe', 'pipe', 'pipe'] });
+      managed.child = child;
+      managed.groupLeaderStartTime = processIdentity(child.pid)?.startTime ?? null;
+      managed.observedGroupMembers.clear();
+      managed.exitCode = null;
+      managed.signal = null;
+      delete managed.serviceState!.nextRestartAt;
+      managed.serviceState!.state = managed.serviceOptions?.readiness ? 'starting' : 'unverified';
+      this.attachChild(managed, child, finish);
+      if (managed.serviceOptions?.readiness) this.monitorService(managed);
+    } catch (error) {
+      managed.serviceState!.lastError = (error as Error).message;
+      managed.exitCode = -1;
+      this.complete(managed);
+      finish();
+    }
+  }
+
+  private monitorService(managed: ManagedProcess): void {
+    const probe = managed.serviceOptions?.readiness;
+    if (!probe) return;
+    const started = Date.now(), child = managed.child;
+    const check = async (): Promise<void> => {
+      if (managed.completed || managed.child !== child || managed.restartTimer) return;
+      const error = await probeService(probe);
+      if (managed.completed || managed.child !== child || managed.restartTimer) return;
+      const state = managed.serviceState!;
+      state.lastCheckedAt = new Date().toISOString();
+      if (error) {
+        state.lastError = error;
+        if (state.state === 'ready' || Date.now() - started >= (probe.timeoutMs ?? 30_000)) state.state = 'unhealthy';
+      } else {
+        state.state = 'ready';
+        delete state.lastError;
+        managed.readyResolve?.();
+      }
+      this.notify(managed);
+      managed.serviceTimer = setTimeout(() => { void check(); }, probe.intervalMs ?? 1000);
+      managed.serviceTimer.unref();
+    };
+    void check();
   }
 
   private owned(id: string, owner: LeaseProof): ManagedProcess {
@@ -877,6 +985,7 @@ export class ProcessManager {
       survivesHumanTakeover: managed.lifecycle !== 'session',
       running: !managed.completed,
       terminalState: processTerminalState(managed),
+      ...(managed.serviceState ? { service: { ...managed.serviceState } } : {}),
       ...(managed.outputMode === 'split' ? { stdout, stderr } : { output }),
       ...(hasTruncation ? {
         truncation: {
@@ -1012,6 +1121,9 @@ export class ProcessManager {
     this.appendJournal(managed, 'stdout', Buffer.alloc(0), true);
     this.appendJournal(managed, 'stderr', Buffer.alloc(0), true);
     managed.completed = true;
+    if (managed.serviceTimer) clearTimeout(managed.serviceTimer);
+    if (managed.restartTimer) clearTimeout(managed.restartTimer);
+    if (managed.serviceState) { managed.serviceState.state = 'exited'; delete managed.serviceState.nextRestartAt; }
     for (const member of processGroupMembers(managed.child.pid)) managed.observedGroupMembers.set(member.pid, member.startTime);
     managed.finishedAt = Date.now();
     if (managed.timeoutTimer) clearTimeout(managed.timeoutTimer);
@@ -1117,6 +1229,16 @@ export class ProcessManager {
     signal: StopSignal | 'SIGKILL',
     reason: 'stop' | 'timeout' | 'lifetime' | 'lease_revoked',
   ): Promise<void> {
+    if (managed.restartTimer) {
+      clearTimeout(managed.restartTimer);
+      delete managed.restartTimer;
+      managed.terminationReason = reason;
+      managed.requestedSignal = signal === 'SIGKILL' ? 'SIGTERM' : signal;
+      this.complete(managed);
+      managed.finishCallback?.();
+      await this.terminateCompletedGroup(managed);
+      return;
+    }
     if (managed.completed) return;
     if (reason !== 'timeout' && managed.timeoutTimer) {
       clearTimeout(managed.timeoutTimer);
@@ -1325,6 +1447,7 @@ export class ProcessManager {
         'service',
         definition.label,
         definition.id,
+        definition.service,
       );
     }
   }
@@ -1383,6 +1506,8 @@ function parsePersistedTask(line: string): PersistedTaskRecord | undefined {
       || value.owner !== 'computer'
       || !Number.isSafeInteger(value.ownerGeneration)
     ) return undefined;
+    if (value.exitCode !== undefined && !Number.isSafeInteger(value.exitCode)) return undefined;
+    if (value.signal !== undefined && typeof value.signal !== 'string') return undefined;
     if (value.outputTruncated !== undefined && typeof value.outputTruncated !== 'boolean') return undefined;
     return value as PersistedTaskRecord;
   } catch {
@@ -1412,8 +1537,10 @@ function parsePersistedService(raw: string, durableHome: string): PersistedServi
     || (value.timeoutMs !== undefined && (!Number.isSafeInteger(value.timeoutMs) || value.timeoutMs < 1 || value.timeoutMs > 86_400_000))
     || !Number.isSafeInteger(value.ownerGeneration)
     || (value.ownerGeneration ?? 0) < 1
-    || Object.keys(value).some((key) => !['version', 'id', 'label', 'command', 'cwd', 'maxOutputBytes', 'outputMode', 'timeoutMs', 'ownerGeneration'].includes(key))
+    || Object.keys(value).some((key) => !['version', 'id', 'label', 'command', 'cwd', 'maxOutputBytes', 'outputMode', 'timeoutMs', 'ownerGeneration', 'service'].includes(key))
   ) throw new Error('A durable service definition is invalid.');
+  const parsedService = parseServiceOptions(value.service);
+  if (parsedService) value.service = parsedService;
   return value as PersistedServiceDefinition;
 }
 
@@ -1586,6 +1713,9 @@ function managementSummary(managed: ManagedProcess): ManagementProcessSummary {
     ...(managed.finishedAt === null ? {} : { finishedAt: new Date(managed.finishedAt).toISOString() }),
     owner: managed.lifecycle === 'session' ? 'agent' : 'computer',
     ownerGeneration: managed.owner.generation,
+    ...(managed.serviceState ? { service: { ...managed.serviceState } } : {}),
+    ...(managed.exitCode === null ? {} : { exitCode: managed.exitCode }),
+    ...(managed.signal === null ? {} : { signal: managed.signal }),
   };
 }
 
@@ -1670,4 +1800,37 @@ function assertUtf8Limit(value: string, maximum: number, name: string): void {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+export function parseServiceOptions(value: unknown): ServiceOptions | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new QubiclError('invalid_arguments', 'Service settings must be an object.');
+  const options = value as ServiceOptions;
+  const range = (n: unknown, low: number, high: number): boolean => n === undefined || typeof n === 'number' && Number.isInteger(n) && n >= low && n <= high;
+  const probe = options.readiness;
+  if (probe && (!['tcp', 'http'].includes(probe.type) || !Number.isInteger(probe.port) || !range(probe.port, 1, 65535) || probe.host !== undefined && !['127.0.0.1', '::1'].includes(probe.host) || !range(probe.expectedStatus, 100, 599) || !range(probe.timeoutMs, 1, 300_000) || !range(probe.intervalMs, 100, 60_000) || !range(probe.probeTimeoutMs, 1, 10_000) || probe.path !== undefined && (typeof probe.path !== 'string' || !probe.path.startsWith('/') || probe.path.length > 2048 || /[\r\n]/u.test(probe.path)))) throw new QubiclError('invalid_arguments', 'Invalid local service readiness probe.');
+  if (options.restart && (!Number.isInteger(options.restart.maxAttempts) || !range(options.restart.maxAttempts, 0, 10) || !range(options.restart.backoffMs, 100, 30_000))) throw new QubiclError('invalid_arguments', 'Invalid bounded service restart policy.');
+  return options;
+}
+
+function probeService(probe: NonNullable<ServiceOptions['readiness']>): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const timeoutMs = probe.probeTimeoutMs ?? 1000;
+    if (probe.type === 'http') {
+      const request = httpRequest({ hostname: probe.host ?? '127.0.0.1', port: probe.port, path: probe.path ?? '/', method: 'GET', timeout: timeoutMs }, (response) => {
+        response.resume();
+        resolve(response.statusCode === (probe.expectedStatus ?? 200) ? undefined : `HTTP ${response.statusCode ?? 'unknown'}`);
+        request.destroy();
+      });
+      request.once('error', (error) => resolve(error.message));
+      request.once('timeout', () => { resolve('Probe timed out'); request.destroy(); });
+      request.end();
+    } else {
+      const socket = createConnection({ host: probe.host ?? '127.0.0.1', port: probe.port });
+      socket.setTimeout(timeoutMs);
+      socket.once('connect', () => { resolve(undefined); socket.destroy(); });
+      socket.once('error', (error) => resolve(error.message));
+      socket.once('timeout', () => { resolve('Probe timed out'); socket.destroy(); });
+    }
+  });
 }

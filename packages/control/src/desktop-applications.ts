@@ -1,9 +1,10 @@
 import { nativeDesktop } from './desktop-native.js';
+import { WORKSTATION_APPLICATION_CAPABILITIES } from './workstation-applications.js';
 import { randomBytes } from 'node:crypto';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, chown, copyFile, lstat, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises';
-import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { DesktopApplicationName, Preset } from '@qubicl/core';
 import { workloadPath, workloadEnvironment } from './environments.js';
@@ -22,6 +23,8 @@ export interface DesktopApplicationDefinition {
   allowedPathKind: AllowedPathKind;
   allowedExtensions?: readonly string[];
   isolatedLibreOfficeProfile?: boolean;
+  workingDirectory?: string;
+  launcher?: { path: string; name: string; icon?: string; arguments: string[] };
 }
 
 const APPLICATION_DEFINITIONS: Readonly<Record<string, DesktopApplicationDefinition>> = {
@@ -101,6 +104,9 @@ export interface AvailableDesktopApplication {
   application: DesktopApplicationName;
   label: string;
   source: 'builtin' | 'user' | 'system';
+  desktopEntryId?: string;
+  executable?: string;
+  capabilities?: Record<string, unknown>;
 }
 
 export class DesktopApplicationManager {
@@ -174,8 +180,8 @@ export class DesktopApplicationManager {
           throw new QubiclError('desktop_application_launch_failed', `The fixed LibreOffice desktop-session profile could not be prepared: ${(error as Error).message}`, 500);
         }
       }
-      const child = spawn(definition.executable, [...profileArguments, ...definition.fixedArguments, ...paths], {
-        cwd: this.root,
+      const child = spawn(definition.executable, [...profileArguments, ...desktopLaunchArguments(definition, paths)], {
+        cwd: definition.workingDirectory ?? this.root,
         detached: true,
         env: sanitizedDesktopEnvironment(this.root, this.environment),
         ...(this.spawnUid === undefined ? {} : { uid: this.spawnUid, gid: this.spawnGid }),
@@ -310,6 +316,11 @@ export class DesktopApplicationManager {
 }
 
 async function installedApplicationDefinition(application: string, home: string): Promise<DesktopApplicationDefinition> {
+  if (application.startsWith('desktop:')) {
+    const entry = (await desktopEntries(home)).get(application);
+    if (!entry) throw new QubiclError('desktop_application_not_found', `Desktop entry ${application} is unavailable or unsupported.`, 404);
+    return entry.definition;
+  }
   const candidates = isAbsolute(application) ? [application] : workloadPath(home).split(':').map((directory) => resolve(directory, application));
   for (const candidate of candidates) {
     try {
@@ -335,71 +346,132 @@ async function discoverDesktopApplications(
     if (!definitions[application]) continue;
     found.set(application, { application, label: application, source: 'builtin' });
   }
+  for (const [application, entry] of await desktopEntries(home)) {
+    if (found.size >= 256) break;
+    found.set(application, { application, label: entry.label, source: entry.source, desktopEntryId: application.slice(8), executable: entry.definition.executable });
+  }
+  for (const [application, record] of found) {
+    const capabilities = WORKSTATION_APPLICATION_CAPABILITIES[application];
+    if (capabilities) record.capabilities = { ...capabilities, packageVersion: await packageVersion(capabilities.package) };
+  }
+  return [...found.values()].sort((left, right) => left.label.localeCompare(right.label) || left.application.localeCompare(right.application));
+}
+
+async function packageVersion(name: string): Promise<string | null> {
+  return new Promise((resolveVersion) => execFile('/usr/bin/dpkg-query', ['-W', '-f=${Version}', name], { timeout: 2000, maxBuffer: 4096 }, (error, stdout) => resolveVersion(error ? null : stdout.trim())));
+}
+
+type DesktopEntry = { label: string; source: 'user' | 'system'; definition: DesktopApplicationDefinition };
+async function desktopEntries(home: string): Promise<Map<string, DesktopEntry>> {
+  const entries = new Map<string, DesktopEntry>();
+  const seen = new Set<string>();
   const directories = [
-    { path: resolve(home, '.local', 'share', 'applications'), source: 'user' as const, confinedTo: home },
+    { path: resolve(home, '.local/share/applications'), source: 'user' as const, confinedTo: home },
     { path: '/usr/local/share/applications', source: 'system' as const },
     { path: '/usr/share/applications', source: 'system' as const },
   ];
   let inspected = 0;
   for (const directory of directories) {
-    if (found.size >= 256 || inspected >= 2_048) break;
     try {
-      const directoryInfo = await lstat(directory.path);
-      if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) continue;
+      const info = await lstat(directory.path);
+      if (!info.isDirectory() || info.isSymbolicLink()) continue;
       const canonical = await realpath(directory.path);
       if (directory.confinedTo && !isWithinOrEqual(await realpath(directory.confinedTo), canonical)) continue;
-      const names = (await readdir(canonical)).filter((name) => name.endsWith('.desktop')).sort().slice(0, 2_048 - inspected);
-      inspected += names.length;
+      const names = (await readdir(canonical)).filter((name) => /^[A-Za-z0-9][A-Za-z0-9._+-]*\.desktop$/u.test(name)).sort();
       for (const name of names) {
-        if (found.size >= 256) break;
+        if (++inspected > 2048 || entries.size >= 256) return entries;
+        const application = `desktop:${name}`;
+        if (seen.has(application)) continue;
+        seen.add(application); // A hidden user entry masks the corresponding system entry.
         try {
           const path = resolve(canonical, name);
-          const info = await lstat(path);
-          if (!info.isFile() || info.isSymbolicLink() || info.size > 65_536) continue;
+          const file = await lstat(path);
+          if (!file.isFile() || file.isSymbolicLink() || file.size > 65536) continue;
           const fields = desktopEntryFields(await readFile(path, 'utf8'));
-          if (fields.Hidden === 'true' || fields.NoDisplay === 'true' || !fields.Exec) continue;
-          const executableToken = desktopExecutableToken(fields.Exec);
-          if (!executableToken) continue;
-          const application = isAbsolute(executableToken) && workloadPath(home).split(':').includes(dirname(executableToken))
-            ? basename(executableToken) : executableToken;
-          if ((!isAbsolute(application) && !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u.test(application)) || /\p{Cc}/u.test(application) || found.has(application)) continue;
-          await installedApplicationDefinition(application, home);
-          const label = (fields.Name ?? application).replaceAll(/[\r\n\t]/gu, ' ').trim().slice(0, 120) || application;
-          found.set(application, { application, label, source: directory.source });
-        } catch {
-          // A disappearing or malformed entry does not hide the rest.
-        }
+          if (fields.Hidden === 'true' || fields.NoDisplay === 'true' || fields.Terminal === 'true' || (fields.Type && fields.Type !== 'Application') || !fields.Exec) continue;
+          const tokens = parseDesktopExec(fields.Exec);
+          if (!isAbsolute(tokens[0]!) && !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u.test(tokens[0]!)) continue;
+          const executable = await installedApplicationDefinition(tokens[0]!, home);
+          if (fields.TryExec) await installedApplicationDefinition(fields.TryExec, home);
+          let workingDirectory: string | undefined;
+          if (fields.Path) {
+            if (!isAbsolute(fields.Path)) continue;
+            workingDirectory = await realpath(fields.Path);
+            if (!(await lstat(workingDirectory)).isDirectory()) continue;
+          }
+          const label = (fields.Name ?? name).replaceAll(/[\r\n\t]/gu, ' ').trim().slice(0, 120) || name;
+          const definition = { ...executable, ...(workingDirectory ? { workingDirectory } : {}), launcher: { path, name: label, ...(fields.Icon ? { icon: fields.Icon } : {}), arguments: tokens.slice(1) } };
+          desktopLaunchArguments(definition, []); // Reject unsupported/ambiguous field codes during discovery too.
+          entries.set(application, { label, source: directory.source, definition });
+        } catch { /* Malformed or unavailable entries do not hide other applications. */ }
       }
-    } catch {
-      // Missing, unreadable, or malformed application entries are omitted.
-    }
+    } catch { /* Missing application directory. */ }
   }
-  return [...found.values()].sort((left, right) => left.label.localeCompare(right.label) || left.application.localeCompare(right.application));
+  return entries;
 }
 
 function desktopEntryFields(contents: string): Record<string, string> {
   const result: Record<string, string> = {};
   let inDesktopEntry = false;
   for (const line of contents.split(/\r?\n/u)) {
-    if (line.startsWith('[')) {
-      inDesktopEntry = line.trim() === '[Desktop Entry]';
-      continue;
-    }
+    if (line.startsWith('[')) { inDesktopEntry = line.trim() === '[Desktop Entry]'; continue; }
     if (!inDesktopEntry || line.startsWith('#')) continue;
     const separator = line.indexOf('=');
     if (separator <= 0) continue;
     const key = line.slice(0, separator);
-    if (['Name', 'Exec', 'Hidden', 'NoDisplay'].includes(key) && result[key] === undefined) result[key] = line.slice(separator + 1);
+    if (['Name', 'Exec', 'Hidden', 'NoDisplay', 'Icon', 'Type', 'Terminal', 'TryExec', 'Path'].includes(key) && result[key] === undefined) result[key] = key === 'Exec' ? line.slice(separator + 1) : unescapeDesktopString(line.slice(separator + 1));
   }
   return result;
 }
 
-function desktopExecutableToken(value: string): string | undefined {
-  const trimmed = value.trim();
-  const match = /^(?:"([^"\\]*(?:\\.[^"\\]*)*)"|'([^']*)'|([^\s]+))/u.exec(trimmed);
-  const token = match?.[1] ?? match?.[2] ?? match?.[3];
-  if (!token || token.includes('%') || token.includes('\0')) return undefined;
-  return token.replaceAll(/\\(["\\])/gu, '$1');
+function unescapeDesktopString(value: string): string {
+  return value.replaceAll(/\\([sntr\\])/gu, (_match, escaped: string) => ({ s: ' ', n: '\n', t: '\t', r: '\r', '\\': '\\' })[escaped]!);
+}
+
+export function parseDesktopExec(value: string): string[] {
+  // The desktop-entry string escape pass precedes Exec quoting (four slashes encode one literal slash).
+  value = unescapeDesktopString(value);
+  const tokens: string[] = [];
+  let token = '', quoted = false, started = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]!;
+    if (character === '\\') {
+      const next = value[++index];
+      if (next === undefined) throw new QubiclError('desktop_launcher_invalid', 'Trailing escape in desktop launcher.');
+      token += next; started = true;
+    } else if (character === '"') { quoted = !quoted; started = true; }
+    else if (/\s/u.test(character) && !quoted) {
+      if (started) tokens.push(token);
+      token = ''; started = false;
+    } else { token += character; started = true; }
+  }
+  if (quoted) throw new QubiclError('desktop_launcher_invalid', 'Unterminated quote in desktop launcher.');
+  if (started) tokens.push(token);
+  if (!tokens[0] || tokens[0].includes('=') || tokens[0].includes('%') || tokens.some((item) => /[\0\r\n]/u.test(item))) throw new QubiclError('desktop_launcher_invalid', 'Invalid desktop launcher command.');
+  return tokens;
+}
+
+export function desktopLaunchArguments(definition: DesktopApplicationDefinition, paths: readonly string[]): string[] {
+  if (!definition.launcher) return [...definition.fixedArguments, ...paths];
+  const launcher = definition.launcher;
+  const arguments_: string[] = [];
+  let fileCodes = 0;
+  for (const value of launcher.arguments) {
+    if (['%f', '%F', '%u', '%U'].includes(value)) {
+      if (++fileCodes > 1) throw new QubiclError('desktop_launcher_invalid', 'Only one file field code is supported.');
+      if (['%f', '%u'].includes(value) && paths.length > 1) throw new QubiclError('desktop_launcher_single_file', 'This launcher accepts one file per launch; open another window for additional files.');
+      arguments_.push(...paths.map((path) => ['%u', '%U'].includes(value) ? pathToFileURL(path).href : path));
+    } else if (['%d', '%D', '%n', '%N', '%v', '%m'].includes(value)) continue;
+    else if (value === '%i') { if (launcher.icon) arguments_.push('--icon', launcher.icon); }
+    else if (value === '%c') arguments_.push(launcher.name);
+    else if (value === '%k') arguments_.push(launcher.path);
+    else {
+      if (value.replaceAll('%%', '').includes('%')) throw new QubiclError('desktop_launcher_invalid', 'Unsupported or embedded desktop-entry field code.');
+      arguments_.push(value.replaceAll('%%', '%'));
+    }
+  }
+  if (paths.length && !fileCodes) throw new QubiclError('desktop_launcher_no_files', 'This desktop entry does not declare file opening; use its executable interface explicitly.');
+  return arguments_;
 }
 
 function publicRecord(tracked: TrackedDesktopApplication): DesktopApplicationRecord {

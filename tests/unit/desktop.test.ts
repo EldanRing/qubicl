@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   controlDesktop,
+  boundedScreenshotRegion,
   dragCommandArguments,
   keypressCommandArguments,
   keypressReportedUnknownKey,
@@ -139,4 +140,11 @@ test('drag interpolation is represented by one xdotool command', () => {
   assert.deepEqual(args.slice(-6), ['mousemove', '--sync', '30', '40', 'mouseup', '1']);
   assert.equal(args.filter((argument) => argument === 'sleep').length, 2);
   assert.equal(args.filter((argument) => argument === 'mousemove').length, 3);
+});
+
+ test('screenshot crops preserve screen coordinates and reject off-screen or invalid bounds', () => {
+  assert.equal(boundedScreenshotRegion({ x: 30, y: 40, width: 200, height: 100 }, { width: 800, height: 600 }), '30,40,200,100');
+  for (const region of [{ x: -1, y: 0, width: 1, height: 1 }, { x: 799, y: 0, width: 2, height: 1 }, { x: 0, y: 0, width: 0, height: 1 }, { x: 0, y: 0, width: 1.5, height: 1 }]) {
+    assert.throws(() => boundedScreenshotRegion(region, { width: 800, height: 600 }), /visible screen/);
+  }
 });

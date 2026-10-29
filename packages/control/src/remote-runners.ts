@@ -1,3 +1,4 @@
+import type { DesktopScreenshotOptions } from './executor.js';
 import type { WebSearchInput } from './web.js';
 import type { NativeDesktopMethod } from './desktop-native.js';
 import type { DesktopApplicationName } from '@qubicl/core';
@@ -15,6 +16,7 @@ import type {
   ProcessResult,
   ProcessOutputPage,
   StopSignal,
+  ServiceOptions,
 } from './processes.js';
 import { BrowserManager, type BrowserComputerAction, type BrowserMouseButton } from './browser.js';
 import type { WebExtractRenderedInput } from './web.js';
@@ -31,8 +33,8 @@ export interface RemoteProcessStatus {
 export class RemoteProcessManager {
   constructor(private readonly baseUrl: string, private readonly key: string) {}
 
-  exec(command: string, cwd: string, yieldTimeMs: number, maxOutputBytes: number, owner: LeaseProof, timeoutMs?: number, outputMode: ProcessOutputMode = 'combined', lifecycle: ProcessLifecycle = 'session', label = 'Task'): Promise<ProcessResult> {
-    return this.request('/v1/process/exec', { command, cwd, yieldTimeMs, maxOutputBytes, owner, timeoutMs, outputMode, lifecycle, label });
+  exec(command: string, cwd: string, yieldTimeMs: number, maxOutputBytes: number, owner: LeaseProof, timeoutMs?: number, outputMode: ProcessOutputMode = 'combined', lifecycle: ProcessLifecycle = 'session', label = 'Task', service?: ServiceOptions): Promise<ProcessResult> {
+    return this.request('/v1/process/exec', { command, cwd, yieldTimeMs, maxOutputBytes, owner, timeoutMs, outputMode, lifecycle, label, service });
   }
   write(id: string, input: string, close: boolean, yieldTimeMs: number, owner: LeaseProof): Promise<ProcessResult> {
     return this.request('/v1/process/write', { id, input, close, yieldTimeMs, owner });
@@ -169,8 +171,8 @@ export class RemoteDesktopManager {
   native(method: NativeDesktopMethod, input: Record<string, unknown>): Promise<Record<string, unknown>> {
     return runnerRequest(this.baseUrl, this.key, '/v1/desktop/native', { method, input });
   }
-  screenshot(): Promise<Record<string, unknown>> {
-    return runnerRequest(this.baseUrl, this.key, '/v1/desktop/screenshot', {});
+  screenshot(options: DesktopScreenshotOptions = {}): Promise<Record<string, unknown>> {
+    return runnerRequest(this.baseUrl, this.key, '/v1/desktop/screenshot', options);
   }
   control(action: Record<string, unknown>): Promise<Record<string, unknown>> {
     return runnerRequest(this.baseUrl, this.key, '/v1/desktop/control', { action });
@@ -212,7 +214,7 @@ export class RemoteBrowserManager extends BrowserManager {
   override cancelDownload(id: string): ReturnType<BrowserManager['cancelDownload']> { return this.invoke('cancelDownload', [id]); }
   override listDialogs(): ReturnType<BrowserManager['listDialogs']> { return this.invoke('listDialogs', []); }
   override respondDialog(id: string, action: 'accept' | 'dismiss', promptText?: string): ReturnType<BrowserManager['respondDialog']> { return this.invoke('respondDialog', [id, action, promptText]); }
-  override permissions(origin: string, permissions: string[], clear: boolean): ReturnType<BrowserManager['permissions']> { return this.invoke('permissions', [origin, permissions, clear]); }
+  override permissions(origin: string, permissions: string[], clear: boolean, scope: 'origin' | 'context' = 'origin'): ReturnType<BrowserManager['permissions']> { return this.invoke('permissions', [origin, permissions, clear, scope]); }
   override browserDiagnostics(): ReturnType<BrowserManager['browserDiagnostics']> { return this.invoke('browserDiagnostics', []); }
   override setViewport(width: number, height: number): ReturnType<BrowserManager['setViewport']> { return this.invoke('setViewport', [width, height]); }
   override clickAt(x: number, y: number, button: BrowserMouseButton, clickCount = 1, geometryGeneration?: number): ReturnType<BrowserManager['clickAt']> { return this.invoke('clickAt', [x, y, button, clickCount, geometryGeneration]); }

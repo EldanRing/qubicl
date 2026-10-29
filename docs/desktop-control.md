@@ -82,3 +82,48 @@ starts. Existing folder settings are preserved; a conflicting ordinary file is
 kept and that location falls back to the home. This prevents empty-path startup
 errors in applications such as Kdenlive. Workstation also includes its standard
 frei0r/SWH video effects and icon assets.
+
+## Launchers, crops and application workflows
+
+`list_desktop_applications` reports desktop-entry identifiers such as
+`desktop:org.inkscape.Inkscape.desktop`. Pass the identifier to
+`open_desktop_application` to retain the launcher's fixed arguments and declared
+file handling. Entries sharing an interpreter remain distinct. Execution uses
+an argv array, never a shell. An absolute `Path=` is resolved to an existing
+guest directory and retained as the launch working directory. `%f`/`%u` accept one existing home file, `%F`/`%U`
+accept several, and `%i`, `%c`, `%k` and `%%` retain their desktop-entry meanings.
+Unsupported/embedded field codes and terminal-only launchers are omitted rather
+than silently changed. Built-in aliases and explicit executable names remain
+available. A launcher may hand off to an existing application and exit; use
+`list_desktop_windows` to observe the resulting documents and windows rather
+than equating a launcher process with an application window.
+
+`take_screenshot` accepts either a `region` (`x`, `y`, `width`, `height` in screen
+pixels), or a `windowId` and its observed `geometryToken`. Window capture rejects
+stale geometry before and after capture. A crop must fit inside the visible
+screen and returns its `origin` for mapping local image coordinates back to
+screen input. It captures the visible screen region, including any overlapping
+window; it does not reveal occluded content. Omit both targets for the full
+screen.
+
+Bundled application records include the installed package version, editable
+formats, export formats, automation interfaces and relevant skill. The small
+`tests/e2e/workstation-workflows.py` fixtures exercise real save/reopen/export:
+XCF/PNG, SVG/PNG/PDF, BLEND/CPU PNG, FCStd/STEP/STL and Kdenlive/MLT video.
+`tests/integration/workstation-launchers-live.test.ts` opens the editable
+fixtures through their actual desktop entries. These are representative checks,
+not claims of compatibility with every project, codec, plugin or GPU.
+
+Debian Blender can omit OpenImageDenoise. Portable CPU Cycles scripts should
+turn denoising off unless support is confirmed. The supplied Blender skill
+records this observed limitation.
+
+The 4 GB workstation default remains a starting point for light combined use.
+A local Linux x64 check on 2026-10-29, limited to 2 CPUs and 4 GB, opened a
+sandboxed Chromium local page, a small Writer document and a Blender cube
+simultaneously. Five samples over ten seconds used about 0.72–0.79 GiB, with
+startup peak about 1.18 GiB and no OOM kills. This supports retaining the existing
+default for that workload, not sizing large CAD models, video timelines or renders.
+Increase the computer's memory for those projects based on observed use. The
+optional `tests/e2e/workstation-memory.py` reproduces this bounded check; it is
+not a universal release gate or a GPU/performance claim.

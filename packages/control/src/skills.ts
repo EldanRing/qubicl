@@ -56,6 +56,7 @@ const MAX_EDITABLE_SKILL_TOTAL_BYTES = 8 * 1024 * 1024;
 const MAX_EDITABLE_SKILL_PATH_BYTES = 240;
 
 export interface SkillManagerOptions {
+  renameDirectory?: typeof rename;
   durableRoot?: string;
   catalogRoot?: string;
   enabledCatalogSkills?: () => readonly string[];
@@ -78,7 +79,11 @@ export class SkillManager {
   private readonly onRegistryIntegrityFailure: (() => Promise<void>) | undefined;
   private catalogPromise: Promise<CoreCatalog> | undefined;
 
+  private readonly renameDirectory: typeof rename;
+  private mutationQueue: Promise<unknown> = Promise.resolve();
+
   constructor(options: SkillManagerOptions = {}) {
+    this.renameDirectory = options.renameDirectory ?? rename;
     this.durableRoot = resolve(options.durableRoot ?? '/home/qubicl');
     this.catalogRoot = resolve(options.catalogRoot ?? '/opt/qubicl/skills');
     this.storeRoot = join(this.durableRoot, '.local', 'share', 'qubicl', 'skills');
@@ -193,7 +198,13 @@ export class SkillManager {
     };
   }
 
-  async manage(mutation: Record<string, unknown>): Promise<Record<string, unknown>> {
+  manage(mutation: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const next = this.mutationQueue.then(() => this.manageMutation(mutation));
+    this.mutationQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  private async manageMutation(mutation: Record<string, unknown>): Promise<Record<string, unknown>> {
     const action = mutation.action as 'create' | 'update' | 'delete' | 'enable' | 'disable';
     const name = mutation.name as string;
     assertSkillName(name);
@@ -252,8 +263,19 @@ export class SkillManager {
       metadata.security = { scannerVersion: CONTENT_SECURITY_SCANNER_VERSION, findings: inspected.findings };
       await writeFile(join(staging, '.qubicl.json'), `${JSON.stringify(metadata, null, 2)}\n`, { mode: 0o600 });
       const target = join(this.customRoot, metadata.name);
-      await rm(target, { recursive: true, force: true });
-      await rename(staging, target);
+      const backup = join(this.customRoot, `.backup-${metadata.name}-${randomBytes(8).toString('hex')}`);
+      let backedUp = false;
+      try { await this.renameDirectory(target, backup); backedUp = true; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      try { await this.renameDirectory(staging, target); }
+      catch (error) {
+        if (backedUp) {
+          try { await this.renameDirectory(backup, target); }
+          catch { throw new QubiclError('skill_recovery_required', `Replacement failed and automatic restoration failed. The original skill is preserved at ${backup}.`, 500); }
+        }
+        throw error;
+      }
+      if (backedUp) await rm(backup, { recursive: true, force: true });
       await this.synchronizeCustom(metadata);
     } finally {
       await rm(staging, { recursive: true, force: true });
