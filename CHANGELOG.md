@@ -6,6 +6,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Added
 
+- Keyless search domain, recency, language and backend controls with explicit
+  unsupported-filter errors and retrieval metadata.
 - Authenticated `browser_read` with Unicode-safe text pagination, literal search,
   frame/subtree targeting, and document-bound cursors. Reads retain a consistent
   captured text version without invalidating interactive element references;

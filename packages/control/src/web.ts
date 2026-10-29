@@ -11,7 +11,11 @@ const MAX_RENDERED_REQUEST_BYTES = 3_200_000;
 const MAX_PROVIDER_OUTPUT_BYTES = 2_000_000;
 const PROVIDER_TIMEOUT_MS = 35_000;
 
-export interface WebSearchInput { query: string; limit: number }
+export interface WebSearchInput {
+  query: string; limit: number; includeDomains?: string[]; excludeDomains?: string[];
+  recency?: 'day' | 'week' | 'month' | 'year'; language?: string; region?: string;
+  provider?: 'auto' | 'duckduckgo' | 'bing' | 'brave' | 'google';
+}
 export interface WebExtractInput { url: string; format: 'markdown' | 'text'; maxChars: number }
 export interface WebExtractRenderedInput {
   finalUrl: string;
@@ -99,7 +103,7 @@ export function createWebServer(provider: WebSearchProvider & WebExtractProvider
       if (request.url === '/health') return send(response, 200, { status: 'ok', role: 'web' });
       if (!authenticated(request, key)) throw new QubiclError('unauthorized', 'Invalid internal web-service credential.', 401);
       const body = await readBody(request, request.url === '/v1/extract-rendered' ? MAX_RENDERED_REQUEST_BYTES : MAX_REQUEST_BYTES);
-      if (request.method === 'POST' && request.url === '/v1/search') return send(response, 200, await provider.search({ query: requiredString(body.query, 'query'), limit: requiredNumber(body.limit, 'limit') }));
+      if (request.method === 'POST' && request.url === '/v1/search') return send(response, 200, await provider.search({ ...body, query: requiredString(body.query, 'query'), limit: requiredNumber(body.limit, 'limit') } as unknown as WebSearchInput));
       if (request.method === 'POST' && request.url === '/v1/extract') return send(response, 200, await provider.extract({ url: requiredString(body.url, 'url'), format: body.format === 'text' ? 'text' : 'markdown', maxChars: requiredNumber(body.maxChars, 'maxChars') }));
       if (request.method === 'POST' && request.url === '/v1/extract-rendered') return send(response, 200, await provider.extractRendered({
         finalUrl: requiredString(body.finalUrl, 'finalUrl'),
@@ -146,7 +150,7 @@ function requiredString(value: unknown, name: string): string { if (typeof value
 function requiredNumber(value: unknown, name: string): number { if (typeof value !== 'number' || !Number.isFinite(value)) throw new QubiclError('invalid_arguments', `${name} must be a number.`); return value; }
 function requiredBoolean(value: unknown, name: string): boolean { if (typeof value !== 'boolean') throw new QubiclError('invalid_arguments', `${name} must be a boolean.`); return value; }
 function providerStatus(code: string | undefined): number {
-  if (code === 'web_invalid_url') return 400;
+  if (code === 'web_invalid_url' || code === 'web_invalid_filter' || code === 'web_unsupported_filter') return 400;
   if (code === 'network_policy_denied' || code?.startsWith('web_private')) return 403;
   if (code === 'web_unsupported_content_type') return 415;
   if (code === 'web_rate_limited') return 429;

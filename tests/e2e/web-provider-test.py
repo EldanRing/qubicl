@@ -6,6 +6,7 @@ import gzip
 import importlib.util
 import io
 import json
+import os
 import socket
 import unittest
 import urllib.error
@@ -13,7 +14,7 @@ import urllib.request
 from unittest.mock import patch
 
 
-SPEC = importlib.util.spec_from_file_location("qubicl_web_provider", "/opt/qubicl/web-provider.py")
+SPEC = importlib.util.spec_from_file_location("qubicl_web_provider", os.environ.get("QUBICL_WEB_PROVIDER_TEST_PATH", "/opt/qubicl/web-provider.py"))
 web = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(web)
 
@@ -230,6 +231,36 @@ class ProviderTests(unittest.TestCase):
         finally:
             web.MAX_DOWNLOAD, web.MAX_DECOMPRESSED = prior_download, prior_decompressed
 
+    def test_search_filter_routing_and_hostname_enforcement(self):
+        calls = []
+        class FilterDDGS:
+            def __init__(self, **kwargs):
+                pass
+            def text(self, query, **kwargs):
+                calls.append((query, kwargs))
+                return [
+                    {"title": "spoof", "href": "https://example.com.attacker.test/a"},
+                    {"title": "excluded", "href": "https://private.example.com/a"},
+                    {"title": "good", "href": "https://docs.example.com/a"},
+                    {"title": "duplicate", "href": "https://docs.example.com/a"},
+                    {"title": "root", "href": "https://example.com/b"},
+                ]
+        with patch.object(web, "DDGS", FilterDDGS):
+            result = web.search({"query": "release notes", "limit": 5, "includeDomains": ["EXAMPLE.COM."],
+                                 "excludeDomains": ["private.example.com"], "recency": "week", "language": "fr"})
+            self.assertEqual([row["title"] for row in result["results"]], ["good", "root"])
+            self.assertEqual(calls[0][1]["backend"], "google")
+            self.assertEqual(calls[0][1]["region"], "us-fr")
+            self.assertEqual(calls[0][1]["timelimit"], "w")
+            self.assertIn("site:example.com", calls[0][0])
+            self.assertTrue(result["retrievedAt"].endswith("Z"))
+            self.assertTrue(result["filters"]["domainsEnforced"])
+            with self.assertRaisesRegex(web.WebError, "requires the Google backend"):
+                web.search({"query": "q", "limit": 1, "language": "fr", "provider": "brave"})
+            with self.assertRaisesRegex(web.WebError, "hostnames only"):
+                web.search({"query": "q", "limit": 1, "includeDomains": ["https://example.com/a"]})
+            self.assertEqual(len(calls), 1, "unsupported filters must fail before network activity")
+
     def test_timeout_rate_limit_offline_and_search_normalization(self):
         class TimeoutOpener:
             def open(self, *args, **kwargs):
@@ -244,19 +275,20 @@ class ProviderTests(unittest.TestCase):
         class GoodDDGS:
             def __init__(self, **kwargs):
                 pass
-            def text(self, query, max_results):
+            def text(self, query, max_results, **kwargs):
                 return [{"title": "Title", "href": "https://example.com", "body": "Snippet"}, "malformed"]
         with patch.object(web, "DDGS", GoodDDGS):
             with self.assertRaisesRegex(web.WebError, "malformed"):
                 web.search({"query": "query", "limit": 2})
         class NormalDDGS(GoodDDGS):
-            def text(self, query, max_results):
+            def text(self, query, max_results, **kwargs):
                 return [{"title": "Title", "href": "https://example.com", "body": "Snippet"}]
         with patch.object(web, "DDGS", NormalDDGS):
             result = web.search({"query": "query", "limit": 1})
-        self.assertEqual(result, {"query": "query", "provider": "ddgs", "results": [{"title": "Title", "url": "https://example.com", "description": "Snippet"}]})
+        self.assertEqual(result["results"], [{"title": "Title", "url": "https://example.com", "description": "Snippet"}])
+        self.assertEqual(result["provider"], "ddgs")
         class LimitedDDGS(GoodDDGS):
-            def text(self, query, max_results):
+            def text(self, query, max_results, **kwargs):
                 raise RuntimeError("HTTP 429 rate limit")
         with patch.object(web, "DDGS", LimitedDDGS):
             with self.assertRaisesRegex(web.WebError, "rate-limited"):

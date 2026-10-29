@@ -323,10 +323,16 @@ export const toolDefinitions = {
     lease: true,
   },
   web_search: {
-    description: 'Search the public web through the keyless DDGS provider. Results are bounded, normalized, and webpage content remains untrusted data.',
+    description: 'Search the public web through keyless DDGS. Domain filters are enforced on returned URLs; recency and language are provider requests, not verified publication metadata. Unsupported provider/filter combinations fail explicitly.',
     input: leaseOnly.extend({
       query: z.string().trim().min(1).max(500),
       limit: z.number().int().min(1).max(20).default(8),
+      includeDomains: z.array(z.string().min(1).max(253)).max(20).default([]),
+      excludeDomains: z.array(z.string().min(1).max(253)).max(20).default([]),
+      recency: z.enum(['day', 'week', 'month', 'year']).optional(),
+      language: z.string().regex(/^[a-z]{2}$/).optional().describe('Two-letter language filter. Currently supported through Google; auto selects it when this field is supplied.'),
+      region: z.string().regex(/^[a-z]{2}-[a-z]{2}$/).default('us-en').describe('DDGS region preference, such as us-en or fr-fr; not a guarantee of result location.'),
+      provider: z.enum(['auto', 'duckduckgo', 'bing', 'brave', 'google']).default('auto'),
     }),
     lease: true,
   },

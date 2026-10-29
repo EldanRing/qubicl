@@ -4,11 +4,33 @@
 
 ## Search
 
-`web_search` accepts a query and 1–20 results (default 8). Its initial `ddgs` provider uses public DuckDuckGo-compatible search endpoints without an API key or account. Results are normalized to a stable title, URL, and short description. Requests have bounded retry/time/output behavior. Public providers can rate-limit or change; Qubicl reports that explicitly and never silently falls back to a paid provider.
+`web_search` accepts a query and 1–20 results (default 8). Keyless DDGS
+normalizes title, URL and description with bounded retry/time/output behavior.
+No paid provider or account is required.
+
+Development additions for 0.8 are `includeDomains`, `excludeDomains`, `recency`
+(`day`, `week`, `month`, `year`), `language`, `region`, and `provider`
+(`auto`, `duckduckgo`, `bing`, `brave`, `google`). Domain entries are hostnames,
+without schemes, paths or wildcards, and match that host plus its subdomains.
+Qubicl adds search hints and then enforces the domain filters on returned URLs;
+an excluded hostname wins. Bounded overfetch can still return fewer matches.
+
+The pinned DDGS backends forward recency constraints. When recency is requested,
+auto selection uses only the supported time-filter backends. A two-letter
+language filter currently requires Google; auto selects it, while a conflicting
+explicit backend fails with `web_unsupported_filter` before a request. `region`
+is a provider preference (default `us-en`), not a guaranteed location filter.
+Unsupported language codes and malformed domains are explicit errors.
+
+Responses expose requested/effective backend selection, applied filter metadata
+and `retrievedAt`. Provider date/language filtering is not independently
+verified, and retrieval time does not establish a result's publication date.
+There is no silent unsupported-filter fallback. Public upstreams can rate-limit
+or change; Qubicl reports these failures explicitly.
 
 ## Extraction
 
-`web_extract` accepts an HTTP(S) URL, `markdown` or `text`, a bounded character budget, and `render: auto|never|browser`. The local provider follows at most five validated redirects, downloads at most 8 MB, permits at most 16 MB after decompression, and extracts HTML/article text, plain text, JSON, XML, and PDF without a hosted scraping service. Metadata identifies final URL, title, content type, method, and truncation.
+`web_extract` accepts an HTTP(S) URL, `markdown` or `text`, a bounded character budget, and `render: auto|never|browser`. The local provider follows at most five validated redirects, downloads at most 8 MB, permits at most 16 MB after decompression, and extracts HTML/article text, plain text, JSON, XML, and PDF without a hosted scraping service. Metadata identifies retrieval time, final URL, title, content type, method, and truncation.
 
 For HTML, Trafilatura is the primary extractor and favors the article or main body while preserving useful headings, lists, links, and tables in Markdown. If it cannot produce meaningful content, Qubicl tries readability-lxml over the already-fetched document, then a small local structural heuristic. Plain-text output removes Markdown link and heading syntax while retaining readable list and table structure. These extractors never fetch independently: Qubicl's existing validated fetch result is their only input. Non-HTML handling is unchanged.
 

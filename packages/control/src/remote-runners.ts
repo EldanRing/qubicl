@@ -1,3 +1,4 @@
+import type { WebSearchInput } from './web.js';
 import type { DesktopApplicationName } from '@qubicl/core';
 import type { AvailableDesktopApplication, DesktopApplicationRecord } from './desktop-applications.js';
 import { QubiclError } from './errors.js';
@@ -128,7 +129,7 @@ export class RemoteBrokerManager {
 
 export class RemoteWebManager {
   constructor(private readonly baseUrl: string, private readonly key: string) {}
-  search(input: { query: string; limit: number }): Promise<Record<string, unknown>> {
+  search(input: WebSearchInput): Promise<Record<string, unknown>> {
     return runnerRequest(this.baseUrl, this.key, '/v1/search', input);
   }
   extract(input: { url: string; format: 'markdown' | 'text'; maxChars: number }): Promise<Record<string, unknown>> {

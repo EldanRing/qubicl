@@ -1,3 +1,4 @@
+import type { WebSearchInput } from './web.js';
 import { OfficePreviewManager } from './office-preview.js';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -118,7 +119,7 @@ interface DesktopController {
   writeClipboard(text: string): Promise<{ written: true }>;
 }
 interface WebController {
-  search(input: { query: string; limit: number }): Promise<Record<string, unknown>>;
+  search(input: WebSearchInput): Promise<Record<string, unknown>>;
   extract(input: { url: string; format: 'markdown' | 'text'; maxChars: number }): Promise<Record<string, unknown>>;
   extractRendered(input: {
     finalUrl: string;
@@ -416,7 +417,7 @@ export class ToolExecutor {
         return respond(await this.skills.manage(input.mutation as Record<string, unknown>));
       case 'web_search': {
         if (!this.web) throw new QubiclError('web_service_unavailable', 'This runtime has no isolated web service.', 503);
-        return respond(await this.web.search({ query: input.query as string, limit: input.limit as number }));
+        return respond(await this.web.search(Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'lease')) as unknown as WebSearchInput));
       }
       case 'web_extract': {
         if (!this.web) throw new QubiclError('web_service_unavailable', 'This runtime has no isolated web service.', 503);

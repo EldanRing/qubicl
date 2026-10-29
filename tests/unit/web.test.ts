@@ -8,7 +8,7 @@ import { buildComputerManifest, toolDefinitions } from '@qubicl/core';
 import { validatePublicWebUrl } from '@qubicl/control/browser';
 import { ToolExecutor } from '@qubicl/control/executor';
 import { RuntimePolicy } from '@qubicl/control/policy';
-import { createWebServer, LocalWebProvider } from '@qubicl/control/web';
+import { createWebServer, LocalWebProvider, type WebSearchInput } from '@qubicl/control/web';
 
 const PUBLIC_LOOKUP = async () => [{ address: '93.184.216.34', family: 4 }];
 
@@ -38,8 +38,9 @@ test('web URL validation rejects credentials and non-public DNS destinations', a
 test('isolated web service authenticates and delegates stable search/extract results', { concurrency: false }, async () => {
   const prior = process.env.QUBICL_RUNNER_KEY;
   process.env.QUBICL_RUNNER_KEY = 'w'.repeat(43);
+  const searchInputs: WebSearchInput[] = [];
   const provider = {
-    search: async ({ query, limit }: { query: string; limit: number }) => ({ query, limit, provider: 'ddgs', results: [] }),
+    search: async (input: WebSearchInput) => { searchInputs.push(input); return { query: input.query, limit: input.limit, provider: 'ddgs', results: [] }; },
     extract: async ({ url }: { url: string }) => ({ finalUrl: url, contentType: 'text/html', extractionMethod: 'local-html', content: 'ok', truncated: false }),
     extractRendered: async ({ finalUrl }: { finalUrl: string }) => ({ finalUrl, contentType: 'text/html', extractionMethod: 'browser', content: 'rendered', truncated: false }),
   };
@@ -50,9 +51,10 @@ test('isolated web service authenticates and delegates stable search/extract res
     assert.equal((await fetch(`http://127.0.0.1:${port}/health`)).status, 200);
     assert.equal((await fetch(`http://127.0.0.1:${port}/v1/search`, { method: 'POST', body: '{}' })).status, 401);
     const searched = await fetch(`http://127.0.0.1:${port}/v1/search`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-qubicl-runner-key': 'w'.repeat(43) }, body: JSON.stringify({ query: 'test', limit: 5 }),
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-qubicl-runner-key': 'w'.repeat(43) }, body: JSON.stringify({ query: 'test', limit: 5, includeDomains: ['example.com'], recency: 'week', provider: 'google', language: 'en' }),
     });
     assert.deepEqual(await searched.json(), { query: 'test', limit: 5, provider: 'ddgs', results: [] });
+    assert.deepEqual(searchInputs[0], { query: 'test', limit: 5, includeDomains: ['example.com'], recency: 'week', provider: 'google', language: 'en' });
     const rendered = await fetch(`http://127.0.0.1:${port}/v1/extract-rendered`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-qubicl-runner-key': 'w'.repeat(43) },

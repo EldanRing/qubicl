@@ -8,6 +8,7 @@ import os
 import re
 import socket
 import sys
+from datetime import datetime, timezone
 import time
 import urllib.error
 import urllib.parse
@@ -478,6 +479,7 @@ def extract_rendered(payload):
     max_chars = payload["maxChars"]
     truncated = bool(payload.get("sourceTruncated")) or len(content) > max_chars
     return {
+        "retrievedAt": retrieved_at(),
         "url": final_url,
         "finalUrl": final_url,
         "title": clean_text(payload.get("title") or "") or extracted_title,
@@ -532,29 +534,96 @@ def extract(payload):
     browser_recommended = method.startswith("local-html") and (
         len(content) < 80 or bool(re.search(r"(?:enable|requires?) javascript|javascript is disabled", content, re.IGNORECASE))
     )
-    return {"url": final_url, "finalUrl": final_url, "title": title, "contentType": content_type, "extractionMethod": method, "content": content, "truncated": truncated, "browserRecommended": browser_recommended}
+    return {"retrievedAt": retrieved_at(), "url": final_url, "finalUrl": final_url, "title": title, "contentType": content_type, "extractionMethod": method, "content": content, "truncated": truncated, "browserRecommended": browser_recommended}
+
+
+def retrieved_at():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def search_domains(values):
+    result = []
+    if not isinstance(values, list) or len(values) > 20:
+        raise WebError("web_invalid_filter", "Domain filters must be arrays of at most 20 hostnames.")
+    for value in values:
+        try:
+            domain = value.rstrip(".").lower().encode("idna").decode("ascii")
+            if len(domain) > 253 or not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", domain):
+                raise ValueError()
+        except (AttributeError, UnicodeError, ValueError):
+            raise WebError("web_invalid_filter", "Domain filters accept hostnames only, without URL schemes, paths or wildcards.")
+        if domain not in result:
+            result.append(domain)
+    return result
 
 
 def search(payload):
     require_online()
     proxy = os.environ.get("QUBICL_PROXY_URL")
+    include = search_domains(payload.get("includeDomains", []))
+    exclude = search_domains(payload.get("excludeDomains", []))
+    provider = payload.get("provider", "auto")
+    if provider not in ("auto", "duckduckgo", "bing", "brave", "google"):
+        raise WebError("web_unsupported_filter", "This search provider is not supported.")
+    region = payload.get("region", "us-en")
+    if not isinstance(region, str) or not re.fullmatch(r"[a-z]{2}-[a-z]{2}", region):
+        raise WebError("web_invalid_filter", "Region must use the DDGS country-language form, for example us-en.")
+    language = payload.get("language")
+    if language:
+        supported_languages = "ar bg ca cs da de el en es et fa fi fr he hi hr hu id is it ja ko lt lv nl no pl pt ro ru sk sl sr sv sw th tr uk vi zh".split()
+        if language not in supported_languages or provider not in ("auto", "google"):
+            raise WebError("web_unsupported_filter", "This language filter requires the Google backend and a supported two-letter language code. Use provider=auto or google.")
+        provider = "google"
+        region = region.split("-")[0] + "-" + language
+    recency = payload.get("recency")
+    periods = {"day": "d", "week": "w", "month": "m", "year": "y"}
+    if recency is not None and recency not in periods:
+        raise WebError("web_unsupported_filter", "Supported recency filters are day, week, month and year.")
+    # Limit auto to engines whose pinned implementations forward the time filter.
+    backend = "duckduckgo,bing,brave,google" if provider == "auto" and recency else provider
+    query = payload["query"]
+    if include:
+        query += " (" + " OR ".join("site:" + domain for domain in include) + ")"
+    if exclude:
+        query += " " + " ".join("-site:" + domain for domain in exclude)
+    kwargs = {"max_results": min(60, payload["limit"] * 3) if include or exclude else payload["limit"],
+              "region": region, "backend": backend}
+    if recency:
+        kwargs["timelimit"] = periods[recency]
+    def matches(host, domains):
+        return any(host == domain or host.endswith("." + domain) for domain in domains)
     last = None
     for attempt in range(2):
         try:
-            rows = DDGS(proxy=proxy, timeout=TIMEOUT).text(payload["query"], max_results=payload["limit"])
+            rows = DDGS(proxy=proxy, timeout=TIMEOUT).text(query, **kwargs)
             results = []
-            for row in list(rows)[:payload["limit"]]:
+            seen = set()
+            for row in list(rows)[:kwargs["max_results"]]:
                 if not isinstance(row, dict):
                     raise WebError("web_provider_malformed", "DDGS returned a malformed result.")
                 url = row.get("href") or row.get("url")
                 title = row.get("title")
                 if not isinstance(url, str) or not isinstance(title, str):
                     continue
-                parsed = urllib.parse.urlsplit(url)
-                if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+                try:
+                    parsed = urllib.parse.urlsplit(url)
+                    host = (parsed.hostname or "").rstrip(".").lower().encode("idna").decode("ascii")
+                except (ValueError, UnicodeError):
                     continue
+                if parsed.scheme not in ("http", "https") or not host or parsed.username is not None or parsed.password is not None:
+                    continue
+                if (include and not matches(host, include)) or matches(host, exclude) or url in seen:
+                    continue
+                seen.add(url)
                 results.append({"title": title[:500], "url": url[:8192], "description": str(row.get("body") or row.get("description") or "")[:2000]})
-            return {"query": payload["query"], "provider": "ddgs", "results": results}
+                if len(results) >= payload["limit"]:
+                    break
+            return {"query": payload["query"], "provider": "ddgs", "requestedProvider": payload.get("provider", "auto"),
+                    "backendSelection": backend, "retrievedAt": retrieved_at(), "results": results,
+                    "filters": {"includeDomains": include, "excludeDomains": exclude, "region": region,
+                                "recency": recency, "language": language, "domainsEnforced": True,
+                                "dateAndLanguageVerification": "provider_requested", "unsupported": []},
+                    "note": "Retrieval time is not publication time. Provider date/language filtering is not independently verified; domain filtering may return fewer results."}
         except WebError:
             raise
         except Exception as error:
