@@ -47,6 +47,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Agent-facing instructions and architecture docs describe retained browser refs
+  and the tasks, services and previews preserved by an ordinary lease release.
 - Standalone Excel-to-CSV exports use the same typed-formula metadata and ISO
   duration values as workbook inspection instead of Python object representations.
 - Worksheet copies preserve independently editable charts, images, native tables,

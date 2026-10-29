@@ -13,8 +13,8 @@ inventory, so refresh after applications open, close or reorder windows.
 `desktop_snapshot` accepts `windowId`, optional `ref` for a subtree, and bounded
 `limit`/`maxBytes` budgets. It returns AT-SPI roles, names, states, text, geometry
 and named actions. Follow `nextCursor` with the same window ID; cursors advance a
-live traversal and cannot be replayed after consumption. Unlike browser refs,
-native refs retain actual accessibility objects across pages and snapshots.
+live traversal and cannot be replayed after consumption. Native refs retain
+actual accessibility objects across pages and snapshots.
 They expire after five minutes or eviction from the four retained snapshots.
 Changed, detached or defunct elements are rejected before actions.
 
