@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmod, mkdtemp, open, readFile, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -130,4 +130,37 @@ test('the actual lifecycle hook receives configured workload environment without
     QUBICL_DEVCONTAINER_GUEST_JSON: JSON.stringify({ workspaceFolder: home, hooks: { postStartCommand: 'printf "%s|%s|%s|%s|%s|%s" "$APP_MODE" "$HTTPS_PROXY" "${QUBICL_INTERNAL_KEY-unset}" "${AWS_SECRET_ACCESS_KEY-unset}" "${QUBICL_WORKLOAD_ENV_JSON-unset}" "$QUOTED_VALUE"' } }),
   } });
   assert.equal(result.stdout, 'configured value|http://fixture-user:fixture-key@proxy.example:3128|unset|unset|unset|line one\nline two "$HOME"');
+});
+
+test('the actual internal executor startup forwards only the four task policy settings into its sanitized subprocess', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'qubicl-executor-policy-'));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const fixture = join(home, 'inspect-environment.mjs');
+  await writeFile(fixture, `process.stdout.write(JSON.stringify({
+    taskPolicy: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('QUBICL_TASK_'))),
+    role: process.env.QUBICL_RUNTIME_ROLE, key: process.env.QUBICL_RUNNER_KEY,
+    leaked: ['QUBICL_INTERNAL_KEY', 'QUBICL_SESSION_KEY', 'AWS_SECRET_ACCESS_KEY'].filter(key => key in process.env)
+  }));`);
+  const entrypoint = await readFile('images/computer/entrypoint.sh', 'utf8');
+  const start = entrypoint.indexOf('start_internal_executor() {');
+  const end = entrypoint.indexOf('\nstart_internal_session() {', start);
+  assert(start >= 0 && end > start);
+  const startup = entrypoint.slice(start, end).replace('node /opt/qubicl/control.mjs', '"$fixture_node" "$fixture_path"');
+  const script = `set -euo pipefail\nfixture_node="$1"\nfixture_path="$2"\ntarget_uid=1000\ntarget_gid=1000\npids=()\n${startup}\nstart_internal_executor\nwait "\${pids[0]}"`;
+  const taskPolicy = {
+    QUBICL_TASK_MAX_CONCURRENT: '1',
+    QUBICL_TASK_MAX_LIFETIME_SECONDS: '2592000',
+    QUBICL_TASK_MAX_OUTPUT_BYTES: '500000000',
+    QUBICL_TASK_COMPLETED_RETENTION_SECONDS: '2592000',
+  };
+  const run = async (policy: Record<string, string>) => {
+    const result = await promisify(execFile)('/bin/bash', ['-c', script, 'executor-policy-fixture', process.execPath, fixture], { env: {
+      PATH: process.env.PATH, QUBICL_EXECUTOR_KEY: 'fixture-executor-key',
+      QUBICL_INTERNAL_KEY: 'not-for-executor', QUBICL_SESSION_KEY: 'not-for-executor', AWS_SECRET_ACCESS_KEY: 'not-for-executor',
+      QUBICL_TASK_PRIVATE: 'not-a-policy-setting', ...policy,
+    } });
+    return JSON.parse(result.stdout);
+  };
+  assert.deepEqual(await run(taskPolicy), { taskPolicy, role: 'executor', key: 'fixture-executor-key', leaked: [] });
+  assert.deepEqual(await run({}), { taskPolicy: {}, role: 'executor', key: 'fixture-executor-key', leaked: [] });
 });

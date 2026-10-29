@@ -535,6 +535,12 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
       QUBICL_HOST_GID: `${hostGid}`,
       QUBICL_STARTUP_PROFILE: policy.startupProfile,
     };
+    const taskPolicyEnvironment = {
+      QUBICL_TASK_MAX_CONCURRENT: `${computer.tasks?.maxConcurrent ?? DEFAULT_TASK_POLICY.maxConcurrent}`,
+      QUBICL_TASK_MAX_LIFETIME_SECONDS: `${computer.tasks?.maxLifetimeSeconds ?? DEFAULT_TASK_POLICY.maxLifetimeSeconds}`,
+      QUBICL_TASK_MAX_OUTPUT_BYTES: `${computer.tasks?.maxOutputBytes ?? DEFAULT_TASK_POLICY.maxOutputBytes}`,
+      QUBICL_TASK_COMPLETED_RETENTION_SECONDS: `${computer.tasks?.completedRetentionSeconds ?? DEFAULT_TASK_POLICY.completedRetentionSeconds}`,
+    };
     const environment: Record<string, string> = {
       ...commonEnvironment,
       QUBICL_RUNTIME_ROLE: 'control',
@@ -570,6 +576,7 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
         restart: 'unless-stopped',
         environment: {
           ...environment,
+          ...taskPolicyEnvironment,
           QUBICL_RUNTIME_ROLE: 'computer',
           QUBICL_COMPATIBILITY: computer.compatibility,
           QUBICL_WEB_KEY: webKey,
@@ -668,10 +675,7 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
         QUBICL_RUNTIME_ROLE: 'executor',
         QUBICL_RUNNER_KEY: executorKey,
         QUBICL_EXECUTOR_FENCE_UID: '0',
-        QUBICL_TASK_MAX_CONCURRENT: `${computer.tasks?.maxConcurrent ?? DEFAULT_TASK_POLICY.maxConcurrent}`,
-        QUBICL_TASK_MAX_LIFETIME_SECONDS: `${computer.tasks?.maxLifetimeSeconds ?? DEFAULT_TASK_POLICY.maxLifetimeSeconds}`,
-        QUBICL_TASK_MAX_OUTPUT_BYTES: `${computer.tasks?.maxOutputBytes ?? DEFAULT_TASK_POLICY.maxOutputBytes}`,
-        QUBICL_TASK_COMPLETED_RETENTION_SECONDS: `${computer.tasks?.completedRetentionSeconds ?? DEFAULT_TASK_POLICY.completedRetentionSeconds}`,
+        ...taskPolicyEnvironment,
         ...(computer.environment ? { QUBICL_WORKLOAD_ENV_JSON: JSON.stringify(computer.environment) } : {}),
         ...(proxyUrl ? { QUBICL_PROXY_URL: proxyUrl } : {}),
         ...(!policy.viewer ? { QUBICL_INITIALIZE_HOME: '1' } : {}),

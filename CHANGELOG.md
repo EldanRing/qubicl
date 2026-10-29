@@ -60,6 +60,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   lists; private retained-log metadata no longer causes internal response errors.
 - Restored browser profiles use the workload user's ownership view during
   startup, avoiding false ownership failures on Docker Desktop bind mounts.
+- Unified computers receive configured task concurrency, lifetime, retained-log
+  size and retention limits in their internal executor, matching legacy runtimes.
 - Standalone Excel-to-CSV exports use the same typed-formula metadata and ISO
   duration values as workbook inspection instead of Python object representations.
 - Worksheet copies preserve independently editable charts, images, native tables,

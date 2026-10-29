@@ -278,6 +278,7 @@ start_control_as_user() {
 }
 
 start_internal_executor() {
+  local policy_key
   executor_env=(
     HOME=/root USER=root LOGNAME=root PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8
     QUBICL_RUNTIME_ROLE=executor
@@ -287,6 +288,9 @@ start_internal_executor() {
     QUBICL_HOST_GID="$target_gid"
     QUBICL_EXECUTOR_FENCE_UID="${QUBICL_EXECUTOR_FENCE_UID:-1}"
   )
+  for policy_key in QUBICL_TASK_MAX_CONCURRENT QUBICL_TASK_MAX_LIFETIME_SECONDS QUBICL_TASK_MAX_OUTPUT_BYTES QUBICL_TASK_COMPLETED_RETENTION_SECONDS; do
+    if [[ -v "$policy_key" ]]; then executor_env+=("$policy_key=${!policy_key}"); fi
+  done
   if [[ -v DISPLAY ]]; then executor_env+=(DISPLAY="$DISPLAY" DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/qubicl-runtime/bus); fi
   if [[ -v QUBICL_PROXY_URL ]]; then executor_env+=(QUBICL_PROXY_URL="$QUBICL_PROXY_URL"); fi
   if [[ -v QUBICL_WORKLOAD_ENV_JSON ]]; then executor_env+=(QUBICL_WORKLOAD_ENV_JSON="$QUBICL_WORKLOAD_ENV_JSON"); fi

@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import YAML from 'yaml';
-import { CONTROL_PROTOCOL_VERSION, GATEWAY_EXPOSURE_PROTOCOL, GATEWAY_PROTOCOL_VERSION, IMAGE_CATALOG, VIEWER_AUTHENTICATION_HEADER_V1, deriveInternalServiceKey, imageIdentity, presetDefaults, type ComputerConfig } from '@qubicl/core';
+import { CONTROL_PROTOCOL_VERSION, DEFAULT_TASK_POLICY, GATEWAY_EXPOSURE_PROTOCOL, GATEWAY_PROTOCOL_VERSION, IMAGE_CATALOG, VIEWER_AUTHENTICATION_HEADER_V1, deriveInternalServiceKey, imageIdentity, presetDefaults, type ComputerConfig } from '@qubicl/core';
 import {
   containerName,
   computerExecutorServiceName,
@@ -260,6 +260,7 @@ test('current computers use one bounded runtime container plus the shared gatewa
       ...presetDefaults('workstation'),
       network: { profile: 'offline', allowDomains: [], denyDomains: [], allowCidrs: [], allowTcpPorts: [], temporaryApprovals: [] },
       environment: { PROJECT_MODE: 'test' },
+      tasks: { maxConcurrent: 1, maxLifetimeSeconds: 2_592_000, maxOutputBytes: 500_000_000, completedRetentionSeconds: 2_592_000 },
       ssh: { enabled: true, port: 22_220, publicKey: `ssh-ed25519 ${'A'.repeat(48)} qubicl:test`, fingerprint: 'SHA256:test-fingerprint' },
     };
     state.config.computers.push(computer);
@@ -296,6 +297,12 @@ test('current computers use one bounded runtime container plus the shared gatewa
     assert.equal(runtime.environment?.QUBICL_WEB_URL, 'http://127.0.0.1:3215');
     assert.equal(runtime.environment?.QUBICL_POINTER_URL, 'http://127.0.0.1:3212/_qubicl/session/pointer');
     assert.equal(runtime.environment?.QUBICL_WORKLOAD_ENV_JSON, JSON.stringify({ PROJECT_MODE: 'test' }));
+    assert.deepEqual(Object.fromEntries(Object.entries(runtime.environment!).filter(([key]) => key.startsWith('QUBICL_TASK_'))), {
+      QUBICL_TASK_MAX_CONCURRENT: '1',
+      QUBICL_TASK_MAX_LIFETIME_SECONDS: '2592000',
+      QUBICL_TASK_MAX_OUTPUT_BYTES: '500000000',
+      QUBICL_TASK_COMPLETED_RETENTION_SECONDS: '2592000',
+    });
     assert.doesNotMatch(runtime.environment?.QUBICL_WORKLOAD_ENV_JSON ?? '', /VIEWER|[A-Za-z0-9_-]{43}/u);
     assert.equal(runtime.environment?.QUBICL_VIEWER_AUTHENTICATION, 'header-v1');
     assert.match(runtime.environment?.QUBICL_VIEWER_KEY ?? '', /^[A-Za-z0-9_-]{43}$/u);
@@ -407,9 +414,16 @@ test('protocol 9 computers remain renderable as split runtimes for rolling upgra
     state.config.computers.push(computer);
     state.secrets.computers[computer.id] = { token: 't'.repeat(43), internalKey: 'i'.repeat(43) };
     await renderRuntime(state);
-    const document = YAML.parse(await readFile(state.paths.compose, 'utf8')) as { services: Record<string, { container_name?: string }>; networks: Record<string, unknown> };
+    const document = YAML.parse(await readFile(state.paths.compose, 'utf8')) as { services: Record<string, { container_name?: string; environment?: Record<string, string> }>; networks: Record<string, unknown> };
     assert.equal(document.services[computerServiceName(state, computer)]?.container_name !== undefined, true);
     assert.equal(document.services[computerExecutorServiceName(state, computer)]?.container_name !== undefined, true);
+    const executorEnvironment = document.services[computerExecutorServiceName(state, computer)]!.environment!;
+    assert.deepEqual(Object.fromEntries(Object.entries(executorEnvironment).filter(([key]) => key.startsWith('QUBICL_TASK_'))), {
+      QUBICL_TASK_MAX_CONCURRENT: String(DEFAULT_TASK_POLICY.maxConcurrent),
+      QUBICL_TASK_MAX_LIFETIME_SECONDS: String(DEFAULT_TASK_POLICY.maxLifetimeSeconds),
+      QUBICL_TASK_MAX_OUTPUT_BYTES: String(DEFAULT_TASK_POLICY.maxOutputBytes),
+      QUBICL_TASK_COMPLETED_RETENTION_SECONDS: String(DEFAULT_TASK_POLICY.completedRetentionSeconds),
+    });
     assert.equal(document.services[computerEgressServiceName(state, computer)]?.container_name !== undefined, true);
     assert.equal(document.services[computerWebServiceName(state, computer)]?.container_name !== undefined, true);
     assert.equal(document.services[computerSessionServiceName(state, computer)]?.container_name !== undefined, true);
