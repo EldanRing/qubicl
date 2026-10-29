@@ -165,7 +165,7 @@
         "scripts/xlsx_restructure_dependents.py",
         "scripts/xlsx_to_csv.py"
       ],
-      "sha256": "ae93cca18db6ad2ab8234a174294084f62f775026f09d00ba68524f58b270a6d",
+      "sha256": "ae73cad19ed2ddc8e8d9169f8c97f82ff69b73c1e759e39310f9ee66155f5092",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",

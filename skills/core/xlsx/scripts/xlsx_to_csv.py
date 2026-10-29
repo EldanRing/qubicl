@@ -2,6 +2,8 @@
 """Export one sheet of an .xlsx workbook to CSV.
 
 Dates/datetimes are written in ISO format; None becomes an empty field.
+Elapsed durations use signed ISO 8601 values. Array/data-table formulas are
+JSON objects with their expression, range and attributes, matching xlsx_read.
 With --data-only, formula cells yield their cached results (present only
 if the file was last saved by Excel/LibreOffice; openpyxl never computes).
 
@@ -21,6 +23,7 @@ import sys
 from datetime import date, datetime, time
 
 from openpyxl import load_workbook
+from xlsx_read import jsonable
 
 
 def to_text(value):
@@ -33,7 +36,8 @@ def to_text(value):
         return value.isoformat()
     if isinstance(value, (date, time)):
         return value.isoformat()
-    return value
+    value = jsonable(value)
+    return json.dumps(value, ensure_ascii=False) if isinstance(value, dict) else value
 
 
 def main(argv=None):

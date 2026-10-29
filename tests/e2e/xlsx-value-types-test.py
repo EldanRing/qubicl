@@ -60,6 +60,14 @@ class ValueTypes(unittest.TestCase):
         rows = list(csv.reader(io.StringIO(self.run_cli('xlsx_read.py', source, '--csv', '--sheet', 'Data'))))
         self.assertEqual(json.loads(rows[0][0])['formula_type'], 'array')
         self.assertEqual(rows[0][6], 'P1DT3H15M')
+        exported = self.root / 'standalone.csv'
+        self.run_cli('xlsx_to_csv.py', source, str(exported), '--sheet', 'Data')
+        with exported.open(newline='') as stream:
+            standalone = list(csv.reader(stream))
+        self.assertEqual(json.loads(standalone[0][0]), result['rows'][0][0])
+        self.assertEqual(json.loads(standalone[0][3]), result['rows'][0][3])
+        self.assertEqual([row[6] for row in standalone], [row[6] for row in rows])
+        self.assertEqual(standalone[0][7], '2026-10-29', 'standalone export retains its date-only convention')
 
     def test_row_and_column_insertions_move_typed_anchors_ranges_and_cross_sheet_formulas(self):
         for axis, script, flag, anchor, ref, formula, table_anchor, table_ref, r1, r2 in (

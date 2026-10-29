@@ -47,6 +47,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Standalone Excel-to-CSV exports use the same typed-formula metadata and ISO
+  duration values as workbook inspection instead of Python object representations.
 - Worksheet copies preserve independently editable charts, images, native tables,
   validation and formatting rules, sheet-local names and layout settings, with
   copied references targeting the new sheet and unique table names. Pivot tables

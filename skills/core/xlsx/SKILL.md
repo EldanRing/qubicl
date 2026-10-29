@@ -25,7 +25,8 @@ Inspect workbook structure and formulas before editing. Preserve formulas unless
 Typed entries include `formula_type` and their result `ref`; array entries include
 the expression in `formula`, while data-table entries include all input references
 and flags in `attributes`. JSON/CSV sheet dumps represent typed formulas as JSON
-objects rather than Python object names. Elapsed-time values such as `[h]:mm`
+objects rather than Python object names; standalone `xlsx_to_csv.py` uses the
+same typed-formula and duration serialization. Elapsed-time values such as `[h]:mm`
 use signed ISO 8601 durations (`P1DT3H15M` for 27 hours 15 minutes), preserving
 days and fractional seconds. Dates and times retain their ISO date/time format.
 
