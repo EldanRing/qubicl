@@ -201,8 +201,18 @@ qubicl ssh disable research
 SSH is a loopback-only endpoint inside the computer container, key-only, with no
 root/password login, and uses a private Ed25519 identity independent of MCP. Paste the printed host block
 into OpenSSH configuration for VS Code or Cursor Remote SSH, JetBrains Gateway,
-or Zed. Ordinary `ssh` and `scp` use the printed command directly. SSH sessions
+or Zed. After saving the block, ordinary `ssh` and `scp` can use its host alias. SSH sessions
 are operator-owned and are not killed by an agent lease takeover.
+
+Enable, rotate and disable preserve whether the computer is running, stopped or
+absent; changing SSH settings does not start a stopped computer or gateway.
+If SSH is enabled before the first start, start the computer and run
+`qubicl ssh config NAME` again to pin its generated host key before connecting.
+Installation paths are quoted for OpenSSH. New key pairs are published together
+in a private generation directory; existing fixed-path pairs remain supported
+until rotated. After rotation, refresh saved host blocks with `ssh config` because
+`IdentityFile` changes. A failed transaction retains the generations needed for
+recovery instead of mixing old and new key files.
 
 ## Devcontainers and Git
 

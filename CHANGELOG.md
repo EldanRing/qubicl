@@ -52,6 +52,10 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   task and output-retention deadlines support the full configured 30-day range;
   paginated retained-log reads honor the configured per-log size. Devcontainer
   lifecycle hooks use the same sanitized workload environment as commands.
+- SSH configuration quotes installation paths, preserves stopped/absent runtime
+  state, and publishes complete key generations atomically. Failed configuration
+  transactions retain recoverable key pairs. Refresh saved SSH snippets after
+  rotation because the selected identity path changes.
 - Outbound HTTP forwarding preserves website session cookies. Credential broker
   requests allow URL and escaped-path query values within their scoped pathname,
   decode compressed responses with bounded expansion and accurate body encoding,
