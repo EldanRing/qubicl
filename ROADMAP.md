@@ -5,30 +5,35 @@ interfaces and the state format may still evolve. The roadmap
 below describes product direction rather than a promise of dates or a hidden
 release checklist.
 
-## Qubicl 0.6
+## Qubicl 0.7 — in development
 
-The [0.6 design](docs/decisions/0002-v0.6-capabilities-and-constraints.md)
-is implemented in the source tree. It provides persistent ordinary browsing,
-installed-app support, retained tasks independent of GUI ownership, isolated
-previews, scoped HTTP/TCP networking, recoverable installation migration, and
-simpler dashboard flows. Release impact metadata binds the exact source range
-to its required artifacts and evidence; candidate qualification is pending.
+The current published release is 0.6.1. The unreleased
+[0.7 design](docs/decisions/0004-practical-computers-and-releases.md) focuses on
+ordinary computer use and simpler maintenance:
 
-The [constraint register](docs/constraints.md) records what is retained,
-replaced, or deferred and why. This work keeps the existing platform footprint,
-manual backups, and operator-managed remote DNS/certificates. It does not claim
-that 0.6 has been qualified or published.
+- Durable Python/npm installations and managed apt recipes with removal,
+  refresh, bulk upgrades, and portable export/apply.
+- Reliable gateway reconnection for retained stopped and running computers.
+- User-installed desktop executables and SSH client connections.
+- Runtime image reuse based on actual inputs, per-image scan refresh, and
+  signed qualification with explicit results and limitations.
+- Focused offline source checks and optional coverage/performance measurements.
+
+These capabilities are implemented in the development branch. Release
+qualification and publication remain separate work. The
+[constraint register](docs/constraints.md) records retained limits and their
+reasons; it is not a hidden release checklist.
 
 ## Toward 1.0
 
 - Stabilize the CLI, state format, capability contracts, and client adapters.
-- Complete the maintained Linux ARM64 and macOS hardware matrices.
+- Expand platform support when real host evidence supports the claim.
 - Expand repeatable compatibility coverage for MCP, OpenAPI, Open WebUI,
   Codex, Claude, Cursor, VS Code, and other supported clients.
 - Continue hardening lifecycle recovery, filesystem boundaries, browser and
   desktop control, human takeover, egress policy, and release integrity.
-- Publish a supported-release policy with complete platform, client, security,
-  and exact-candidate vulnerability evidence.
+- Publish a supported-release policy grounded in actual platform/client results,
+  disclosed gaps, and exact-artifact security evidence.
 
 ## Product direction
 

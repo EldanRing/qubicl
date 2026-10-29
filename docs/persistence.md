@@ -13,7 +13,7 @@ Qubicl has one durable computer boundary: the bind-mounted `/home`.
 | Retained task records and output | Bounded | Stored in the durable home for the configured retention period; a runtime restart interrupts the process but preserves its terminal record without replay. |
 | Optional remote-gateway exposure | Until revoked | Host-local bind, TLS identity metadata, trusted origins, and network policy are durable; copied certificate and key material remain in protected host state. |
 | Python/npm tools in the home | Yes | Default environment/prefix stays under `/home`; a Python ABI change retains the old environment for explicit reinstallation. |
-| Saved system-package recipe | Yes | Host configuration retains apt additions. Named upgrades rebuild the recipe; installation backups retain it. |
+| Saved system-package recipe | Yes | Host configuration retains apt additions. Named and bulk upgrades manage recipes; manifest exports and installation backups retain them. |
 | Ad hoc root filesystem changes | No guarantee | Recreation discards them. Use a saved software recipe or custom image. |
 | `/tmp`, display state, live process state | No | Runtime-only. Declared services may restart; arbitrary jobs do not replay. |
 | Compose, routes, networks, containers | No | Rebuilt from durable intent. |
@@ -61,7 +61,10 @@ first mutation, then rolls forward gateway-first. Stored defaults change only
 future computers. Existing computer IDs, credentials, operator settings,
 resources, homes, and prior runtime state are preserved. Missing local content
 IDs in migrated curated state are repaired through the same explicit boundary;
-custom image identities are never advanced by this aggregate command. Recipe-bearing computers use `qubicl upgrade NAME` to rebuild their saved packages on the new base. See [software installation](custom-images.md#install-everyday-software).
+custom images without recipes remain manual. Managed recipes rebuild when their
+curated base changes; custom-base recipes retain their recorded base. All needed
+recipe images are prepared before runtime changes and retained by the recovery
+journal. See [software installation](custom-images.md#install-everyday-software).
 
 ## Protected host state
 
@@ -98,7 +101,7 @@ gateway exposure or revocation, and manifest application write
 `transaction.yaml` before crossing durable/runtime boundaries. The journal
 records the complete intended target plus immutable runtime bindings where
 replacement is required. Gateway exposure changes recreate only the shared
-gateway when necessary, reconnect computers that were already running, and
+gateway when necessary, reconnect retained running and stopped computer networks without starting stopped computers, and
 preserve stopped computers and durable homes. The next applicable mutating
 command rolls the journal forward; `status` and cleanup/upgrade previews inspect
 a pending journal without rewriting or recovering it, and `doctor` reports

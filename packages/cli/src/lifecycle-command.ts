@@ -1,11 +1,14 @@
 import { operationOutput } from './operation-context.js';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { lstat, readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import {
   COMPUTER_PREVIEW_ACCESS_PROTOCOL,
   ConfigSchema,
+  ComputerDefaultsSchema,
+  SoftwareRecipeSchema,
   DockerPlatformSchema,
   GATEWAY_EXPOSURE_PROTOCOL,
   IMAGE_CATALOG,
@@ -14,6 +17,8 @@ import {
   formatBytes,
   presetDefaults,
   type DockerPlatform,
+  type ComputerConfig,
+  type ComputerDefaults,
   type ImageCatalog,
   type QubiclConfig,
   type RuntimeContainerBinding,
@@ -24,6 +29,7 @@ import { printBrowserProfileDisclosure } from './browser-profile-disclosures.js'
 import {
   acquireCatalogGatewayContract,
   acquireCatalogPreset,
+  acquireCustomImage,
   imageDrift,
   imageExists,
   managedComputerRuntimeObservation,
@@ -32,6 +38,7 @@ import {
 } from './docker.js';
 import {
   buildLifecycleUpdateStatus,
+  softwareBaseDefaults,
   buildUpgradeAllPlan,
   acceptedUpgradeAllPlan,
   assertAcceptedUpgradeAllRecovery,
@@ -51,6 +58,7 @@ import {
   type UpgradeAllAcceptance,
   type UpgradeAllExecutionDependencies,
 } from './lifecycle-update.js';
+import { prepareSoftwareImage, type PreparedSoftwareImage } from './software.js';
 import { inspectPendingBackupCreation } from './backups.js';
 import { inspectPendingComputerLifecycle, type ComputerLifecycleJournal } from './lifecycle-operations.js';
 import { synchronizeStartedSkillPolicies } from './policy-commands.js';
@@ -174,6 +182,7 @@ export interface UpgradeAllJournal {
   checkpointConfigDigest: string;
   activeStep: { key: string; expectedConfigDigest: string } | null;
   accepted: UpgradeAllAcceptance;
+  preparedSoftware?: Record<string, PreparedSoftwareImage>;
 }
 
 function upgradeAllJournalPath(paths: StatePaths): string {
@@ -277,7 +286,8 @@ function upgradeExecutionDependencies(
     },
     recordAccepted: async (plan) => {
       state = await loadState(paths);
-      await recordAcceptedUpgradeAll(state, plan, offline, options.journalIdentity);
+      const existing = options.ignoreUpgradeJournal ? await requiredUpgradeAllJournal(state) : undefined;
+      await recordAcceptedUpgradeAll(state, plan, offline, options.journalIdentity, existing?.preparedSoftware);
     },
     recordStepStarted: async (step, expectedConfigDigest) => {
       const journal = await requiredUpgradeAllJournal(state);
@@ -296,6 +306,7 @@ function upgradeExecutionDependencies(
     },
     clearAccepted: async () => durableRemove(upgradeAllJournalPath(paths)),
     acquireAndInspect: async (target) => acquireAndInspectExactTarget(target, platform, offline),
+    prepareSoftware: (computer, base) => prepareUpgradeSoftware(state, computer, base, platform, offline),
     applyGatewayAndDefaults: async (mutation) => {
       state = await loadState(paths);
       await applyGatewayAndDefaults(state, mutation);
@@ -310,6 +321,31 @@ function upgradeExecutionDependencies(
   };
 }
 
+export async function prepareUpgradeSoftware(
+  state: LoadedState,
+  computer: ComputerConfig,
+  base: ComputerDefaults,
+  platform: DockerPlatform,
+  offline: boolean,
+  dependencies = { prepare: prepareSoftwareImage, acquire: acquireCustomImage },
+): Promise<PreparedSoftwareImage> {
+  const journal = await requiredUpgradeAllJournal(state);
+  const saved = journal.preparedSoftware?.[computer.id];
+  if (saved) {
+    if (!isDeepStrictEqual(saved.recipe.baseIdentity, base.image)) throw new Error(`Prepared base for ${computer.name} changed; preserve the upgrade journal.`);
+    assertSame(saved.recipe.aptPackages, computer.software?.aptPackages, `prepared packages for ${computer.name}`);
+    // Resume exact inspected bytes; never rebuild into newer package versions.
+    const image = await dependencies.acquire(saved.defaults.image.requested, { offline: true, platform }, saved.defaults.image.contentId);
+    if (image.identity.contentId !== saved.defaults.image.contentId
+      || image.identity.manifestSha256 !== saved.defaults.image.manifestSha256) throw new Error(`Prepared software image for ${computer.name} changed; preserve the upgrade journal.`);
+    return saved;
+  }
+  const prepared = await dependencies.prepare(computer.software!, base, computer.id, offline);
+  journal.preparedSoftware = { ...journal.preparedSoftware, [computer.id]: prepared };
+  await writeUpgradeAllJournal(state.paths, journal);
+  return prepared;
+}
+
 export async function recordAcceptedUpgradeAll(
   state: LoadedState,
   plan: UpgradeAllPlan,
@@ -318,6 +354,7 @@ export async function recordAcceptedUpgradeAll(
     operationId: randomUUID(),
     createdAt: new Date().toISOString(),
   },
+  preparedSoftware?: Record<string, PreparedSoftwareImage>,
 ): Promise<void> {
   const journal: UpgradeAllJournal = {
     version: 1,
@@ -327,6 +364,7 @@ export async function recordAcceptedUpgradeAll(
     checkpointConfigDigest: plan.configDigest,
     activeStep: null,
     accepted: acceptedUpgradeAllPlan(plan),
+    ...(preparedSoftware ? { preparedSoftware: structuredClone(preparedSoftware) } : {}),
   };
   await writeUpgradeAllJournal(state.paths, journal);
 }
@@ -362,8 +400,8 @@ async function readUpgradeAllJournal(paths: StatePaths): Promise<UpgradeAllJourn
 
 function parseUpgradeAllJournal(value: unknown): UpgradeAllJournal {
   const record = strictRecord(value, [
-    'accepted', 'activeStep', 'checkpointConfigDigest', 'createdAt', 'installationId', 'offline', 'operationId', 'version',
-  ], 'upgrade-all journal');
+    'accepted', 'activeStep', 'checkpointConfigDigest', 'createdAt', 'installationId', 'offline', 'operationId', 'version', 'preparedSoftware',
+  ], 'upgrade-all journal', ['preparedSoftware']);
   if (record.version !== 1) throw new Error('Upgrade-all journal has an unsupported version.');
   const operationId = uuidField(record.operationId, 'operation ID');
   const installationId = uuidField(record.installationId, 'installation ID');
@@ -430,6 +468,18 @@ function parseUpgradeAllJournal(value: unknown): UpgradeAllJournal {
       throw new Error('Upgrade-all journal active step is outside the accepted mutation plan.');
     }
   }
+  let preparedSoftware: Record<string, PreparedSoftwareImage> | undefined;
+  if (record.preparedSoftware !== undefined) {
+    const ids = rows.filter(({ kind }) => kind === 'computer').map(({ key }) => key.slice('computer:'.length));
+    const prepared = strictRecord(record.preparedSoftware, ids, 'prepared software images', ids);
+    preparedSoftware = Object.fromEntries(Object.entries(prepared).map(([id, value]) => {
+      const image = strictRecord(value, ['defaults', 'recipe'], 'prepared software image');
+      const defaults = ComputerDefaultsSchema.parse(image.defaults);
+      const recipe = SoftwareRecipeSchema.parse(image.recipe);
+      if (defaults.preset !== 'custom' || !defaults.image.contentId || !recipe.baseIdentity?.contentId) throw new Error('Prepared software image lacks immutable content identity.');
+      return [id, { defaults, recipe }];
+    }));
+  }
   return {
     version: 1,
     operationId,
@@ -438,6 +488,7 @@ function parseUpgradeAllJournal(value: unknown): UpgradeAllJournal {
     offline: record.offline,
     checkpointConfigDigest,
     activeStep,
+    ...(preparedSoftware ? { preparedSoftware } : {}),
     accepted: {
       platform: DockerPlatformSchema.parse(acceptedRecord.platform),
       catalogRevision: stringField(acceptedRecord.catalogRevision, 'catalog revision'),
@@ -450,12 +501,12 @@ function parseUpgradeAllJournal(value: unknown): UpgradeAllJournal {
   };
 }
 
-function strictRecord(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
+function strictRecord(value: unknown, keys: readonly string[], label: string, optional: readonly string[] = []): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object.`);
   const record = value as Record<string, unknown>;
   const expected = new Set(keys);
   const unexpected = Object.keys(record).filter((key) => !expected.has(key));
-  const missing = keys.filter((key) => !(key in record));
+  const missing = keys.filter((key) => !(key in record) && !optional.includes(key));
   if (unexpected.length || missing.length) {
     throw new Error(`${label} fields are invalid${unexpected.length ? `; unexpected: ${unexpected.join(', ')}` : ''}${missing.length ? `; missing: ${missing.join(', ')}` : ''}.`);
   }
@@ -514,6 +565,9 @@ export function printUpgradeAllPreview(plan: UpgradeAllPlan, write: (line: strin
   for (const target of plan.exactTargets) {
     write(`  ${target.exactTarget}\t${target.present ? 'already present (0 B)' : 'acquire/inspect'}\tconsumers=${target.consumers.map(({ id }) => id).join(',')}`);
   }
+  for (const row of plan.rows) {
+    if (row.software && ['upgrade', 'repair-content-drift'].includes(row.action)) write(`  SOFTWARE: ${row.name}: build apt packages [${row.software.aptPackages.join(', ')}] on ${row.targetImage?.resolved}; package download/build space is additional and unknown.`);
+  }
   write(`Required space: ${plan.space.statement}`);
   if (plan.blockers.length) {
     write('BLOCKED:');
@@ -541,7 +595,7 @@ async function acquireAndInspectExactTarget(
     gatewayExposureProtocol?: typeof GATEWAY_EXPOSURE_PROTOCOL;
   }>();
   for (const consumer of target.consumers) {
-    const key = consumer.kind === 'gateway' ? 'gateway' : `preset:${consumer.preset}`;
+    const key = consumer.kind === 'gateway' ? 'gateway' : consumer.preset ? `preset:${consumer.preset}` : `custom:${target.exactTarget}`;
     const existing = inspections.get(key);
     if (existing) {
       existing.consumerIds.push(consumer.id);
@@ -560,9 +614,11 @@ async function acquireAndInspectExactTarget(
       });
       continue;
     }
-    if (!consumer.preset) throw new Error(`Exact target consumer ${consumer.id} has no curated preset.`);
-    const inspection = await acquireCatalogPreset(consumer.preset, { catalog: IMAGE_CATALOG, platform, offline, stderr: true });
-    assertAcquiredIdentity(target, inspection.identity.resolved);
+    const inspection = consumer.preset
+      ? await acquireCatalogPreset(consumer.preset, { catalog: IMAGE_CATALOG, platform, offline, stderr: true })
+      : await acquireCustomImage(consumer.image.requested, { platform, offline, stderr: true }, target.exactTarget);
+    if (consumer.preset || target.exactTarget.includes('@sha256:')) assertAcquiredIdentity(target, inspection.identity.resolved);
+    if (consumer.image.contentId && consumer.image.contentId !== inspection.identity.contentId) throw new Error(`Custom recipe base ${target.exactTarget} changed content; review a named upgrade.`);
     inspections.set(key, {
       contentId: requiredContentId(inspection.identity.contentId, target.exactTarget),
       consumerIds: [consumer.id],
@@ -663,7 +719,7 @@ function curatedExactTargets(config: QubiclConfig, platform: DockerPlatform): st
   const targets = new Set([catalogImageIdentity(IMAGE_CATALOG.gateway, platform).resolved]);
   if (config.defaults.preset !== 'custom') targets.add(presetDefaults(config.defaults.preset, platform, IMAGE_CATALOG).image.resolved);
   for (const computer of config.computers) {
-    if (computer.preset !== 'custom') targets.add(presetDefaults(computer.preset, platform, IMAGE_CATALOG).image.resolved);
+    if (computer.preset !== 'custom' || computer.software) targets.add(softwareBaseDefaults(computer, IMAGE_CATALOG, platform).image.resolved);
   }
   return [...targets].sort();
 }

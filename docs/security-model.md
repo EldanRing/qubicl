@@ -256,7 +256,10 @@ they do not receive host secrets. The host-side `software` command builds a
 saved apt recipe into a derived Qubicl image, then uses the existing upgrade
 transaction. Package maintainer scripts run in the image build, not on the host;
 this command does not grant guest sudo or a Docker socket. The operator trusts
-the selected repositories and packages just as with a custom Dockerfile.
+the selected repositories and packages just as with a custom Dockerfile. Recipe
+exports carry this build intent; apply previews it before acquisition. Removal
+rebuilds from the base, refresh explicitly bypasses the package-layer cache, and
+bulk-upgrade recovery retains inspected image bytes rather than rerunning apt.
 
 Use supported upstream dependency releases and verify compatibility. The image
 pins upstream npm 12.2.1; it no longer replaces npm's private nested packages.

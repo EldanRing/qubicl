@@ -1805,19 +1805,23 @@ export async function verifyGatewayCompatibility(
       }
     }
   }
-  // Compose may recreate the shared gateway for an image, port, label, or
-  // binary-version change from any lifecycle command. Reattach every running
-  // computer after the capability gate; stopped computers remain untouched.
+  await reconnectExistingComputerNetworks(state, skipComputerIds);
+}
+
+/** Reattach retained networks without starting stopped computers or creating absent ones. */
+export async function reconnectExistingComputerNetworks(
+  state: LoadedState,
+  skipComputerIds: readonly string[] = [],
+  adapter = { observe: managedComputerRuntimeObservation, connect: connectComputerToGateway },
+): Promise<void> {
   const skipped = new Set(skipComputerIds);
   for (const computer of state.config.computers) {
     if (skipped.has(computer.id)) continue;
-    const runtime = await managedComputerRuntimeObservation(state, computer);
+    const runtime = await adapter.observe(state, computer);
     if (runtime.group === 'partial' || runtime.group === 'inconsistent') {
       throw new Error(`Computer ${computer.name} runtime is ${runtime.group}; gateway reconnection cannot be verified.`);
     }
-    if (runtime.group === 'complete' && runtime.status === 'running') {
-      await connectComputerToGateway(state, computer);
-    }
+    if (runtime.group === 'complete') await adapter.connect(state, computer);
   }
 }
 
@@ -2359,6 +2363,7 @@ export async function replaceStoppedGatewayRuntime(
   if (!replacement) throw new Error('Stopped gateway replacement was not created.');
   verifyManagedGateway(state, replacement, name);
   assertStoppedReplacementStatus(replacement.State?.Status ?? 'unknown', 'Replacement gateway');
+  await reconnectExistingComputerNetworks(state);
 }
 
 /**
@@ -2377,6 +2382,9 @@ export async function replaceStoppedComputerRuntime(
     throw new Error(`Stopped replacement for ${computer.name} is ${replacement.group}.`);
   }
   assertStoppedReplacementStatus(replacement.status, `Replacement computer ${computer.name}`);
+  const gateway = await managedGatewayRuntimeObservation(state);
+  if (gateway.group === 'complete') await connectComputerToGateway(state, computer);
+  else if (gateway.group !== 'absent') throw new Error('Gateway ownership could not be verified for stopped-computer reconnection.');
 }
 
 export async function assertGatewayRuntimeBinding(

@@ -39,6 +39,7 @@ import {
   lifecycleUpdateStatus,
   printUpgradeAllPreview,
   recordAcceptedUpgradeAll,
+  prepareUpgradeSoftware,
   recoverPendingUpgradeAll,
   validateUpgradeInvocation,
 } from '../../packages/cli/dist/lifecycle-command.js';
@@ -873,3 +874,128 @@ function runtimeBinding(
     ...(role === 'computer' ? { topologyVersion: '6' } : {}),
   };
 }
+
+
+test('bulk upgrades prepare managed recipes before mutation and preserve identity, resources, state and recoverability', async () => {
+  const fixture = upgradeFixture(false);
+  for (const computer of fixture.config.computers.filter(({ preset }) => preset !== 'custom')) {
+    computer.software = { baseImage: computer.image.requested, basePreset: computer.preset as 'file-system' | 'browser', aptPackages: ['jq'] };
+    computer.preset = 'custom';
+  }
+  const before = structuredClone(fixture.config);
+  const plan = buildUpgradeAllPlan(planningInput(fixture));
+  const accepted = acceptedUpgradeAllPlan(plan);
+  assert.equal(plan.rows.find(({ key }) => key === `computer:${IDS.custom}`)?.action, 'manual-custom-image');
+  assert.equal(plan.rows.filter(({ software }) => software).length, 2);
+  const events: string[] = [];
+  await executeUpgradeAll(plan, fixture.config, {
+    confirm: async () => true,
+    replan: async () => plan,
+    acquireAndInspect: async (target) => { events.push('acquire'); return acquired(target); },
+    prepareSoftware: async (computer, base) => {
+      events.push(`prepare:${computer.name}`);
+      return {
+        defaults: { ...base, preset: 'custom', image: { ...base.image, requested: `derived:${computer.name}`, resolved: `derived:${computer.name}`, contentId: sha('9') } },
+        recipe: { ...computer.software!, baseImage: base.image.requested, baseIdentity: base.image },
+      };
+    },
+    applyGatewayAndDefaults: async (mutation) => {
+      events.push('mutate');
+      fixture.config.gateway = mutation.nextGateway;
+      fixture.config.defaults = mutation.nextDefaults;
+    },
+    applyComputer: async (mutation) => {
+      events.push(`mutate:${mutation.next.name}`);
+      assert.equal(mutation.runtimeState, mutation.next.id === IDS.alpha ? 'absent' : 'stopped');
+      const prior = before.computers.find(({ id }) => id === mutation.next.id)!;
+      for (const key of ['id', 'name', 'createdAt', 'cpus', 'memory', 'network', 'ssh', 'environment', 'skillPolicy'] as const) assert.deepEqual(mutation.next[key], prior[key]);
+      assert.deepEqual(mutation.next.software?.aptPackages, ['jq']);
+      replaceComputer(fixture.config, mutation.next);
+    },
+  });
+  assert.equal(events.filter((event) => event.startsWith('prepare')).length, 2);
+  assert(events.lastIndexOf('prepare:zeta') < events.indexOf('mutate'));
+  const resumed = buildUpgradeAllPlan(planningInput(fixture));
+  assert(resumed.rows.filter(({ software }) => software).every(({ action }) => action === 'current'));
+  assert.doesNotThrow(() => assertAcceptedUpgradeAllRecovery(accepted, resumed));
+});
+
+test('recipe preparation failure prevents every bulk runtime mutation, including gateway replacement', async () => {
+  const fixture = upgradeFixture(false);
+  const computer = fixture.config.computers.find(({ id }) => id === IDS.custom)!;
+  computer.software = { baseImage: computer.image.resolved, aptPackages: ['jq'] };
+  fixture.runtime.computers[computer.id]!.contentDrift = true;
+  const plan = buildUpgradeAllPlan(planningInput(fixture));
+  const before = structuredClone(fixture.config);
+  let mutations = 0;
+  await assert.rejects(executeUpgradeAll(plan, fixture.config, {
+    confirm: async () => true, replan: async () => plan,
+    acquireAndInspect: async (target) => acquired(target),
+    prepareSoftware: async () => { throw new Error('package repository unavailable'); },
+    applyGatewayAndDefaults: async () => { mutations++; }, applyComputer: async () => { mutations++; },
+  }), /package repository unavailable/);
+  assert.equal(mutations, 0);
+  assert.deepEqual(fixture.config, before);
+});
+
+
+test('interrupted bulk software preparation retains exact images and refuses missing or changed recovery bytes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-recipe-recovery-'));
+  try {
+    const fixture = upgradeFixture(false);
+    const computer = fixture.config.computers.find(({ id }) => id === IDS.alpha)!;
+    computer.software = { baseImage: computer.image.requested, basePreset: 'file-system', aptPackages: ['jq'] };
+    computer.preset = 'custom';
+    const state = { paths: statePaths(root), config: fixture.config, secrets: defaultSecrets() };
+    await prepareStateDirectories(state.paths);
+    await recordAcceptedUpgradeAll(state, buildUpgradeAllPlan(planningInput(fixture)), false);
+    const base = presetDefaults('file-system', 'linux/amd64', fixture.catalog);
+    base.image.contentId = sha('1');
+    const prepared = {
+      defaults: { ...base, preset: 'custom' as const, image: { ...base.image, requested: 'derived:prepared', resolved: 'derived:prepared', contentId: sha('2') } },
+      recipe: { ...computer.software, baseIdentity: base.image },
+    };
+    let builds = 0;
+    let missing = false;
+    let changed = false;
+    const dependencies = {
+      prepare: async () => { builds++; return prepared; },
+      acquire: async (_name: string, options: { offline?: boolean } = {}, resolved?: string) => {
+        assert.equal(options.offline, true);
+        assert.equal(resolved, prepared.defaults.image.contentId);
+        if (missing) throw new Error('Prepared image missing');
+        return { identity: { ...prepared.defaults.image, ...(changed ? { contentId: sha('3') } : {}) } } as Awaited<ReturnType<typeof import('../../packages/cli/dist/docker.js')['acquireCustomImage']>>;
+      },
+    };
+    await prepareUpgradeSoftware(state, computer, base, 'linux/amd64', false, dependencies);
+    const recorded = (await inspectPendingUpgradeAll(state))!.preparedSoftware;
+    assert.deepEqual(recorded?.[computer.id], prepared);
+    // Reaccept a recovery plan in one journal write while retaining prepared bytes.
+    await recordAcceptedUpgradeAll(state, buildUpgradeAllPlan(planningInput(fixture)), false, undefined, recorded);
+    await prepareUpgradeSoftware(state, computer, base, 'linux/amd64', false, dependencies);
+    assert.equal(builds, 1);
+    missing = true;
+    await assert.rejects(prepareUpgradeSoftware(state, computer, base, 'linux/amd64', false, dependencies), /missing/);
+    missing = false;
+    changed = true;
+    await assert.rejects(prepareUpgradeSoftware(state, computer, base, 'linux/amd64', false, dependencies), /changed/);
+    assert.equal(builds, 1);
+    assert(await inspectPendingUpgradeAll(state));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+
+test('bulk acquisition rejects a changed pinned custom recipe base before building or mutating', async () => {
+  const fixture = upgradeFixture(false);
+  const computer = fixture.config.computers.find(({ id }) => id === IDS.custom)!;
+  computer.software = { baseImage: computer.image.requested, baseIdentity: computer.image, aptPackages: ['jq'] };
+  const plan = buildUpgradeAllPlan(planningInput(fixture));
+  let calls = 0;
+  await assert.rejects(executeUpgradeAll(plan, fixture.config, {
+    confirm: async () => true, replan: async () => plan,
+    acquireAndInspect: async (target) => acquired(target),
+    prepareSoftware: async () => { calls++; throw new Error('unexpected preparation'); },
+    applyGatewayAndDefaults: async () => { calls++; }, applyComputer: async () => { calls++; },
+  }), /recorded content identity/);
+  assert.equal(calls, 0);
+});

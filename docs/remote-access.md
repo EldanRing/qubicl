@@ -87,8 +87,8 @@ and validates bounded regular PEM files, proves that the key matches the leaf
 certificate, checks validity and SAN coverage, displays the fingerprint and
 scope, and copies the exact material into protected Qubicl state. It never
 stores or mounts the source paths. The confirmation recreates only the shared
-gateway when necessary, reconnects computers that were already running, and
-preserves computer IDs, bearer tokens, policies, resources, runtime state, and
+gateway when necessary and reattaches retained computer networks without starting
+stopped computers. It preserves computer IDs, bearer tokens, policies, resources, runtime state, and
 durable homes.
 
 Binding every IPv4 or IPv6 interface requires a separate acknowledgement:

@@ -25,17 +25,26 @@ For system packages, run this on the host that owns the computer:
 
 ```sh
 qubicl software research --apt ripgrep,jq
+qubicl software research --remove jq
+qubicl software research --refresh
 qubicl software research
 qubicl upgrade research
+qubicl upgrade --all
 ```
 
 The first command adds to a saved package list, builds a derived image from the
 inspected base, validates its Qubicl contract, and replaces the runtime through
 the existing upgrade transaction. It preserves the home, ID, credentials,
 resources, policy, and running/stopped state. Named upgrades reapply the saved
-list to the current catalog base. A custom base follows its requested image
-reference. `--image` or `--preset` on a named upgrade intentionally rebases the
-recipe. `software --reset` returns to that base while preserving the home.
+list to the current catalog base. Bulk upgrades also include managed recipes,
+prepare every needed derived image before runtime changes, and retain exact
+prepared image identities for interrupted-upgrade recovery. On a named upgrade,
+a custom base follows its requested image reference. `--image` or `--preset` on a named upgrade intentionally rebases the
+recipe. `--remove` removes selected packages from the saved list and rebuilds
+from the base; removing the final package returns to that base. A package built
+into the base is unaffected by recipe removal. Adding a different version of an
+already saved package replaces its pin. `software --reset` returns to the base
+while preserving the home.
 
 `--offline` requires the matching derived image to already exist locally and
 never downloads or builds packages. The command is for compatible Debian apt
@@ -43,14 +52,45 @@ bases with Qubicl's root entrypoint; it grants no guest sudo or host Docker
 access. Package repository access happens during the operator's image build,
 not through the running guest's egress policy. Package names may include exact
 versions; otherwise current repository versions are used and build caching may
-retain an earlier successful install. This is a setup recipe, not a lockfile.
+retain an earlier successful install. Use `--refresh` to bypass that cache and
+rerun apt against the recorded package list; it cannot combine with `--offline`.
+Refresh does not discard explicit version pins. This is a setup recipe, not a
+lockfile.
 
-Recipe computers appear as custom images. `upgrade --all` leaves them for an
-explicit named upgrade. New recipe configuration requires the new CLI; older
-strict readers cannot load it. Full-installation backups include the recipe,
-but do not bundle Docker images. Secret-free manifest export carries the image
-identity and does not export the recipe. Keep custom images available or rebuild
-before restoring on another host. Use a Dockerfile for more complex setup.
+Recipe computers retain their base identity as well as their derived image.
+`upgrade --all` advances recipes based on curated presets to the current catalog
+base. Recipes based on a custom image keep their recorded base; choose a new base
+with a named upgrade. Custom images without recipes remain operator-managed.
+Bulk-upgrade previews list package builds separately from base-image downloads;
+package download size and build workspace are not included in catalog estimates.
+Recovery reuses prepared image bytes and fails if they were removed or changed.
+
+## Move a software recipe to another host
+
+```sh
+qubicl export --output computers.yaml
+# On the destination, after ordinary Qubicl setup:
+qubicl apply computers.yaml --dry-run
+qubicl apply computers.yaml
+```
+
+Exports include the package list and recorded base. Apply prints its recipe,
+base, and download/build plan before acquisition, then builds against that base
+instead of trying to pull the source host's locally derived tag. Existing named
+computers keep their IDs and homes; new computers get new identities and empty
+homes. Apply retains its existing behavior of starting declared computers.
+Use `--offline` to require cached base and recipe images without downloading or
+building; an uncached recipe fails before state/runtime replacement. The preview
+is read-only and does not contact Docker or recover pending operations.
+
+Recipe-bearing configuration, manifests, and pending software upgrades require
+the new CLI; older strict readers reject the new fields. Existing manifests
+without recipes remain supported. Manifests do not include credentials, home
+contents, or image archives. Full-installation backups retain recipes and homes
+but do not bundle Docker images. A custom base must be available on the
+receiving host or from its registry; a recipe cannot recreate a missing base.
+Package availability can change unless versions are pinned. Use a Dockerfile
+for more complex setup.
 
 ## Choose a compatibility baseline
 

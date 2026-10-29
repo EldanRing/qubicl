@@ -16,7 +16,7 @@ import {
   type ImageIdentity,
   type Preset,
 } from '@qubicl/core';
-import { assertConfiguredComputersSupportRemotePreviews, assertConfiguredGatewaySupportsExposure, assertGatewayHealthCompatibility, computerPreviewAccessFromLabels, computerViewerAuthentication, developmentImageMismatchError, ensureRuntimeImages, gatewayCompatibilityFromLabels, reconcileRuntimeImageContracts, retainedComputerStartAction, type RuntimeImageContractEvidenceAdapter, type RuntimeImageContractReplacementPlan, type RuntimeInspection } from '../../packages/cli/dist/docker.js';
+import { reconnectExistingComputerNetworks, assertConfiguredComputersSupportRemotePreviews, assertConfiguredGatewaySupportsExposure, assertGatewayHealthCompatibility, computerPreviewAccessFromLabels, computerViewerAuthentication, developmentImageMismatchError, ensureRuntimeImages, gatewayCompatibilityFromLabels, reconcileRuntimeImageContracts, retainedComputerStartAction, type RuntimeImageContractEvidenceAdapter, type RuntimeImageContractReplacementPlan, type RuntimeInspection } from '../../packages/cli/dist/docker.js';
 import { buildGatewayExposureConfig } from '../../packages/cli/dist/gateway-access.js';
 import { LEGACY_VIEWER_AUTHENTICATION, PREVIEW_ACCESS_CONTAINER_DIRECTORY, PREVIEW_ACCESS_CONTAINER_PATH, PREVIEW_ACCESS_RUNTIME_DIRECTORY, computerContainerName, gatewayContainerName, readRuntimeImageContracts, recordRuntimeImageContracts } from '../../packages/cli/dist/runtime.js';
 import { initializeState, newSecret, statePaths } from '../../packages/cli/dist/state.js';
@@ -714,3 +714,21 @@ function retainedGatewayInspection(
     Mounts: [{ Source: state.paths.runtime, Destination: '/runtime' }],
   };
 }
+
+test('gateway reconciliation reconnects retained running and stopped networks without starting absent computers', async () => {
+  const config = defaultConfig();
+  const statuses = ['running', 'exited', 'created', 'absent'];
+  config.computers = statuses.map((status, index) => ({ ...config.defaults, id: `00000000-0000-4000-8000-00000000000${index}`, name: status, createdAt: new Date().toISOString() }));
+  const state = { paths: statePaths('/tmp/qubicl-network-reconnect'), config, secrets: defaultSecrets() };
+  const connected: string[] = [];
+  const adapter = {
+    observe: async (_state: typeof state, computer: ComputerConfig) => ({ status: computer.name, group: computer.name === 'absent' ? 'absent' as const : 'complete' as const, containers: [] }),
+    connect: async (_state: typeof state, computer: ComputerConfig) => { connected.push(computer.name); },
+  };
+  await reconnectExistingComputerNetworks(state, [], adapter);
+  assert.deepEqual(connected, ['running', 'exited', 'created']);
+  connected.length = 0;
+  await reconnectExistingComputerNetworks(state, [config.computers[1]!.id], adapter);
+  assert.deepEqual(connected, ['running', 'created']);
+  await assert.rejects(reconnectExistingComputerNetworks(state, [], { ...adapter, observe: async () => ({ status: 'exited', group: 'inconsistent' as const, containers: [] }) }), /cannot be verified/);
+});

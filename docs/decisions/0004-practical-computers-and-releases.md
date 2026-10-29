@@ -23,9 +23,10 @@ when an existing SSH connection was sufficient.
    enforced. Historical acceptance schemas stay readable under their own rules.
 3. User Python and npm tools live in the durable home. System packages use a
    managed apt recipe built into a derived image during an explicit named
-   upgrade. Python ABI changes keep the previous environment and require package
-   reinstallation; startup does not download packages. `upgrade --all` continues
-   to leave custom/recipe images for named upgrades.
+   or bulk upgrade. Python ABI changes keep the previous environment and require
+   package reinstallation; startup does not download packages. `upgrade --all`
+   manages recipe images while leaving unrelated custom images manual. Package removal rebuilds from the base; explicit refresh bypasses
+   the apt layer cache. Bulk recovery retains exact prepared image bytes.
 4. Desktop launches accept executable names, symlinks, and absolute executable
    paths. They run directly as the workload user with observable identity,
    bounded processes, confined document paths, and existing ownership rules.
@@ -47,8 +48,10 @@ new executable-path tool inputs require the new CLI/runtime; older strict state
 readers cannot read recipe-bearing configuration. Homes, tokens, and IDs are
 preserved by the existing upgrade transaction. Managed recipes are local build
 intent, not a reproducible package lock or a bundled backup of the derived image.
-Secret-free manifest export still exports image identity, not the local recipe;
-installation backups retain configuration. Pin package versions when required.
+Secret-free manifest export includes recipes and base identities. Apply previews
+and rebuilds them on the destination; it does not transfer homes or image archives.
+Recipe-bearing manifests and pending recipe upgrades require the new CLI.
+Installation backups retain configuration. Pin package versions when required.
 
 This decision supersedes the same-version reuse restriction in decision 0003,
 the exact development npm rule in the constraints register, and blanket release
@@ -74,3 +77,8 @@ run advisory requests, Docker E2E, or benchmarks. Coverage and size reports are
 optional measurements without universal quotas. Documentation checks validate
 links and commands, not exact prose. Local diagnosis may use uncommitted
 host-only fixes when the image inputs still match; release source stays immutable.
+
+Follow-up verification exercised package removal/refresh, stopped-network
+reconnection, recipe bulk upgrade, and export/apply across two disposable local
+installations. Focused recovery tests cover prepared-image reuse and rejection
+of missing or changed bytes. This does not establish new platform support.

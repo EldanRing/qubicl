@@ -184,6 +184,7 @@ export type StoragePolicy = z.infer<typeof StoragePolicySchema>;
 export const SoftwareRecipeSchema = z.strictObject({
   baseImage: z.string().min(1).max(1024),
   basePreset: PresetSchema.optional(),
+  baseIdentity: ImageIdentitySchema.optional(),
   aptPackages: z.array(z.string().regex(/^[a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)?(?:=[A-Za-z0-9.+:~_-]+)?$/u).max(256)).min(1).max(128),
 });
 export type SoftwareRecipe = z.infer<typeof SoftwareRecipeSchema>;
@@ -933,6 +934,7 @@ const manifestComputerFields = {
   image: ImageIdentitySchema,
   capabilityContractVersion: z.literal(CAPABILITY_CONTRACT_VERSION),
   capabilities: CapabilityListSchema,
+  software: SoftwareRecipeSchema.optional(),
   ...resourceFields,
 };
 
@@ -943,6 +945,19 @@ export const ManifestSchema = z.strictObject({
   computers: z.array(z.strictObject(manifestComputerFields).superRefine(validateContract)),
 });
 export type QubiclManifest = z.infer<typeof ManifestSchema>;
+
+/** Export only portable configuration, never credentials, host policy, or homes. */
+export function manifestFromConfig(config: QubiclConfig): QubiclManifest {
+  return ManifestSchema.parse({
+    version: 2,
+    gateway: { port: config.gateway.port, image: config.gateway.image, viewerReconnectGraceSeconds: config.gateway.viewerReconnectGraceSeconds },
+    defaults: config.defaults,
+    computers: config.computers.map(({ name, preset, compatibility, image, capabilityContractVersion, capabilities, cpus, memory, software }) => ({
+      name, preset, compatibility, image, capabilityContractVersion, capabilities, cpus, memory,
+      ...(software ? { software } : {}),
+    })),
+  });
+}
 
 export const LegacyManifestV1Schema = z.strictObject({
   version: z.literal(1),
@@ -1029,7 +1044,7 @@ export function reconcileManifest(config: QubiclConfig, manifest: QubiclManifest
   const updates = manifest.computers.filter((declared) => {
     const current = config.computers.find(({ name }) => name === declared.name);
     if (!current) return false;
-    const comparable = ({ name, preset, compatibility, image, capabilityContractVersion, capabilities, cpus, memory }: typeof declared) => ({
+    const comparable = ({ name, preset, compatibility, image, capabilityContractVersion, capabilities, cpus, memory, software }: typeof declared) => ({
       name,
       preset,
       compatibility,
@@ -1038,6 +1053,7 @@ export function reconcileManifest(config: QubiclConfig, manifest: QubiclManifest
       capabilities,
       cpus,
       memory,
+      software,
     });
     return JSON.stringify(comparable(current)) !== JSON.stringify(comparable(declared));
   });

@@ -7,8 +7,14 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 ### Added
 
 - Durable default Python/npm installation locations, plus saved apt package
-  recipes through `qubicl software NAME --apt pkg,pkg`. Named upgrades rebuild
-  recipes while preserving homes, identities, credentials, and runtime state.
+  recipes through `qubicl software NAME --apt pkg,pkg`, with individual removal
+  and explicit cache-bypassing refresh. Named and bulk upgrades manage recipes
+  while preserving homes, identities, credentials, and runtime state; interrupted
+  bulk upgrades reuse their exact prepared images.
+- Portable software recipes in secret-free manifest exports. Apply previews
+  package/base acquisition, rebuilds recipes on the receiving host, and supports
+  `--offline`. Recipe-bearing manifests require the new CLI; older manifests
+  remain supported.
 - SSH stdio client connections with `qubicl connect NAME --ssh user@host`,
   including always-on host and loopback viewer-tunnel documentation.
 - Signed impact-selected release qualification through the normal publisher,
@@ -37,6 +43,12 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 - Replace obsolete release-wide matrix mandates with the documented
   qualification workflow. Legacy signed acceptance remains verifiable under
   its original rules. No new platform support is implied.
+
+### Fixed
+
+- Reattach gateway control networks for retained stopped computers after gateway
+  or stopped-computer replacement without starting them or creating absent runtimes.
+- Keep manifest dry runs read-only and reject pending transactions before apply.
 
 ### Security
 

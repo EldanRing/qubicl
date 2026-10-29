@@ -14,12 +14,14 @@ import {
   type Preset,
   type QubiclConfig,
   type RuntimeContainerBinding,
+  type SoftwareRecipe,
 } from '@qubicl/core';
 import {
   estimateImageAcquisition,
   type ImageAcquisitionEstimate,
   type ImageAcquisitionTarget,
 } from './image-acquisition.js';
+import type { PreparedSoftwareImage } from './software.js';
 import { upgradedComputer } from './upgrade.js';
 
 export type PreservedRuntimeState = 'running' | 'stopped' | 'absent';
@@ -88,6 +90,7 @@ export interface UpgradePreviewRow {
   contentDrift: boolean;
   automatic: boolean;
   action: UpgradeRowAction;
+  software?: SoftwareRecipe;
 }
 
 export interface UpgradeTargetConsumer {
@@ -196,11 +199,11 @@ export function buildLifecycleUpdateStatus(
   for (const computer of [...config.computers]
     .sort((left, right) => compareText(left.name, right.name) || compareText(left.id, right.id))) {
     const key = `computer:${computer.id}`;
-    if (computer.preset === 'custom') {
+    if (computer.preset === 'custom' && !computer.software) {
       rows.push(updateStatusCustomRow(key, 'computer', computer.name, computer.image));
       continue;
     }
-    const target = presetDefaults(computer.preset, platform, catalog);
+    const target = softwareBaseDefaults(computer, catalog, platform);
     rows.push({
       key,
       kind: 'computer',
@@ -208,7 +211,7 @@ export function buildLifecycleUpdateStatus(
       preset: computer.preset,
       currentImage: structuredClone(computer.image),
       exactTarget: structuredClone(target.image),
-      updateAvailable: !sameComputerTarget(computer, target),
+      updateAvailable: !sameManagedComputerTarget(computer, target),
       automatic: true,
     });
   }
@@ -316,7 +319,7 @@ export function buildUpgradeAllPlan(input: UpgradeAllPlanningInput): UpgradeAllP
     .sort((left, right) => compareText(left.name, right.name) || compareText(left.id, right.id));
   for (const computer of sortedComputers) {
     const key = `computer:${computer.id}`;
-    if (computer.preset === 'custom') {
+    if (computer.preset === 'custom' && !computer.software) {
       const observation = input.runtime.computers[computer.id];
       const runtimeState = normalizeRuntime(computer.name, observation, blockers);
       const row = customRow(
@@ -335,18 +338,18 @@ export function buildUpgradeAllPlan(input: UpgradeAllPlanningInput): UpgradeAllP
       continue;
     }
 
-    const preset = computer.preset;
-    const targetDefaults = presetDefaults(preset, input.platform, input.catalog);
-    const entry = input.catalog.presets[preset];
-    const variant = requiredVariant(entry.image, input.platform, `preset ${preset}`);
+    const targetDefaults = softwareBaseDefaults(computer, input.catalog, input.platform);
+    const preset = targetDefaults.preset;
+    const variant = preset === 'custom' ? undefined : requiredVariant(input.catalog.presets[preset].image, input.platform, `preset ${preset}`);
     const observation = input.runtime.computers[computer.id];
     const runtimeState = normalizeRuntime(computer.name, observation, blockers);
-    const updateAvailable = !sameComputerTarget(computer, targetDefaults);
+    const updateAvailable = !sameManagedComputerTarget(computer, targetDefaults);
     const contentDrift = observation?.contentDrift ?? false;
     rows.push({
       key,
       kind: 'computer',
       name: computer.name,
+      ...(computer.software ? { software: structuredClone(computer.software) } : {}),
       preset,
       currentImage: structuredClone(computer.image),
       targetImage: structuredClone(targetDefaults.image),
@@ -364,9 +367,9 @@ export function buildUpgradeAllPlan(input: UpgradeAllPlanningInput): UpgradeAllP
         : updateAvailable ? 'upgrade' : contentDrift ? 'repair-content-drift' : 'current',
     });
     consumers.push({
-      consumer: { id: key, kind: 'computer', preset, image: targetDefaults.image },
-      downloadBytes: variant.downloadBytes,
-      expandedBytes: variant.expandedBytes,
+      consumer: { id: key, kind: 'computer', preset: preset === 'custom' ? null : preset, image: targetDefaults.image },
+      downloadBytes: variant?.downloadBytes ?? null,
+      expandedBytes: variant?.expandedBytes ?? null,
     });
   }
 
@@ -509,6 +512,7 @@ export interface UpgradeAllExecutionDependencies {
   confirm(plan: UpgradeAllPlan): Promise<boolean>;
   replan(): Promise<UpgradeAllPlan>;
   acquireAndInspect(target: ExactUpgradeTarget): Promise<AcquiredUpgradeTarget>;
+  prepareSoftware?(computer: ComputerConfig, base: ComputerDefaults): Promise<PreparedSoftwareImage>;
   applyGatewayAndDefaults(mutation: GatewayAndDefaultsMutation): Promise<RuntimeContainerBinding[] | void>;
   applyComputer(mutation: ComputerUpgradeMutation): Promise<void>;
   /** Persist operator acceptance before the first image acquisition or mutation. */
@@ -576,6 +580,23 @@ export async function executeUpgradeAll(
   assertPreservedGatewayExposureTarget(plan, config, acquired);
   assertPreservedRemotePreviewTargets(plan, config, acquired);
 
+  const software = new Map<string, PreparedSoftwareImage>();
+  for (const row of plan.rows) {
+    if (!row.software || !['upgrade', 'repair-content-drift'].includes(row.action)) continue;
+    const computer = config.computers.find(({ id }) => row.key === `computer:${id}`)!;
+    if (!dependencies.prepareSoftware || !row.targetDefaults || !row.targetImage) throw new Error(`Missing software preparation for ${row.name}.`);
+    const base = { ...structuredClone(row.targetDefaults), image: bindAcquiredImage(row.targetImage, acquired) };
+    const prepared = await dependencies.prepareSoftware(structuredClone(computer), base);
+    if (prepared.defaults.preset !== 'custom' || !prepared.defaults.image.contentId
+      || stableJson(prepared.recipe.baseIdentity) !== stableJson(base.image)
+      || stableJson(prepared.recipe.aptPackages) !== stableJson(row.software.aptPackages)
+      || prepared.defaults.compatibility !== base.compatibility
+      || stableJson(prepared.defaults.capabilities) !== stableJson(base.capabilities)) {
+      throw new Error(`Prepared software image for ${row.name} does not match the reviewed recipe and base.`);
+    }
+    software.set(computer.id, prepared);
+  }
+
   const steps = mutationSteps(plan);
   const completed: string[] = [];
   let progressConfig = structuredClone(config);
@@ -602,6 +623,7 @@ export async function executeUpgradeAll(
           acquired,
           step.computerId,
           gatewayRuntimeBinding,
+          software.get(step.computerId),
         );
         const expectedConfig = structuredClone(progressConfig);
         const index = expectedConfig.computers.findIndex(({ id }) => id === mutation.next.id);
@@ -916,6 +938,29 @@ function sameGatewayTarget(current: ImageIdentity, target: ImageIdentity): boole
   return Boolean(current.contentId) && current.resolved === target.resolved;
 }
 
+export function softwareBaseDefaults(computer: ComputerConfig, catalog: ImageCatalog, platform: DockerPlatform): ComputerDefaults {
+  const preset = computer.software?.basePreset ?? computer.preset;
+  if (preset !== 'custom') return presetDefaults(preset, platform, catalog);
+  const recipe = computer.software;
+  if (!recipe) throw new Error(`Computer ${computer.name} has no managed software recipe.`);
+  return ComputerDefaultsSchema.parse({
+    preset: 'custom', compatibility: computer.compatibility,
+    capabilityContractVersion: computer.capabilityContractVersion, capabilities: computer.capabilities,
+    cpus: computer.cpus, memory: computer.memory,
+    image: recipe.baseIdentity ?? { requested: recipe.baseImage, resolved: recipe.baseImage, manifestSha256: computer.image.manifestSha256 },
+  });
+}
+
+function sameManagedComputerTarget(computer: ComputerConfig, target: ComputerDefaults): boolean {
+  if (!computer.software) return sameComputerTarget(computer, target);
+  const base = computer.software.baseIdentity;
+  return Boolean(computer.image.contentId && base?.contentId)
+    && base?.resolved === target.image.resolved
+    && base?.manifestSha256 === target.image.manifestSha256
+    && computer.compatibility === target.compatibility
+    && JSON.stringify(computer.capabilities) === JSON.stringify(target.capabilities);
+}
+
 function sameComputerTarget(
   current: Pick<ComputerDefaults, 'preset' | 'compatibility' | 'image' | 'capabilityContractVersion' | 'capabilities'>,
   target: ComputerDefaults,
@@ -983,6 +1028,11 @@ function assertAcquiredTarget(target: ExactUpgradeTarget, result: AcquiredUpgrad
   }
   if (!/^sha256:[a-f0-9]{64}$/.test(result.contentId)) {
     throw new Error(`Acquisition returned an invalid content ID for ${target.exactTarget}.`);
+  }
+  for (const consumer of target.consumers) {
+    if (consumer.image.contentId && consumer.image.contentId !== result.contentId) {
+      throw new Error(`Acquired base for ${consumer.id} differs from its recorded content identity.`);
+    }
   }
   const expected = target.consumers.map(({ id }) => id).sort(compareText);
   if (new Set(result.inspectedConsumers).size !== result.inspectedConsumers.length) {
@@ -1096,10 +1146,11 @@ function buildComputerMutation(
   acquired: ReadonlyMap<string, AcquiredUpgradeTarget>,
   computerId: string,
   gatewayRuntimeBinding: readonly RuntimeContainerBinding[],
+  software?: PreparedSoftwareImage,
 ): ComputerUpgradeMutation {
   const row = plan.rows.find(({ key }) => key === `computer:${computerId}`);
   const computer = config.computers.find(({ id }) => id === computerId);
-  if (!row || !computer || !row.targetImage || row.preset === null || row.preset === 'custom'
+  if (!row || !computer || !row.targetImage || row.preset === null || (row.preset === 'custom' && !row.software)
     || row.runtimeState === 'blocked' || row.runtimeState === 'not-applicable'
     || (row.action !== 'upgrade' && row.action !== 'repair-content-drift')) {
     throw new Error(`Reviewed computer target ${computerId} is invalid.`);
@@ -1107,9 +1158,11 @@ function buildComputerMutation(
   if (!row.targetDefaults) throw new Error(`Reviewed computer target ${computerId} has no contract defaults.`);
   const targetDefaults = structuredClone(row.targetDefaults);
   targetDefaults.image = bindAcquiredImage(row.targetImage, acquired);
+  const next = upgradedComputer(computer, software?.defaults ?? targetDefaults);
+  if (software) next.software = structuredClone(software.recipe);
   return {
     prior: structuredClone(computer),
-    next: upgradedComputer(computer, targetDefaults),
+    next,
     runtimeState: row.runtimeState,
     action: row.action,
     runtimeBinding: structuredClone(row.runtimeContainers),

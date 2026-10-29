@@ -35,6 +35,7 @@ import {
   gatewayExposureRuntime,
   gatewayExposureRuntimeId,
   parseManifestDocument,
+  manifestFromConfig,
   presetDefaults,
   memoryBytes,
   validateCpu,
@@ -46,7 +47,6 @@ import {
   type ComputerConfig,
   type ComputerDefaults,
   type ClientCredentialScope,
-  type QubiclManifest,
 } from '@qubicl/core';
 import type { ParsedArgs } from './args.js';
 import { flag, numberOption, stringOption } from './args.js';
@@ -102,7 +102,7 @@ import {
   readPendingTransaction,
   recoverPendingTransaction,
 } from './transactions.js';
-import { buildSoftwareImage, softwareRecipe } from './software.js';
+import { buildSoftwareImage, prepareManifestSoftware, softwareRecipe, type SoftwareChanges } from './software.js';
 import { upgradedComputer } from './upgrade.js';
 import { setupCommand } from './setup.js';
 import { checkViewerHealth } from './viewer-health.js';
@@ -260,7 +260,7 @@ async function executeUnlocked(command: string | undefined, args: ParsedArgs): P
     case 'image': return image(args);
     case 'dashboard': return (await import('./dashboard/command.js')).dashboardCommand(args);
     case 'export': return exportManifest(stringOption(args, 'output') ?? 'qubicl.yaml');
-    case 'apply': return applyManifest(required(args.positionals[0], 'manifest path'), flag(args, 'dry-run'), flag(args, 'prune'));
+    case 'apply': return applyManifest(required(args.positionals[0], 'manifest path'), flag(args, 'dry-run'), flag(args, 'prune'), flag(args, 'offline'));
     default: throw new Error(`Unknown command ${command}. Run qubicl help.`);
   }
 }
@@ -432,9 +432,9 @@ async function config(args: ParsedArgs): Promise<void> {
       : [];
     await executeStateTransaction(paths, createStateTransaction('config', state, {
       // Recreating the gateway drops the per-computer network attachments that
-      // Docker Compose does not own. Directly reconnect only computers that
-      // were already running, without reconciling/recreating their containers
-      // or changing stopped computers' lifecycle state.
+      // Docker Compose does not own. Gateway verification restores retained
+      // networks, including stopped computers. Only previously running computers
+      // receive the additional control-health check; none are recreated here.
       runtime: { startGateway: gatewayWasRunning, reconnectIds: runningComputerIds },
     }));
     if (requested.updateNotifications !== undefined) {
@@ -556,17 +556,24 @@ async function upgrade(args: ParsedArgs): Promise<void> {
 }
 
 async function software(args: ParsedArgs): Promise<void> {
-  const packages = stringOption(args, 'apt');
-  if (packages && flag(args, 'reset')) throw new Error('--apt and --reset are mutually exclusive.');
-  if (!packages && !flag(args, 'reset')) {
+  const additions = stringOption(args, 'apt');
+  const removals = stringOption(args, 'remove');
+  const refresh = flag(args, 'refresh');
+  if (flag(args, 'reset') && (additions || removals || refresh)) throw new Error('--reset cannot combine with --apt, --remove, or --refresh.');
+  if (refresh && flag(args, 'offline')) throw new Error('--refresh cannot be combined with --offline.');
+  if (!additions && !removals && !refresh && !flag(args, 'reset')) {
     const computer = findComputer(await loadState(), required(args.positionals[0], 'computer name'));
     operationOutput('log', JSON.stringify(computer.software ?? { aptPackages: [], baseImage: computer.image.requested }, null, 2));
     return;
   }
-  await upgradeComputer(args, flag(args, 'reset') ? 'reset' : packages!.split(',').map((name) => name.trim()));
+  await upgradeComputer(args, flag(args, 'reset') ? 'reset' : {
+    add: additions?.split(',').map((name) => name.trim()) ?? [],
+    remove: removals?.split(',').map((name) => name.trim()) ?? [],
+    refresh,
+  });
 }
 
-async function upgradeComputer(args: ParsedArgs, softwareChange?: string[] | 'reset'): Promise<void> {
+async function upgradeComputer(args: ParsedArgs, softwareChange?: SoftwareChanges | 'reset'): Promise<void> {
   const name = required(args.positionals[0], 'computer name');
   const paths = statePaths();
   await withStateLock(paths, async () => {
@@ -589,9 +596,11 @@ async function upgradeComputer(args: ParsedArgs, softwareChange?: string[] | 're
     printBrowserProfileDisclosure('upgrade');
     const presetValue = stringOption(args, 'preset');
     const image = stringOption(args, 'image');
-    const recipe = softwareChange === 'reset' ? undefined : (current.software || Array.isArray(softwareChange))
-      ? softwareRecipe(current, Array.isArray(softwareChange) ? softwareChange : []) : undefined;
-    const savedBase = recipe ?? (softwareChange === 'reset' ? current.software : undefined);
+    if (softwareChange && softwareChange !== 'reset' && softwareChange.refresh && !current.software && !softwareChange.add?.length) {
+      throw new Error('This computer has no saved software recipe to refresh.');
+    }
+    const recipe = softwareChange === 'reset' ? undefined : softwareRecipe(current, softwareChange?.add, softwareChange?.remove);
+    const savedBase = recipe ?? current.software;
     if (presetValue && image) throw new Error('--preset and --image are mutually exclusive.');
 
     let imageDefaults: ComputerDefaults;
@@ -628,10 +637,11 @@ async function upgradeComputer(args: ParsedArgs, softwareChange?: string[] | 're
     }
     if (recipe) {
       recipe.baseImage = imageDefaults.image.requested;
+      recipe.baseIdentity = structuredClone(imageDefaults.image);
       if (targetPreset) recipe.basePreset = PresetSchema.parse(targetPreset);
       else delete recipe.basePreset;
       operationOutput('log', `Preparing saved system packages for ${current.name}: ${recipe.aptPackages.join(', ')}. The computer will keep its home and running/stopped state.`);
-      const tag = await buildSoftwareImage(imageDefaults.image.resolved, recipe, current.id, flag(args, 'offline'));
+      const tag = await buildSoftwareImage(imageDefaults.image.contentId ?? imageDefaults.image.resolved, recipe, current.id, flag(args, 'offline'), softwareChange !== 'reset' && softwareChange?.refresh);
       const acquired = await acquireCustomImage(tag, { offline: true, platform: host.platform });
       imageDefaults = ComputerDefaultsSchema.parse({ ...imageDefaults, preset: 'custom', image: acquired.identity });
     }
@@ -1432,23 +1442,12 @@ async function image(args: ParsedArgs): Promise<void> {
 
 async function exportManifest(output: string): Promise<void> {
   const state = await loadState();
-  const manifest: QubiclManifest = {
-    version: 2,
-    gateway: {
-      port: state.config.gateway.port,
-      image: state.config.gateway.image,
-      viewerReconnectGraceSeconds: state.config.gateway.viewerReconnectGraceSeconds,
-    },
-    defaults: state.config.defaults,
-    computers: state.config.computers.map(({ name, preset, compatibility, image, capabilityContractVersion, capabilities, cpus, memory }) => ({
-      name, preset, compatibility, image, capabilityContractVersion, capabilities, cpus, memory,
-    })),
-  };
+  const manifest = manifestFromConfig(state.config);
   await writeFile(resolve(output), YAML.stringify(manifest));
   operationOutput('log', `Exported secret-free manifest to ${resolve(output)}.`);
 }
 
-async function applyManifest(path: string, dryRun: boolean, prune: boolean): Promise<void> {
+async function applyManifest(path: string, dryRun: boolean, prune: boolean, offline: boolean): Promise<void> {
   const document = YAML.parse(await readFile(resolve(path), 'utf8')) as unknown;
   const paths = statePaths();
   await withStateLock(paths, async () => {
@@ -1457,6 +1456,11 @@ async function applyManifest(path: string, dryRun: boolean, prune: boolean): Pro
     const reconciliation = reconcileManifest(state.config, manifest, prune);
     const deletes = reconciliation.trashes;
     operationOutput('log', JSON.stringify({ manifestMigratedFromV1: migrated, create: reconciliation.creates.map(({ name }) => name), update: reconciliation.updates.map(({ name }) => name), trash: deletes.map(({ name }) => name), gateway: reconciliation.gatewayChanged ? manifest.gateway : 'unchanged', defaults: reconciliation.defaultsChanged ? manifest.defaults : 'unchanged' }, null, 2));
+    const recipes = manifest.computers.filter(({ software }) => software).map(({ name, software }) => ({
+      name, base: software!.baseIdentity?.resolved ?? software!.baseImage, aptPackages: software!.aptPackages,
+      action: offline ? 'reuse cached recipe image; fail if unavailable' : 'acquire base if needed and build recipe image',
+    }));
+    if (recipes.length) operationOutput('log', JSON.stringify({ software: recipes, downloads: offline ? 'disabled' : 'base images and apt packages may be downloaded; build cache may be reused' }, null, 2));
     if (dryRun) return;
     await validateDocker();
 
@@ -1476,15 +1480,18 @@ async function applyManifest(path: string, dryRun: boolean, prune: boolean): Pro
     state.config.defaults = structuredClone(manifest.defaults);
     for (const declared of manifest.computers) {
       const current = state.config.computers.find(({ name }) => name === declared.name);
-      if (current) {
-        Object.assign(current, structuredClone(declared));
+      const { name, software, ...defaults } = declared;
+      const target = current ?? addConfiguredComputer(state, name, ComputerDefaultsSchema.parse(defaults));
+      if (software) {
+        const prepared = await prepareManifestSoftware(declared, target.id, offline);
+        Object.assign(target, structuredClone(declared), prepared.defaults, { software: prepared.recipe });
       } else {
-        const { name, ...defaults } = declared;
-        addConfiguredComputer(state, name, ComputerDefaultsSchema.parse(defaults));
+        Object.assign(target, structuredClone(declared));
+        delete target.software;
       }
     }
     state.config = ConfigSchema.parse(state.config);
-    await ensureSystemImages(state, true);
+    await ensureSystemImages(state, true, offline);
     const deletedAt = new Date().toISOString();
     for (const computer of deletes) {
       state.config.computers = state.config.computers.filter(({ id }) => id !== computer.id);
@@ -1524,6 +1531,8 @@ async function prepareStateBeforeCommand(command: string | undefined, args: Pars
     || command === 'update'
     || (command === 'token' && ['show', 'list'].includes(args.positionals[0] ?? ''))
     || (command === 'secret' && ['list', 'explain'].includes(args.positionals[0] ?? ''))
+    || (command === 'apply' && flag(args, 'dry-run'))
+    || (command === 'software' && !['apt', 'remove', 'refresh', 'reset'].some((name) => args.options.has(name)))
     || command === 'status'
     || command === 'cleanup'
     || (command === 'upgrade' && flag(args, 'all'))
@@ -1536,6 +1545,7 @@ async function prepareStateBeforeCommand(command: string | undefined, args: Pars
       const { inspectPendingBackupCreation } = await import('./backups.js');
       const { inspectPendingUpgradeAll } = await import('./lifecycle-command.js');
       const { inspectPendingComputerLifecycle } = await import('./lifecycle-operations.js');
+      if (command === 'apply' && await readPendingTransaction(paths)) throw new Error('A transaction is pending; run qubicl recover before applying a manifest.');
       const pendingBackup = await inspectPendingBackupCreation(state);
       const pendingUpgrade = await inspectPendingUpgradeAll(state);
       if (await inspectPendingComputerLifecycle(state)) throw new Error('A computer lifecycle journal requires explicit qubicl recover before new mutations.');
@@ -1564,7 +1574,7 @@ async function prepareStateBeforeCommand(command: string | undefined, args: Pars
     || (command === 'token' && ['create', 'revoke', 'rotate'].includes(args.positionals[0] ?? ''));
   // Upgrade deliberately replaces an obsolete runtime and therefore must be
   // able to run before the general legacy-runtime migration path.
-  const migrateRuntime = command !== 'upgrade' && (includeRuntime || ['list', 'status', 'inspect', 'logs', 'view', 'mcp'].includes(command));
+  const migrateRuntime = command !== 'upgrade' && command !== 'apply' && (includeRuntime || ['list', 'status', 'inspect', 'logs', 'view', 'mcp'].includes(command));
   await withStateLock(paths, async () => {
     const recoveredMigration = await recoverStateMigration(paths);
     const pendingBeforeRecovery = await readPendingTransaction(paths);
@@ -2119,7 +2129,7 @@ const invocationRules: Record<string, InvocationRule> = {
   up: { minPositionals: 0, maxPositionals: 0 },
   down: { minPositionals: 0, maxPositionals: 0 },
   create: { minPositionals: 0, maxPositionals: 1, options: ['preset', 'image', 'cpus', 'memory', 'skills', 'tools', 'no-start', 'offline', 'yes', 'json'] },
-  software: { minPositionals: 1, maxPositionals: 1, options: ['apt', 'reset', 'offline'] },
+  software: { minPositionals: 1, maxPositionals: 1, options: ['apt', 'remove', 'refresh', 'reset', 'offline'] },
   upgrade: { minPositionals: 0, maxPositionals: 1, options: ['preset', 'image', 'offline', 'all', 'yes'] },
   update: { minPositionals: 0, maxPositionals: 1, options: ['offline', 'json'] },
   installation: { minPositionals: 1, maxPositionals: 2, options: ['output', 'target-root', 'passphrase-file', 'json'] },
@@ -2159,7 +2169,7 @@ const invocationRules: Record<string, InvocationRule> = {
   token: { minPositionals: 2, maxPositionals: 3, options: ['label', 'scopes', 'yes', 'json'] },
   image: { minPositionals: 1, maxPositionals: 3 },
   export: { minPositionals: 0, maxPositionals: 0, options: ['output'] },
-  apply: { minPositionals: 1, maxPositionals: 1, options: ['dry-run', 'prune'] },
+  apply: { minPositionals: 1, maxPositionals: 1, options: ['dry-run', 'prune', 'offline'] },
 };
 
 function validateInvocation(command: string | undefined, args: ParsedArgs): void {
@@ -2206,7 +2216,7 @@ Usage: qubicl <command> [arguments]
                                          Create a computer from exact stored/current catalog identity
   upgrade <name> [--preset id | --image ref] [--offline]
                                          Recreate one computer on the latest compatible image; preserve ID, token, settings, home, and runtime state
-  upgrade --all [--offline] [--yes]      Preview exact gateway/default/curated targets, then confirm a deterministic roll-forward upgrade
+  upgrade --all [--offline] [--yes]      Preview gateway/default/computer targets and managed recipe builds, then confirm a deterministic roll-forward upgrade
   update check [--offline] [--json]      Compare this CLI/catalog with an optional explicit registry lookup
   installation export --output FILE --passphrase-file FILE
   installation inspect FILE --passphrase-file FILE [--target-root DIR]
@@ -2293,11 +2303,11 @@ Usage: qubicl <command> [arguments]
   token create <name> <id> [--label TEXT] [--scopes observe,files,tasks,interactive,publish]
   token show|rotate <name> [id]          Show or rotate one client credential
   token revoke <name> <id> --yes         Revoke one named client without disrupting others
-  software <name> [--apt pkg,pkg] [--reset] [--offline]
-                                         Show, add, or reset saved system packages; preserve the home
+  software <name> [--apt pkg,pkg] [--remove pkg,pkg] [--refresh] [--reset] [--offline]
+                                         Show, add, remove, refresh, or reset saved system packages; preserve the home
   image build <tag> <directory>          Build a custom computer image
   export [--output qubicl.yaml]          Export a secret-free manifest
-  apply <file> [--dry-run] [--prune]     Reconcile a manifest`;
+  apply <file> [--dry-run] [--prune] [--offline]     Reconcile a manifest`;
 
 /** Shared command application entry: strict web requests select only enumerated host operations. */
 export async function executeHostManagementRequest(root: string, request: ManagementRequest): Promise<void> {
