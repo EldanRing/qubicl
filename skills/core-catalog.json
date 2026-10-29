@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "source": {
     "owner": "Qubicl",
-    "license": "MIT",
+    "license": "MIT AND Apache-2.0",
     "upstream": {
       "repository": "https://github.com/NousResearch/hermes-agent",
       "commit": "7d6db4efb885856078e4d19f804035226df81e0d"
     }
   },
   "review": {
-    "reviewedAt": "2026-08-23T00:00:00Z",
+    "reviewedAt": "2026-10-29T00:00:00Z",
     "reviewedBy": "Qubicl maintainers",
     "sourceAudit": "skills/PROVENANCE.md"
   },
@@ -236,6 +236,171 @@
         "scripts/ocr_document.py"
       ],
       "sha256": "6bdd0431dca3fef18c3099a9a6d8732d338d47e1149679bd0ad6a7351c1ac37c",
+      "security": {
+        "scannerVersion": "qubicl-content-security-v1",
+        "verdict": "no-blocking-findings",
+        "findings": []
+      }
+    },
+    {
+      "id": "qubicl-core/gimp",
+      "name": "gimp",
+      "license": "Apache-2.0",
+      "description": "Edit layered raster images with the workstation GIMP application; preserve XCF sources and export requested image formats.",
+      "category": "creative",
+      "compatiblePresets": [
+        "workstation"
+      ],
+      "requiredTools": [
+        "open_desktop_application",
+        "list_desktop_windows",
+        "desktop_snapshot",
+        "control_computer",
+        "take_screenshot",
+        "exec_command",
+        "read_file",
+        "write_file"
+      ],
+      "requiredCommands": [
+        "gimp"
+      ],
+      "files": [
+        "LICENSE",
+        "SKILL.md"
+      ],
+      "sha256": "525a02da4702ca295b42db3b28300def48fa225902f7587a5d1bca3d8ee3e9ed",
+      "security": {
+        "scannerVersion": "qubicl-content-security-v1",
+        "verdict": "no-blocking-findings",
+        "findings": []
+      }
+    },
+    {
+      "id": "qubicl-core/inkscape",
+      "name": "inkscape",
+      "license": "Apache-2.0",
+      "description": "Create and edit SVG illustrations and vector layouts with workstation Inkscape, including PDF or PNG export.",
+      "category": "creative",
+      "compatiblePresets": [
+        "workstation"
+      ],
+      "requiredTools": [
+        "open_desktop_application",
+        "list_desktop_windows",
+        "desktop_snapshot",
+        "control_computer",
+        "take_screenshot",
+        "exec_command",
+        "read_file",
+        "write_file"
+      ],
+      "requiredCommands": [
+        "inkscape"
+      ],
+      "files": [
+        "LICENSE",
+        "SKILL.md"
+      ],
+      "sha256": "e2ebe58f6fa26d630f6cbd440d4e7811b2cfeaf3a92e929e602d7d93dce8c9ee",
+      "security": {
+        "scannerVersion": "qubicl-content-security-v1",
+        "verdict": "no-blocking-findings",
+        "findings": []
+      }
+    },
+    {
+      "id": "qubicl-core/blender",
+      "name": "blender",
+      "license": "Apache-2.0",
+      "description": "Create, edit and render 3D scenes with workstation Blender using its Python API or desktop interface.",
+      "category": "creative",
+      "compatiblePresets": [
+        "workstation"
+      ],
+      "requiredTools": [
+        "open_desktop_application",
+        "list_desktop_windows",
+        "desktop_snapshot",
+        "control_computer",
+        "take_screenshot",
+        "exec_command",
+        "read_file",
+        "write_file"
+      ],
+      "requiredCommands": [
+        "blender"
+      ],
+      "files": [
+        "LICENSE",
+        "SKILL.md"
+      ],
+      "sha256": "515d7727554f0c2a48d68924055ae0e4e12748b8420d5d03f5b7021cc8560f48",
+      "security": {
+        "scannerVersion": "qubicl-content-security-v1",
+        "verdict": "no-blocking-findings",
+        "findings": []
+      }
+    },
+    {
+      "id": "qubicl-core/freecad",
+      "name": "freecad",
+      "license": "Apache-2.0",
+      "description": "Build or edit parametric CAD models in workstation FreeCAD and export STEP, STL or drawing outputs.",
+      "category": "creative",
+      "compatiblePresets": [
+        "workstation"
+      ],
+      "requiredTools": [
+        "open_desktop_application",
+        "list_desktop_windows",
+        "desktop_snapshot",
+        "control_computer",
+        "take_screenshot",
+        "exec_command",
+        "read_file",
+        "write_file"
+      ],
+      "requiredCommands": [
+        "freecad"
+      ],
+      "files": [
+        "LICENSE",
+        "SKILL.md"
+      ],
+      "sha256": "9f6f5740a64f3cdfd94f40639726f1be1969d7c7bf7645d667a173da13888068",
+      "security": {
+        "scannerVersion": "qubicl-content-security-v1",
+        "verdict": "no-blocking-findings",
+        "findings": []
+      }
+    },
+    {
+      "id": "qubicl-core/kdenlive",
+      "name": "kdenlive",
+      "license": "Apache-2.0",
+      "description": "Edit video timelines in workstation Kdenlive, retain project media, and render requested video deliverables.",
+      "category": "creative",
+      "compatiblePresets": [
+        "workstation"
+      ],
+      "requiredTools": [
+        "open_desktop_application",
+        "list_desktop_windows",
+        "desktop_snapshot",
+        "control_computer",
+        "take_screenshot",
+        "exec_command",
+        "read_file",
+        "write_file"
+      ],
+      "requiredCommands": [
+        "kdenlive"
+      ],
+      "files": [
+        "LICENSE",
+        "SKILL.md"
+      ],
+      "sha256": "cae95ad9d54202d8a67825093a51c974dcf50154b046a3d91a684eafcacb16c5",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",

@@ -26,7 +26,7 @@ import {
 
 const CATALOG_ROOT = resolve('skills');
 
-test('Qubicl ships exactly six reviewed native core skill baselines', async () => {
+test('Qubicl ships reviewed and digest-verified core skill baselines', async () => {
   const catalog = JSON.parse(await readFile(join(CATALOG_ROOT, 'core-catalog.json'), 'utf8')) as {
     schemaVersion: number;
     source: { owner: string; upstream: { repository: string; commit: string } };
@@ -51,7 +51,8 @@ test('Qubicl ships exactly six reviewed native core skill baselines', async () =
 test('preset defaults expose only core skills whose dependencies are present', async () => {
   assert.deepEqual(defaultCatalogSkillsForCompatibility('file-system'), ['qubicl-core/plan']);
   assert.deepEqual(defaultCatalogSkillsForCompatibility('browser'), ['qubicl-core/plan', 'qubicl-core/pdf', 'qubicl-core/ocr-and-documents']);
-  assert.deepEqual(defaultCatalogSkillsForCompatibility('computer'), [...CORE_SKILL_IDS]);
+  assert.equal(defaultCatalogSkillsForCompatibility('computer').includes('qubicl-core/gimp'), false);
+  assert.equal(defaultCatalogSkillsForCompatibility('computer').includes('qubicl-core/docx'), true);
   assert.deepEqual(defaultCatalogSkillsForCompatibility('workstation'), [...CORE_SKILL_IDS]);
   assert.deepEqual(await skillSelection(undefined, 'file-system'), ['qubicl-core/plan']);
   assert.deepEqual(await skillSelection('core', 'browser'), defaultCatalogSkillsForCompatibility('browser'));

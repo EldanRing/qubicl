@@ -44,6 +44,10 @@ qubicl connect computer-name --client codex --profile files
 qubicl mcp computer-name --profile browser-semantic
 ```
 
+The desktop profile includes native window inventory, AT-SPI snapshots and
+actions. The semantic browser profile includes authenticated `browser_read`.
+These are 0.8 development additions; older images expose their original catalog.
+
 Profiles are `full` (default), `files`, `browser-semantic`, `browser-visual`, and `desktop`. Atomic visual wrappers remain available; the two browser profiles intentionally choose semantic/ref or screenshot/coordinate surfaces without deleting either implementation. Results default to one JSON text representation. `--result-mode structured` uses structured MCP content for a verified client, and `--result-mode compatible` deliberately mirrors both forms only when legacy interoperability requires it.
 
 Run it yourself, then start a new Codex task. Tasks that were already open may not discover MCP servers added after they started. The command contains no bearer token.

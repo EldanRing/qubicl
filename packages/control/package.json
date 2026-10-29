@@ -9,6 +9,7 @@
     "./lease": "./dist/lease.js",
     "./processes": "./dist/processes.js",
     "./pty": "./dist/pty.js",
+    "./desktop-native": "./dist/desktop-native.js",
     "./desktop-applications": "./dist/desktop-applications.js",
     "./browser": "./dist/browser.js",
     "./browser-reading": "./dist/browser-reading.js",

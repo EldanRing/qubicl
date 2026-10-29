@@ -1,3 +1,4 @@
+import { nativeDesktop, type NativeDesktopMethod } from './desktop-native.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { browserForCompatibility, type DesktopApplicationName, type Preset } from '@qubicl/core';
@@ -74,6 +75,7 @@ export function createInternalRunner(): InternalRunner {
       if (processes) await processes.terminateOwner(undefined);
       if (applications) await applications.shutdown();
       if (browser) await browser.shutdown();
+      nativeDesktop.shutdown();
     },
   };
 }
@@ -229,7 +231,7 @@ async function handleSession(
       send(response, 200, await applications.open(string(body.application, 'application') as DesktopApplicationName, stringArray(body.paths, 'paths')));
       return;
     case 'POST /v1/applications/close':
-      send(response, 200, await applications.close(string(body.applicationId, 'applicationId'), body.discardUnsavedChanges === true));
+      send(response, 200, await applications.close(string(body.applicationId, 'applicationId'), body.discardUnsavedChanges === true, body.mode as 'request' | 'terminate' | undefined));
       return;
     case 'POST /v1/browser/invoke': {
       const method = browserMethod(body.method);
@@ -240,6 +242,9 @@ async function handleSession(
     }
     case 'POST /v1/desktop/screenshot':
       send(response, 200, await takeScreenshot());
+      return;
+    case 'POST /v1/desktop/native':
+      send(response, 200, await nativeDesktop.invoke(string(body.method, 'method') as NativeDesktopMethod, object(body.input, 'input')));
       return;
     case 'POST /v1/desktop/control':
       send(response, 200, await controlDesktop(object(body.action, 'action') as unknown as ControlAction));

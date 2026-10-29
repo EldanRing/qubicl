@@ -1,4 +1,5 @@
 import type { WebSearchInput } from './web.js';
+import type { NativeDesktopMethod } from './desktop-native.js';
 import type { DesktopApplicationName } from '@qubicl/core';
 import type { AvailableDesktopApplication, DesktopApplicationRecord } from './desktop-applications.js';
 import { QubiclError } from './errors.js';
@@ -151,8 +152,8 @@ export class RemoteDesktopApplicationManager {
   async available(): Promise<AvailableDesktopApplication[]> {
     return (await this.request<{ availableApplications: AvailableDesktopApplication[] }>('/v1/applications', undefined, 'GET')).availableApplications;
   }
-  close(applicationId: string, discardUnsavedChanges = false): Promise<{ applicationId: string; application: DesktopApplicationName; state: 'closed'; lifecycle: 'desktop_session'; forcedKill: boolean }> {
-    return this.request('/v1/applications/close', { applicationId, discardUnsavedChanges });
+  close(applicationId: string, discardUnsavedChanges = false, mode?: 'request' | 'terminate'): ReturnType<import('./desktop-applications.js').DesktopApplicationManager['close']> {
+    return this.request('/v1/applications/close', { applicationId, discardUnsavedChanges, mode });
   }
   async count(): Promise<number> {
     return (await this.request<{ desktopApplications: number }>('/v1/status', undefined, 'GET')).desktopApplications;
@@ -165,6 +166,9 @@ export class RemoteDesktopApplicationManager {
 
 export class RemoteDesktopManager {
   constructor(private readonly baseUrl: string, private readonly key: string) {}
+  native(method: NativeDesktopMethod, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return runnerRequest(this.baseUrl, this.key, '/v1/desktop/native', { method, input });
+  }
   screenshot(): Promise<Record<string, unknown>> {
     return runnerRequest(this.baseUrl, this.key, '/v1/desktop/screenshot', {});
   }

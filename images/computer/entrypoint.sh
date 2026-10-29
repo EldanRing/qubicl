@@ -210,6 +210,8 @@ start_as_user() {
     XDG_DATA_HOME=/home/qubicl/.local/share \
     XDG_CACHE_HOME=/home/qubicl/.cache \
     XDG_RUNTIME_DIR=/tmp/qubicl-runtime \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/qubicl-runtime/bus \
+    GTK_MODULES=gail:atk-bridge QT_ACCESSIBILITY=1 QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 \
     "${user_network_env[@]}" \
     "$@" &
   pids+=("$!")
@@ -275,7 +277,7 @@ start_internal_executor() {
     QUBICL_HOST_GID="$target_gid"
     QUBICL_EXECUTOR_FENCE_UID="${QUBICL_EXECUTOR_FENCE_UID:-1}"
   )
-  if [[ -v DISPLAY ]]; then executor_env+=(DISPLAY="$DISPLAY"); fi
+  if [[ -v DISPLAY ]]; then executor_env+=(DISPLAY="$DISPLAY" DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/qubicl-runtime/bus); fi
   if [[ -v QUBICL_PROXY_URL ]]; then executor_env+=(QUBICL_PROXY_URL="$QUBICL_PROXY_URL"); fi
   if [[ -v QUBICL_WORKLOAD_ENV_JSON ]]; then executor_env+=(QUBICL_WORKLOAD_ENV_JSON="$QUBICL_WORKLOAD_ENV_JSON"); fi
   env -i "${executor_env[@]}" node /opt/qubicl/control.mjs &
@@ -295,6 +297,7 @@ start_internal_session() {
     QUBICL_BROWSER_MAX_TABS="${QUBICL_BROWSER_MAX_TABS:-24}"
     QUBICL_POINTER_URL="${QUBICL_POINTER_URL:?}"
     DISPLAY="${DISPLAY:-:0}"
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/qubicl-runtime/bus
   )
   if [[ -v QUBICL_PROXY_URL ]]; then session_env+=(QUBICL_PROXY_URL="$QUBICL_PROXY_URL"); fi
   if [[ -v QUBICL_WORKLOAD_ENV_JSON ]]; then session_env+=(QUBICL_WORKLOAD_ENV_JSON="$QUBICL_WORKLOAD_ENV_JSON"); fi
@@ -357,6 +360,19 @@ start_ssh() {
 }
 
 install -d -m 0700 -o qubicl -g qubicl /tmp/qubicl-runtime
+
+start_desktop_bus() {
+  # One guest-owned bus is shared by the WM, applications and native inspection.
+  # No host session socket or control-plane credential enters this bus.
+  rm -f /tmp/qubicl-runtime/bus
+  start_as_user env DISPLAY="$DISPLAY" dbus-daemon --session --nofork --address=unix:path=/tmp/qubicl-runtime/bus
+  for _ in $(seq 1 50); do
+    if [[ -S /tmp/qubicl-runtime/bus ]]; then return; fi
+    sleep 0.1
+  done
+  echo "Qubicl desktop session bus did not become ready." >&2
+  exit 1
+}
 
 start_display() {
   export DISPLAY="${DISPLAY:-:0}"
@@ -450,7 +466,8 @@ case "$baked_profile" in
     ;;
   browser)
     start_display
-    start_as_user env DISPLAY="$DISPLAY" dbus-run-session -- openbox-session
+    start_desktop_bus
+    start_as_user env DISPLAY="$DISPLAY" openbox-session
     start_viewer
     start_as_user env DISPLAY="$DISPLAY" /usr/local/bin/qubicl-chromium \
       --no-first-run \
@@ -461,8 +478,11 @@ case "$baked_profile" in
       about:blank
     ;;
   desktop|workstation)
+    runuser -u qubicl -- env -i HOME=/home/qubicl XDG_CONFIG_HOME=/home/qubicl/.config PATH=/usr/bin:/bin \
+      /bin/bash /opt/qubicl/setup-desktop-home.sh
     start_display
-    start_as_user env DISPLAY="$DISPLAY" dbus-run-session -- startxfce4
+    start_desktop_bus
+    start_as_user env DISPLAY="$DISPLAY" startxfce4
     start_viewer
     ;;
   *)

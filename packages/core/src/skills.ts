@@ -10,7 +10,14 @@ export const CORE_SKILL_IDS = [
   'qubicl-core/xlsx',
   'qubicl-core/powerpoint',
   'qubicl-core/ocr-and-documents',
+  'qubicl-core/gimp',
+  'qubicl-core/inkscape',
+  'qubicl-core/blender',
+  'qubicl-core/freecad',
+  'qubicl-core/kdenlive',
 ] as const;
+
+const WORKSTATION_SKILL_IDS = new Set<CoreSkillId>(['qubicl-core/gimp', 'qubicl-core/inkscape', 'qubicl-core/blender', 'qubicl-core/freecad', 'qubicl-core/kdenlive']);
 
 export const LEGACY_CORE_SKILL_IDS: Readonly<Record<string, CoreSkillId>> = {
   'hermes-default/software-development/plan': 'qubicl-core/plan',
@@ -37,6 +44,7 @@ export type CoreSkillId = typeof CORE_SKILL_IDS[number];
 export function defaultCatalogSkillsForCompatibility(compatibility: import('./presets.js').Preset): CoreSkillId[] {
   if (compatibility === 'file-system') return ['qubicl-core/plan'];
   if (compatibility === 'browser') return ['qubicl-core/plan', 'qubicl-core/pdf', 'qubicl-core/ocr-and-documents'];
+  if (compatibility === 'computer') return CORE_SKILL_IDS.filter((id) => !WORKSTATION_SKILL_IDS.has(id));
   return [...CORE_SKILL_IDS];
 }
 

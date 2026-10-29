@@ -6,8 +6,17 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Added
 
+- Native desktop window inventory, bounded AT-SPI snapshots with exact element
+  refs and semantic actions, and explicit screenshot fallback for apps with
+  incomplete accessibility.
+- Window-targeted mouse input with stale geometry and occlusion checks, plus
+  optional post-action window, accessibility or screenshot observations.
 - Keyless search domain, recency, language and backend controls with explicit
   unsupported-filter errors and retrieval metadata.
+- Workstation-only GIMP, Inkscape, Blender, FreeCAD and Kdenlive packages and
+  matching editable skills. Other presets keep their existing application sets.
+- Standard XDG folders for fresh desktop homes, preserving existing folder
+  settings, so applications including Kdenlive can start without empty-path errors.
 - Authenticated `browser_read` with Unicode-safe text pagination, literal search,
   frame/subtree targeting, and document-bound cursors. Reads retain a consistent
   captured text version without invalidating interactive element references;
@@ -15,6 +24,12 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Changed
 
+- Desktop app close defaults to a normal window request so Save/Discard/Cancel
+  dialogs can be handled. Explicit termination retains unsaved-data acknowledgement;
+  the legacy `discardUnsavedChanges: true` call still selects termination.
+- Graphical guest processes share a workload-owned session bus for native
+  accessibility. Queued desktop actions recheck ownership before dispatch.
+- Core skill catalogs no longer require an arbitrary fixed package count.
 - Development control protocol 12 adds the new observation contracts. Existing
   published runtime images retain their original protocol and identities.
 

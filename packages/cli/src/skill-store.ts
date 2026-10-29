@@ -83,7 +83,7 @@ interface PackageEntry { path: string; target: string; bytes: Buffer; mode: numb
 export async function loadCoreCatalog(): Promise<CoreCatalog> {
   catalogPromise ??= readFile(join(assetRoot, 'core-catalog.json'), 'utf8').then((raw) => {
     const parsed = JSON.parse(raw) as CoreCatalog;
-    if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.skills) || parsed.skills.length !== 6) throw new Error('Packaged Qubicl core skill catalog is invalid.');
+    if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.skills) || parsed.skills.length === 0) throw new Error('Packaged Qubicl core skill catalog is invalid.');
     return parsed;
   });
   return catalogPromise;

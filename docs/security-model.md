@@ -75,10 +75,17 @@ Do not place secrets in a Qubicl home that you would not give to container-root 
   may resolve outside bin directories or be supplied as absolute paths; launch
   runs directly as the workload user without a shell, sanitizes the environment, confines document
   paths below `/home/qubicl`, reserves bounded capacity, and records executable
-  identity. Programmatic close requires explicit acknowledgement of possible
-  unsaved work. Human control belongs to the live viewer connection, permits a
+  identity. Normal close requests let the application handle unsaved work; explicit
+  process termination requires acknowledgement of possible data loss. Human control belongs to the live viewer connection, permits a
   visible configurable reconnect grace (10 seconds by default), and is then
   released automatically; the authenticated operator may also release it.
+- Native window/accessibility observations are untrusted application data.
+  The helper runs as the workload user on a guest-only D-Bus session, receives
+  no lease or control credentials, and retains bounded references to observed
+  AT-SPI objects. Mouse targeting checks live geometry and occlusion; it does
+  not make GUI effects atomic. Queued desktop input rechecks interactive
+  ownership before dispatch. Authenticated `browser_read` captures stay within
+  the persistent browser controller and never enter anonymous web extraction.
 - Browser-capable images use a dedicated persistent Chromium profile and a
   bounded Playwright controller. Chromium remains the unprivileged `qubicl`
   user and its Linux namespace plus renderer seccomp-BPF sandboxes stay enabled.
@@ -119,7 +126,7 @@ Do not place secrets in a Qubicl home that you would not give to container-root 
   an authenticated loopback route. `offline` denies search and extraction.
 - Search and extracted page content are untrusted model input. Public search endpoints can rate-limit or change behavior; Qubicl returns explicit bounded failures and never silently selects a paid or credentialed provider.
 - Web, browser, screenshot, and clipboard results carry compact Qubicl-owned `contentTrust` provenance. MCP text also places those results in a collision-resistant untrusted-data frame; native screenshots remain binary images with equivalent metadata. A bounded advisory scanner records finding IDs—not captured content—in the local audit log. A clean scan is reported as `no-known-patterns`, never as a claim that content is safe. These signals reinforce the model boundary but do not replace container, credential, egress, lease, or takeover enforcement.
-- Qubicl's six core skill baselines are file-list locked, fully scanned, SHA-256 verified during every build, and reviewed against declared tool/preset requirements. Qubicl does not distribute the bulk Hermes catalog or jailbreak-oriented packages. Explicit local or immutable-commit Git imports reject symlinks, hard links, nested repositories, traversal, excessive packages, and blocking content patterns. Imported and core working copies are deliberately agent-editable inside the durable home; bounded host and control inspection rejects substituted store/discovery parents and reports drift or corruption without following agent-created links. Operator activation, import, reset, and removal remain outside `skill_manage` authority.
+- Qubicl's core skill baselines are file-list locked, fully scanned, SHA-256 verified during every build, and reviewed against declared tool/preset requirements. Qubicl does not distribute the bulk Hermes catalog or jailbreak-oriented packages. Explicit local or immutable-commit Git imports reject symlinks, hard links, nested repositories, traversal, excessive packages, and blocking content patterns. Imported and core working copies are deliberately agent-editable inside the durable home; bounded host and control inspection rejects substituted store/discovery parents and reports drift or corruption without following agent-created links. Operator activation, import, reset, and removal remain outside `skill_manage` authority.
 - Broker credentials are resolved by the host from protected state, environment/file references, Linux Secret Service, or macOS Keychain and injected only into an allowed HTTPS origin/path/method by the shared gateway egress service. Values are absent from computer and workload environments and results.
 
 ## Setup/privacy behavior

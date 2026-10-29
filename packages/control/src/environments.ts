@@ -28,6 +28,13 @@ export function workloadEnvironment(source: NodeJS.ProcessEnv, home = DEFAULT_HO
   copyTerminalValue(environment, source, 'TERM', /^[A-Za-z0-9_.+:-]{1,64}$/u);
   copyTerminalValue(environment, source, 'COLORTERM', /^[A-Za-z0-9_.+:-]{1,64}$/u);
   copyTerminalValue(environment, source, 'DISPLAY', /^:[0-9]+(?:\.[0-9]+)?$/u);
+  if (source.DBUS_SESSION_BUS_ADDRESS === 'unix:path=/tmp/qubicl-runtime/bus') {
+    environment.DBUS_SESSION_BUS_ADDRESS = source.DBUS_SESSION_BUS_ADDRESS;
+    environment.XDG_RUNTIME_DIR = '/tmp/qubicl-runtime';
+    environment.GTK_MODULES = 'gail:atk-bridge';
+    environment.QT_ACCESSIBILITY = '1';
+    environment.QT_LINUX_ACCESSIBILITY_ALWAYS_ON = '1';
+  }
   const proxy = source.QUBICL_PROXY_URL;
   if (typeof proxy === 'string' && /^http:\/\/[A-Za-z0-9_-]+:[A-Za-z0-9_-]+@[A-Za-z0-9_.-]+:\d{1,5}$/u.test(proxy)) {
     environment.HTTP_PROXY = proxy;

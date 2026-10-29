@@ -150,6 +150,10 @@ export const COMPUTER_TOOL_NAMES = [
   'delete_path',
   'take_screenshot',
   'control_computer',
+  'list_desktop_windows',
+  'desktop_snapshot',
+  'desktop_element_action',
+  'desktop_window_action',
   'browser_navigate',
   'browser_snapshot',
   'browser_read',
@@ -231,7 +235,7 @@ const baseToolNames: ComputerToolName[] = [
   'move_path',
   'delete_path',
 ];
-const desktopToolNames: ComputerToolName[] = ['take_screenshot', 'control_computer'];
+const desktopToolNames: ComputerToolName[] = ['take_screenshot', 'control_computer', 'list_desktop_windows', 'desktop_snapshot', 'desktop_element_action', 'desktop_window_action'];
 const browserToolNames: ComputerToolName[] = [
   'browser_navigate',
   'browser_snapshot',

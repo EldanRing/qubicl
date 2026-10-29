@@ -57,7 +57,7 @@ arguments or result content.
 
 The pinned Python closure for the local web service is in `images/computer/web-requirements.txt`, including Trafilatura and the readability-lxml fallback. The smaller permissive browser PDF/OCR closure is in `images/computer/browser-skills-requirements.txt`; the fuller permissive document closure shared by `computer` and `workstation` is independently locked in `images/computer/skills-requirements.txt`. License summaries and retained dependency license texts ship with the relevant image. AGPL/commercial-only PyMuPDF packages are intentionally excluded. OCI SBOM and vulnerability gates inspect these installed packages, including the web extractor closure.
 
-Qubicl's six native skill baselines live under `skills/core`; the pinned generated record is `skills/core-catalog.json`. After an intentional package or definition change, run `npm run skills:catalog:update`. Every normal build runs `scripts/verify-skill-catalog.mjs` and fails if files, frontmatter, compatible presets, required tools, security findings, or reviewed digests drift. [Skill provenance](../skills/PROVENANCE.md) records the upstream reference and adaptation boundary; the complete Hermes source tree is not vendored, copied into release images, or exposed as a selectable catalog.
+Qubicl's native skill baselines live under `skills/core`; the pinned generated record is `skills/core-catalog.json`. After an intentional package or definition change, run `npm run skills:catalog:update`. Every normal build runs `scripts/verify-skill-catalog.mjs` and fails if files, frontmatter, compatible presets, required tools, security findings, or reviewed digests drift. [Skill provenance](../skills/PROVENANCE.md) records the upstream reference and adaptation boundary; the complete Hermes source tree is not vendored, copied into release images, or exposed as a selectable catalog.
 
 For a focused browser-reference regression with an installed Chromium or Chrome
 executable, run:
@@ -296,3 +296,17 @@ rows retain their original validation rules only when that legacy path is used.
 
 See [dashboard operations](dashboard.md) and the
 [host-management decision](decisions/0001-host-owned-dashboard.md).
+
+## Focused desktop development checks
+
+The new native helper uses the guest's X11 and AT-SPI session. Run
+`tests/e2e/native-desktop-test.py` in a disposable graphical guest with the new
+image dependencies, a window manager, and its own session bus. It exercises a
+local GTK fixture, including disabled controls, text edits, continuation, stale
+geometry/refs and a normal-close save dialog.
+
+`tests/e2e/workstation-apps-test.py` checks startup windows for the workstation
+applications. Optional executable names restrict the check after a specific
+launch failure. Both scripts create only test-owned processes and use no models
+or external web calls. These focused checks support development; they do not
+add universal release quotas or replace impact-selected release qualification.

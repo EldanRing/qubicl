@@ -1,4 +1,5 @@
 import type { WebSearchInput } from './web.js';
+import { nativeDesktop, type NativeDesktopMethod } from './desktop-native.js';
 import { OfficePreviewManager } from './office-preview.js';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -113,6 +114,8 @@ type DesktopApplicationController = Pick<DesktopApplicationManager, 'open' | 'cl
   count(): number | Promise<number>;
 };
 interface DesktopController {
+  native?(method: NativeDesktopMethod, input: Record<string, unknown>): Promise<Record<string, unknown>>;
+  shutdown?(): void;
   screenshot(): Promise<unknown>;
   control(action: ControlAction): Promise<unknown>;
   readClipboard(): Promise<{ text: string; truncated?: boolean }>;
@@ -138,6 +141,8 @@ export class ToolExecutor {
   readonly desktopApplications: DesktopApplicationController;
   readonly browser: BrowserManager;
   readonly desktop: DesktopController;
+  private desktopOperationQueue: Promise<unknown> = Promise.resolve();
+  private pendingDesktopOperations = 0;
   readonly previews: PreviewManager;
   readonly broker: RemoteBrokerManager | undefined;
   readonly web: WebController | undefined;
@@ -255,6 +260,7 @@ export class ToolExecutor {
       return value.result;
     };
     const runBrowser = <T>(operation: () => Promise<T>): Promise<T> => this.runBrowserOperation(owner, operation);
+    const runDesktop = <T>(operation: () => Promise<T>): Promise<T> => this.runDesktopOperation(owner, operation);
 
     switch (name) {
       case 'get_computer_status': {
@@ -507,18 +513,31 @@ export class ToolExecutor {
       }
       case 'take_screenshot':
         return respond(await this.desktop.screenshot());
+      case 'list_desktop_windows':
+        return respond(await runDesktop(() => this.nativeDesktopCall('windows', input)));
+      case 'desktop_snapshot':
+        return respond(await runDesktop(() => this.nativeDesktopCall('snapshot', input)));
+      case 'desktop_element_action':
+      case 'desktop_window_action': {
+        return respond(await runDesktop(async () => {
+          const result = await this.nativeDesktopCall(name === 'desktop_element_action' ? 'act' : 'windowAction', input);
+          return this.observeDesktop(result, input.observe as string, result.windowId as number);
+        }));
+      }
       case 'control_computer':
         {
-          const action = input.action as ControlAction;
-          const pointer = this.viewerPointers.begin(action);
-          try {
-            const result = await this.desktop.control(action);
-            if (pointer) this.viewerPointers.confirm(pointer.actionId);
-            return respond(result);
-          } catch (error) {
-            if (pointer) this.viewerPointers.cancel(pointer.actionId);
-            throw error;
-          }
+          return respond(await runDesktop(async () => {
+            const action = input.action as ControlAction;
+            const pointer = this.viewerPointers.begin(action);
+            try {
+              const result = await this.desktop.control(action);
+              if (pointer) this.viewerPointers.confirm(pointer.actionId);
+              return this.observeDesktop(result, input.observe as string, action.targetWindowId);
+            } catch (error) {
+              if (pointer) this.viewerPointers.cancel(pointer.actionId);
+              throw error;
+            }
+          }));
         }
       case 'browser_navigate':
         return respond(await runBrowser(() => this.browser.navigate(input.url as string)));
@@ -619,7 +638,7 @@ export class ToolExecutor {
           availableApplications: await this.desktopApplications.available(),
         });
       case 'close_desktop_application':
-        return respond(await this.desktopApplications.close(input.applicationId as string, input.discardUnsavedChanges as boolean));
+        return respond(await runDesktop(() => this.desktopApplications.close(input.applicationId as string, input.discardUnsavedChanges as boolean, input.mode as 'request' | 'terminate' | undefined)));
     }
   }
 
@@ -854,6 +873,19 @@ export class ToolExecutor {
     }
   }
 
+  private runDesktopOperation<T>(owner: LeaseProof | undefined, operation: () => Promise<T>): Promise<T> {
+    if (this.pendingDesktopOperations >= 32) throw new QubiclError('desktop_busy', 'Desktop request queue is full. Wait for the pending observation or action.', 429);
+    this.pendingDesktopOperations += 1;
+    const next = this.desktopOperationQueue.then(async () => {
+      if (owner) this.leases.verifyInteractive(owner);
+      const result = await operation();
+      if (owner) this.leases.verifyInteractive(owner);
+      return result;
+    });
+    this.desktopOperationQueue = next.catch(() => undefined);
+    return next.finally(() => { this.pendingDesktopOperations -= 1; });
+  }
+
   private runBrowserOperation<T>(owner: LeaseProof | undefined, operation: () => Promise<T>): Promise<T> {
     if (this.pendingBrowserOperations >= 32) {
       throw new QubiclError('browser_busy', 'The browser already has 32 admitted operations. Wait for current work or take human control to cancel queued agent work.', 429);
@@ -918,7 +950,28 @@ export class ToolExecutor {
     }
   }
 
+  private nativeDesktopCall(method: NativeDesktopMethod, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (!this.desktop.native) throw new QubiclError('desktop_inspection_unavailable', 'Native desktop inspection is unavailable.', 503);
+    return this.desktop.native(method, Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'lease' && key !== 'observe')));
+  }
+
+  private async observeDesktop(result: unknown, observe: string | undefined, windowId?: number): Promise<unknown> {
+    if (!observe || observe === 'none') return result;
+    const actionResult = result as Record<string, unknown>;
+    try {
+      if (observe === 'screenshot') return { ...actionResult, ...await this.desktop.screenshot() as object, observation: { kind: 'screenshot' } };
+      const windows = await this.nativeDesktopCall('windows', {});
+      if (observe === 'windows') return { ...actionResult, observation: windows };
+      const target = windowId ?? (windows.windows as Array<{ id: number; active: boolean }>).find((window) => window.active)?.id;
+      if (!target) return { ...actionResult, observation: windows };
+      return { ...actionResult, observation: await this.nativeDesktopCall('snapshot', { windowId: target }) };
+    } catch (error) {
+      return { ...actionResult, observationError: { code: error instanceof QubiclError ? error.code : 'desktop_observation_failed', message: (error as Error).message }, note: 'Action already dispatched; observation failed. Inspect before retrying the action.' };
+    }
+  }
+
   async shutdown(): Promise<void> {
+    this.desktop.shutdown?.();
     this.previews.clear();
     await Promise.all([this.desktopApplications.shutdown(), this.browser.shutdown()]);
     await this.audit.flush();
@@ -984,6 +1037,7 @@ function configuredDesktopController(): DesktopController {
     if (!sessionUrl || !sessionKey) throw new Error('QUBICL_SESSION_URL and QUBICL_SESSION_KEY must be configured together.');
     const remote = new RemoteDesktopManager(sessionUrl, sessionKey);
     return {
+      native: (method, input) => remote.native(method, input),
       screenshot: () => remote.screenshot(),
       control: (action) => remote.control(action as unknown as Record<string, unknown>),
       readClipboard: () => remote.readClipboard(),
@@ -991,6 +1045,8 @@ function configuredDesktopController(): DesktopController {
     };
   }
   return {
+    native: (method, input) => nativeDesktop.invoke(method, input),
+    shutdown: () => nativeDesktop.shutdown(),
     screenshot: takeScreenshot,
     control: controlDesktop,
     readClipboard,
@@ -1032,6 +1088,7 @@ export interface ControlAction {
   keys?: string[];
   deltaY?: number;
   targetWindowId?: number;
+  geometryToken?: string;
 }
 
 type DesktopCommandRunner = (command: string, args: string[], stdin?: string) => Promise<{ stdout: string; stderr: string }>;
@@ -1277,10 +1334,23 @@ export async function takeScreenshot(): Promise<unknown> {
   }
 }
 
-export async function controlDesktop(action: ControlAction, runner: DesktopCommandRunner = run): Promise<unknown> {
+export async function controlDesktop(action: ControlAction, runner: DesktopCommandRunner = run, inspector: Pick<typeof nativeDesktop, 'validate'> = nativeDesktop): Promise<unknown> {
+  return nativeDesktop.interact(() => dispatchDesktop(action, runner, inspector));
+}
+
+async function dispatchDesktop(action: ControlAction, runner: DesktopCommandRunner, inspector: Pick<typeof nativeDesktop, 'validate'>): Promise<unknown> {
   const recordsFocus = ['click', 'double_click', 'right_click', 'type', 'keypress'].includes(action.type);
-  const acceptsTarget = action.type === 'type' || action.type === 'keypress';
+  const mouse = ['click', 'double_click', 'right_click', 'move', 'drag', 'scroll'].includes(action.type);
+  const acceptsTarget = action.type === 'type' || action.type === 'keypress' || (mouse && action.targetWindowId !== undefined);
+  if (action.geometryToken && action.targetWindowId === undefined) throw new QubiclError('desktop_target_required', 'geometryToken requires targetWindowId.', 400);
+  if (mouse && action.targetWindowId !== undefined && !action.geometryToken) throw new QubiclError('desktop_geometry_required', 'Targeted mouse input requires geometryToken from an observed window.', 400);
   const focusBefore = acceptsTarget ? await prepareInputFocus(action.targetWindowId, runner) : null;
+  if (action.targetWindowId !== undefined && (mouse || action.geometryToken)) {
+    if (action.type === 'scroll' && (action.x === undefined || action.y === undefined)) throw new QubiclError('desktop_point_required', 'Targeted scrolling requires an observed x/y point.', 400);
+    const points = action.type === 'drag' ? [[action.fromX, action.fromY], [action.toX, action.toY]]
+      : mouse ? [[action.x, action.y]] : [];
+    await inspector.validate({ windowId: action.targetWindowId, geometryToken: action.geometryToken, points });
+  }
   switch (action.type) {
     case 'click':
       await runner('xdotool', ['mousemove', `${action.x}`, `${action.y}`, 'click', `${action.button}`]);
@@ -1460,7 +1530,10 @@ export function dragCommandArguments(action: Pick<ControlAction, 'fromX' | 'from
 
 async function run(command: string, args: string[], stdin?: string): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { env: desktopHelperEnvironment(process.env), stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(command, args, {
+      env: desktopHelperEnvironment(process.env), stdio: ['pipe', 'pipe', 'pipe'],
+      ...(command === 'xdotool' && args[0] === 'windowactivate' ? { timeout: 5000, killSignal: 'SIGKILL' as const } : {}),
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8'); });

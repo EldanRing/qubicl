@@ -1,12 +1,12 @@
 # Core skill provenance
 
-Qubicl ships six Qubicl-native core skills under `skills/core`. Their current
+Qubicl ships Qubicl-native core skills under `skills/core`. Their current
 instructions, helper scripts, compatibility declarations, file lists, security
 scan results, and SHA-256 digests are recorded in `skills/core-catalog.json`.
 
 Selected helpers and workflow ideas were adapted from the MIT-licensed
 [Hermes Agent](https://github.com/NousResearch/hermes-agent/tree/7d6db4efb885856078e4d19f804035226df81e0d) repository at
-commit `7d6db4efb885856078e4d19f804035226df81e0d`. Each shipped package retains an
+commit `7d6db4efb885856078e4d19f804035226df81e0d`. Each adapted package retains an
 MIT license, and release artifacts include the corresponding attribution in
 their third-party notices and SBOM metadata.
 
@@ -21,3 +21,8 @@ durable-home boundary, dependency sets, and client-neutral `resourceRoot`.
 the reviewed file list, declarations, content-security result, and digest; an
 intentional package change requires `npm run skills:catalog:update` followed by
 normal review and testing.
+
+The GIMP, Inkscape, Blender, FreeCAD and Kdenlive skill packages are original
+Qubicl guidance for the workstation applications. They were not adapted from
+Hermes. They carry the project Apache 2.0 license; the applications retain their own
+upstream licenses and Debian package attribution.

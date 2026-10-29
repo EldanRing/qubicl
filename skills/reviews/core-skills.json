@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "reviewedAt": "2026-08-23T00:00:00Z",
+  "reviewedAt": "2026-10-29T00:00:00Z",
   "reviewedBy": "Qubicl maintainers",
   "sourceAudit": "skills/PROVENANCE.md",
   "checks": [
@@ -11,7 +11,20 @@
     "no hosted extraction dependency",
     "bounded local OCR",
     "content-security scan",
-    "package digest verification"
+    "package digest verification",
+    "workstation application launch and native/screenshot fallback guidance"
   ],
-  "skills": ["plan", "pdf", "docx", "xlsx", "powerpoint", "ocr-and-documents"]
+  "skills": [
+    "plan",
+    "pdf",
+    "docx",
+    "xlsx",
+    "powerpoint",
+    "ocr-and-documents",
+    "gimp",
+    "inkscape",
+    "blender",
+    "freecad",
+    "kdenlive"
+  ]
 }

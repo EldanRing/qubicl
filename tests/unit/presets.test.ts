@@ -48,9 +48,9 @@ test('all curated presets have exact cumulative capability and tool contracts', 
   const computerTools = enabledToolNames(PRESET_DEFINITIONS.computer.capabilities);
   assert.equal(fileSystemTools.includes('take_screenshot'), false);
   assert.equal(fileSystemTools.length, 38);
-  assert.equal(browserTools.length, 74);
+  assert.equal(browserTools.length, 78);
   assert.equal(browserTools.includes('open_desktop_application'), false);
-  assert.equal(computerTools.length, 77);
+  assert.equal(computerTools.length, 81);
   assert.equal(computerTools.includes('open_desktop_application'), true);
   assert.equal(computerTools.includes('list_desktop_applications'), true);
   assert.equal(computerTools.includes('close_desktop_application'), true);

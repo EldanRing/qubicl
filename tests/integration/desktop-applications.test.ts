@@ -8,6 +8,51 @@ import { DesktopApplicationManager } from '@qubicl/control/desktop-applications'
 import { ToolExecutor } from '@qubicl/control/executor';
 import { ProcessManager } from '@qubicl/control/processes';
 
+test('native desktop actions return observations, strip lease secrets and fence queued input at takeover', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-native-contract-'));
+  const manifest = buildComputerManifest('workstation', 'test', 'revision');
+  const calls: Array<{ method: string; input: Record<string, unknown> }> = [];
+  let releaseSnapshot: (() => void) | undefined;
+  let startedSnapshot: (() => void) | undefined;
+  let blockSnapshot = false;
+  const started = new Promise<void>((resolve) => { startedSnapshot = resolve; });
+  const executor = new ToolExecutor({ manifest, sha256: manifestSha256(manifest) }, {
+    processes: new ProcessManager({ outputDirectory: join(root, 'output') }),
+    desktop: {
+      native: async (method, input) => {
+        calls.push({ method, input });
+        if (method === 'snapshot' && blockSnapshot) {
+          startedSnapshot?.();
+          await new Promise<void>((resolve) => { releaseSnapshot = resolve; });
+        }
+        if (method === 'windows') return { windows: [{ id: 42, active: true }] };
+        if (method === 'snapshot') return { window: { id: 42 }, elements: [{ name: 'Saved' }] };
+        return { windowId: 42, dispatch: 'completed', verified: false };
+      },
+      screenshot: async () => ({ mimeType: 'image/png', data: 'AA==', width: 1, height: 1 }),
+      control: async () => ({ dispatch: 'completed', verified: false }),
+      readClipboard: async () => ({ text: '' }), writeClipboard: async () => ({ written: true }),
+    },
+  });
+  context.after(async () => { await executor.shutdown(); await rm(root, { recursive: true, force: true }); });
+  const lease = executor.leases.acquire(60);
+  const result = await executor.call('desktop_window_action', { lease, windowId: 42, action: 'focus', observe: 'snapshot' }) as Record<string, unknown>;
+  assert.equal(result.verified, false);
+  assert.deepEqual(result.observation, { window: { id: 42 }, elements: [{ name: 'Saved' }] });
+  assert.equal((result.contentTrust as { source: string }).source, 'desktop');
+  assert.ok(calls.every(({ input }) => !('lease' in input)));
+  blockSnapshot = true;
+  const observation = executor.call('desktop_snapshot', { windowId: 42 });
+  await started;
+  const queued = executor.call('desktop_window_action', { lease, windowId: 42, action: 'close' });
+  const rejected = assert.rejects(queued, /human|stale|lease/i);
+  await executor.takeHumanControl();
+  releaseSnapshot?.();
+  await observation;
+  await rejected;
+  assert.equal(calls.filter(({ method }) => method === 'windowAction').length, 1, 'queued close must never reach the session');
+});
+
 test('allowlisted desktop-session applications survive takeover while generic commands are fenced', async (context) => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'qubicl-desktop-applications-')));
   const outside = await realpath(await mkdtemp(join(tmpdir(), 'qubicl-desktop-outside-')));
@@ -50,6 +95,7 @@ test('allowlisted desktop-session applications survive takeover while generic co
     root,
     runtimeRoot: join(root, '.runtime'),
     maxApplications: 1,
+    requestClose: async () => ({ requestedWindowIds: [42], dispatch: 'completed', verified: false }),
     environment: {
       DISPLAY: ':9',
       QUBICL_INTERNAL_KEY: 'must-not-reach-child',
@@ -188,10 +234,10 @@ test('allowlisted desktop-session applications survive takeover while generic co
     lease: freshLease,
     applicationId: 'x'.repeat(16),
   }), /not found/);
-  await assert.rejects(executor.call('close_desktop_application', {
-    lease: freshLease,
-    applicationId: opened.applicationId,
-  }), /unsaved changes/);
+  const requested = await executor.call('close_desktop_application', { lease: freshLease, applicationId: opened.applicationId }) as { state: string };
+  assert.equal(requested.state, 'close_requested');
+  assert.equal(isAlive(child.pid), true, 'normal close must not terminate the process');
+  await assert.rejects(executor.call('close_desktop_application', { lease: freshLease, applicationId: opened.applicationId, mode: 'terminate' }), /unsaved changes/);
   const closed = await executor.call('close_desktop_application', {
     lease: freshLease,
     applicationId: opened.applicationId,

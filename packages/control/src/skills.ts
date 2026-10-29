@@ -315,7 +315,7 @@ export class SkillManager {
   private async catalog(): Promise<CoreCatalog> {
     this.catalogPromise ??= readFile(join(this.catalogRoot, 'core-catalog.json'), 'utf8').then((raw) => {
       const parsed = JSON.parse(raw) as CoreCatalog;
-      if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.skills) || parsed.skills.length !== 6) throw new Error('Qubicl core skill catalog is invalid.');
+      if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.skills) || parsed.skills.length === 0) throw new Error('Qubicl core skill catalog is invalid.');
       return parsed;
     });
     return this.catalogPromise;

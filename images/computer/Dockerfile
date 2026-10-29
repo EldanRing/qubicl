@@ -52,12 +52,14 @@ RUN groupmod --new-name qubicl node \
 
 COPY --chown=qubicl:qubicl control.mjs /opt/qubicl/control.mjs
 COPY --chown=qubicl:qubicl web-provider.py /opt/qubicl/web-provider.py
+COPY --chown=root:root desktop-helper.py /opt/qubicl/desktop-helper.py
 COPY --chown=root:root pty-helper.py /opt/qubicl/pty-helper.py
 COPY web-requirements.txt /opt/qubicl/web-requirements.txt
 COPY --chown=qubicl:qubicl skills /opt/qubicl/skills
 COPY LICENSE THIRD_PARTY_NOTICES.txt WEB_THIRD_PARTY_NOTICES.txt /usr/share/doc/qubicl/
 COPY entrypoint.sh /usr/local/bin/qubicl-entrypoint
 COPY setup-user-software.sh /opt/qubicl/setup-user-software.sh
+COPY setup-desktop-home.sh /opt/qubicl/setup-desktop-home.sh
 COPY user-software-profile.sh /etc/profile.d/qubicl-user-software.sh
 RUN python3 -m venv /opt/qubicl/web-venv \
  && /opt/qubicl/web-venv/bin/pip install --no-cache-dir --requirement /opt/qubicl/web-requirements.txt \
@@ -84,6 +86,11 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       chromium \
       dbus-x11 \
+      at-spi2-core \
+      gir1.2-atspi-2.0 \
+      libatk-adaptor \
+      python3-gi \
+      python3-xlib \
       fonts-dejavu-core \
       gnome-keyring \
       libsecret-tools \
@@ -171,6 +178,14 @@ FROM computer-runtime AS workstation-runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       build-essential \
+      blender \
+      freecad \
+      frei0r-plugins \
+      gimp \
+      inkscape \
+      kdenlive \
+      oxygen-icon-theme \
+      swh-plugins \
       iproute2 \
       libreoffice-calc \
       libreoffice-impress \

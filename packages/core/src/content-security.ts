@@ -21,7 +21,7 @@ export interface SkillSecurityFinding extends ContentThreatFinding {
 
 export interface ContentTrustMetadata {
   level: 'untrusted';
-  source: 'web' | 'browser' | 'clipboard' | 'desktop-visual';
+  source: 'web' | 'browser' | 'clipboard' | 'desktop' | 'desktop-visual';
   scanner: typeof CONTENT_SECURITY_SCANNER_VERSION;
   risk: 'flagged' | 'no-known-patterns' | 'visual-unscanned';
   findings: string[];
@@ -76,7 +76,7 @@ const THREAT_PATTERNS: readonly ThreatPattern[] = [
 
 const UNTRUSTED_TOOLS = new Set<ToolName>([
   'web_search', 'web_extract', 'read_clipboard', 'take_screenshot',
-  'browser_navigate', 'browser_snapshot', 'browser_read', 'browser_screenshot', 'browser_click', 'browser_type',
+  'browser_navigate', 'list_desktop_windows', 'desktop_snapshot', 'desktop_element_action', 'desktop_window_action', 'control_computer', 'browser_snapshot', 'browser_read', 'browser_screenshot', 'browser_click', 'browser_type',
   'browser_select', 'browser_press', 'browser_scroll', 'browser_history', 'browser_wait', 'browser_tabs',
   'browser_use_tab', 'browser_new_tab', 'browser_close_tab', 'browser_reset', 'browser_click_at',
   'browser_double_click_at', 'browser_hover_at', 'browser_drag', 'browser_scroll_at', 'browser_type_focused',
@@ -135,7 +135,7 @@ export function contentTrustMetadata(value: unknown): ContentTrustMetadata | und
   if (!trust || typeof trust !== 'object' || Array.isArray(trust)) return undefined;
   const record = trust as Record<string, unknown>;
   if (record.level !== 'untrusted' || record.scanner !== CONTENT_SECURITY_SCANNER_VERSION) return undefined;
-  if (!['web', 'browser', 'clipboard', 'desktop-visual'].includes(String(record.source))) return undefined;
+  if (!['web', 'browser', 'clipboard', 'desktop', 'desktop-visual'].includes(String(record.source))) return undefined;
   if (!['flagged', 'no-known-patterns', 'visual-unscanned'].includes(String(record.risk))) return undefined;
   if (!Array.isArray(record.findings) || !record.findings.every((finding) => typeof finding === 'string')) return undefined;
   return trust as ContentTrustMetadata;
@@ -145,6 +145,7 @@ function contentSource(name: ToolName): ContentTrustMetadata['source'] {
   if (name === 'web_search' || name === 'web_extract') return 'web';
   if (name === 'read_clipboard') return 'clipboard';
   if (name === 'take_screenshot') return 'desktop-visual';
+  if (name === 'control_computer' || name === 'list_desktop_windows' || name.startsWith('desktop_')) return 'desktop';
   return 'browser';
 }
 

@@ -116,6 +116,23 @@ test('X11 window IDs are parsed strictly and bounded to the protocol schema', ()
   assert.equal(parseX11WindowId('4294967296'), undefined);
 });
 
+test('targeted mouse input rejects missing or stale geometry before pointer dispatch', async () => {
+  const commands: string[][] = [];
+  const runner = async (_command: string, args: string[]) => {
+    commands.push(args);
+    return { stdout: args[0] === 'getactivewindow' ? '42\n' : '', stderr: '' };
+  };
+  const action = { type: 'click' as const, x: 20, y: 30, button: 1, targetWindowId: 42 };
+  await assert.rejects(controlDesktop(action, runner), /geometryToken/);
+  const geometryToken = 'a'.repeat(24);
+  await assert.rejects(controlDesktop({ ...action, geometryToken }, runner, { validate: async () => { throw new Error('stale geometry'); } }), /stale geometry/);
+  assert.equal(commands.some((args) => args.includes('click')), false);
+  let observed: unknown;
+  await controlDesktop({ ...action, geometryToken }, runner, { validate: async (input) => { observed = input; return {}; } });
+  assert.deepEqual(observed, { windowId: 42, geometryToken, points: [[20, 30]] });
+  assert.equal(commands.some((args) => args.includes('click')), true);
+});
+
 test('drag interpolation is represented by one xdotool command', () => {
   const args = dragCommandArguments({ fromX: 10, fromY: 20, toX: 30, toY: 40, durationMs: 32 });
   assert.deepEqual(args.slice(0, 5), ['mousemove', '10', '20', 'mousedown', '1']);

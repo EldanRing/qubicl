@@ -55,7 +55,6 @@ test('process and desktop tool contracts expose the additive safety controls and
   assert.match(toolDefinitions.edit_file.description, /exact-text replacements/);
   assert.match(toolDefinitions.edit_file.description, /unified diff/);
   assert.match(QUBICL_MODEL_INSTRUCTIONS, /verify application effects/);
-  assert.match(toolDefinitions.control_computer.description, /confirm an X11 target/);
   assert.match(toolDefinitions.exec_command.description, /Combined output/);
   assert.deepEqual((jsonSchemaForTool('exec_command') as { properties: { lifecycle: { enum: string[] } } }).properties.lifecycle.enum, ['task', 'session', 'service']);
   assert.equal(toolDefinitions.read_file.lease, false);

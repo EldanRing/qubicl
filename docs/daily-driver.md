@@ -4,7 +4,7 @@ The `qubicl ...` commands below run in the host operator's terminal. Names such
 as `publish_port` are agent tools used through a connected client. Lifecycle,
 backup, and host configuration remain operator actions.
 
-These workflows describe the 0.6 interface. The [design decision](decisions/0002-v0.6-capabilities-and-constraints.md)
+These workflows include development additions for 0.8; published 0.7 images retain their original tools. The [design decision](decisions/0002-v0.6-capabilities-and-constraints.md)
 and [constraint register](constraints.md) explain its remaining boundaries.
 
 ## Browser and document handoff
@@ -20,8 +20,10 @@ create or upload files below `/home/qubicl`. Where supported by the preset,
 built-ins and installed user/system desktop entries. Open an available
 executable name with `open_desktop_application`. Managed applications and the
 browser survive human takeover. Qubicl records launch identity and capacity;
-programmatic close requires explicit acknowledgement that unsaved changes may
-be lost.
+normal close requests allow save dialogs. Explicit process termination requires
+acknowledgement that unsaved changes may be lost. Use [native desktop
+inspection](desktop-control.md) to target windows and controls; use
+`browser_read` for long authenticated pages.
 
 Observe without taking control when the agent should continue using the GUI.
 **Take control** fences queued and future GUI input. Retained tasks and services

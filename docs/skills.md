@@ -4,7 +4,7 @@ Every Qubicl computer has a durable, client-neutral skill store plus the univers
 
 ## What ships
 
-Qubicl ships six reviewed native core skills:
+Qubicl ships reviewed native core skills:
 
 - `plan`
 - `pdf`
@@ -12,6 +12,7 @@ Qubicl ships six reviewed native core skills:
 - `xlsx`
 - `powerpoint`
 - `ocr-and-documents`
+- Workstation: `gimp`, `inkscape`, `blender`, `freecad`, `kdenlive` (0.8 development)
 
 The packages use Qubicl tool names, resolve scripts through the canonical `resourceRoot`, and rely only on dependencies pinned in compatible curated images. Selected MIT-licensed helpers and workflow ideas were adapted from the exact upstream revision recorded in [the provenance record](../skills/PROVENANCE.md), but Hermes Agent itself and its bulk skill tree are not installed.
 
@@ -21,10 +22,10 @@ Default activation follows the image's tested dependencies:
 | --- | --- |
 | `file-system` | `plan` |
 | `browser` | `plan`, `pdf`, `ocr-and-documents` |
-| `computer` | all six |
-| `workstation` | all six |
+| `computer` | planning and the five document skills |
+| `workstation` | all core skills, including the five creative application skills |
 
-All six core working copies are installed in the durable home so an operator can enable a compatible package later. Activation does not manufacture missing image dependencies; the selector only offers core packages declared compatible with that computer's preset.
+All core working copies are installed in the durable home so an operator can enable a compatible package later. Activation does not manufacture missing image dependencies; the selector only offers core packages declared compatible with that computer's preset.
 
 Qubicl refuses newly enabling an incompatible core package. If an older policy already contains one, it remains visible so the operator can disable it, but `skills_list` reports `availableOnPreset: false`/`supported: false` and `skill_view` fails with a capability error instead of presenting instructions whose dependencies are absent.
 

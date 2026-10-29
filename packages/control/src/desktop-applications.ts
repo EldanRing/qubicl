@@ -1,3 +1,4 @@
+import { nativeDesktop } from './desktop-native.js';
 import { randomBytes } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { constants } from 'node:fs';
@@ -5,7 +6,7 @@ import { access, chown, copyFile, lstat, mkdir, readFile, readdir, realpath, rm 
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { DesktopApplicationName, Preset } from '@qubicl/core';
-import { workloadPath } from './environments.js';
+import { workloadPath, workloadEnvironment } from './environments.js';
 import { QubiclError } from './errors.js';
 
 const DEFAULT_ROOT = '/home/qubicl';
@@ -51,12 +52,17 @@ const APPLICATION_DEFINITIONS: Readonly<Record<string, DesktopApplicationDefinit
     allowedPathKind: 'file',
     allowedExtensions: ['', '.txt', '.md', '.log', '.json', '.yaml', '.yml', '.xml', '.html', '.css', '.js', '.ts', '.py', '.sh'],
   },
+  gimp: { executable: '/usr/bin/gimp', fixedArguments: [], allowedPathKind: 'file' },
+  inkscape: { executable: '/usr/bin/inkscape', fixedArguments: [], allowedPathKind: 'file' },
+  blender: { executable: '/usr/bin/blender', fixedArguments: [], allowedPathKind: 'file' },
+  freecad: { executable: '/usr/bin/freecad', fixedArguments: [], allowedPathKind: 'file' },
+  kdenlive: { executable: '/usr/bin/kdenlive', fixedArguments: [], allowedPathKind: 'file' },
   'file-manager': { executable: '/usr/bin/thunar', fixedArguments: [], allowedPathKind: 'directory' },
 };
 
 const BUILTIN_APPLICATIONS_BY_COMPATIBILITY: Readonly<Record<Preset, readonly string[]>> = {
   'file-system': [], browser: [], computer: ['text-editor', 'file-manager'],
-  workstation: ['writer', 'calc', 'impress', 'text-editor', 'file-manager'],
+  workstation: ['writer', 'calc', 'impress', 'text-editor', 'file-manager', 'gimp', 'inkscape', 'blender', 'freecad', 'kdenlive'],
 };
 
 interface TrackedDesktopApplication {
@@ -78,6 +84,7 @@ export interface DesktopApplicationManagerOptions {
   runtimeRoot?: string;
   spawnUid?: number;
   spawnGid?: number;
+  requestClose?: (pid: number) => Promise<Record<string, unknown>>;
 }
 
 export interface DesktopApplicationRecord {
@@ -108,8 +115,10 @@ export class DesktopApplicationManager {
   private readonly spawnUid: number | undefined;
   private readonly spawnGid: number | undefined;
   private pendingApplications = 0;
+  private readonly requestClose: (pid: number) => Promise<Record<string, unknown>>;
 
   constructor(compatibility: Preset, options: DesktopApplicationManagerOptions = {}) {
+    this.requestClose = options.requestClose ?? ((pid) => nativeDesktop.closeProcessWindows(pid));
     this.builtinApplications = new Set(BUILTIN_APPLICATIONS_BY_COMPATIBILITY[compatibility]);
     this.supportsApplications = compatibility === 'computer' || compatibility === 'workstation';
     this.definitions = { ...APPLICATION_DEFINITIONS, ...options.definitions };
@@ -214,16 +223,21 @@ export class DesktopApplicationManager {
     return discoverDesktopApplications(this.root, this.builtinApplications, this.definitions);
   }
 
-  async close(applicationId: string, discardUnsavedChanges = false): Promise<{
+  async close(applicationId: string, discardUnsavedChanges = false, mode?: 'request' | 'terminate'): Promise<{
     applicationId: string;
     application: DesktopApplicationName;
-    state: 'closed';
+    state: 'closed' | 'close_requested';
+    closeRequest?: Record<string, unknown>;
     lifecycle: 'desktop_session';
     forcedKill: boolean;
   }> {
     const tracked = this.applications.get(applicationId);
     if (!tracked || tracked.completed) {
       throw new QubiclError('desktop_application_not_found', `Desktop application ${applicationId} was not found.`, 404);
+    }
+    if ((mode ?? (discardUnsavedChanges ? 'terminate' : 'request')) === 'request') {
+      const closeRequest = await this.requestClose(tracked.child.pid!);
+      return { applicationId, application: tracked.application, state: 'close_requested', lifecycle: 'desktop_session', forcedKill: false, closeRequest };
     }
     if (!discardUnsavedChanges) {
       throw new QubiclError(
@@ -403,6 +417,7 @@ function publicRecord(tracked: TrackedDesktopApplication): DesktopApplicationRec
 function sanitizedDesktopEnvironment(root: string, source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const display = typeof source.DISPLAY === 'string' && /^:[0-9]+(?:\.[0-9]+)?$/.test(source.DISPLAY) ? source.DISPLAY : ':0';
   return {
+    ...workloadEnvironment(source, root),
     HOME: root,
     USER: 'qubicl',
     LOGNAME: 'qubicl',

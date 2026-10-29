@@ -51,7 +51,7 @@ for (const definition of definitions.skills) {
   assert(blocking.length === 0, `Core skill ${definition.id} has blocking content findings: ${blocking.map(({ id, file }) => `${id}:${file}`).join(', ')}.`);
   skills.push({
     ...definition,
-    license: 'MIT',
+    license: definition.license ?? 'MIT',
     files,
     sha256: inspected.sha256,
     security: {
@@ -61,7 +61,7 @@ for (const definition of definitions.skills) {
     },
   });
 }
-assert(skills.length === 6, 'Qubicl must ship exactly six reviewed core skills.');
+assert(skills.length > 0, 'The core catalog must not be empty.');
 assert(reviews.skills.every((name) => names.has(name)), 'Core skill review record contains an unknown skill.');
 
 const catalog = {
