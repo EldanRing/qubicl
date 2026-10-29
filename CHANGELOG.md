@@ -54,6 +54,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Security
 
+- Update the MCP Node adapter, Zod and its HTTP-server dependency to patched
+  compatible versions for request-size, validation-memory and static-path issues.
 - Use upstream npm 12.2.1 in computer images instead of modifying its private
   dependency tree; document compatibility-aware remediation and scoped review.
 
