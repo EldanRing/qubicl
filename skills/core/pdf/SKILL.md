@@ -23,3 +23,16 @@ Common helpers beneath `<resourceRoot>/scripts/`:
 Read `references/forms.md` only for AcroForm work.
 
 For inspection, extract text first and render representative pages when layout matters. Use `take_screenshot` only for the live desktop; use generated page images for document QA. Verify important outputs by reopening them with a read helper and, when visual fidelity matters, by rendering pages. Never overwrite the only input copy unless the user explicitly requests in-place editing.
+
+Use the common rendering receipt for PDF, DOCX, XLSX and PPTX:
+`/opt/qubicl/skills-venv/bin/python /opt/qubicl/artifact-render.py FILE --outdir DIR`.
+Each invocation captures its source, uses an isolated Office profile, and writes a unique
+run directory with PDF, exact numbered PNGs and `manifest.json`. Read `sourceSha256`,
+`pages`, `warnings` and `validation`, then inspect the generated pages. Old previews
+are never returned as this run's outputs. `visuallyInspected: false` is intentional:
+the tool renders; the agent performs visual review. Office rendering needs workstation.
+
+`pdf_fill_form.py --flatten` merges all supported text/choice/button appearances,
+including untouched fields, and removes form widgets. Unsupported widgets fail before
+replacing the destination. Reopen the PDF to verify fields are absent and inspect
+rendered text and checkbox/radio appearances; read-only fields are not flattening.

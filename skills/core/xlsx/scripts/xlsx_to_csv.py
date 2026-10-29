@@ -15,6 +15,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
+import runpy
 import sys
 from datetime import date, datetime, time
 
@@ -44,11 +46,20 @@ def main(argv=None):
     ap.add_argument("--delimiter", default=",")
     ap.add_argument("--data-only", action="store_true",
                     help="cached formula results instead of formula strings")
+    ap.add_argument("--allow-missing-results", action="store_true")
     args = ap.parse_args(argv)
 
     wb = load_workbook(args.file, data_only=args.data_only)
     ws = wb[args.sheet] if args.sheet else wb.active
 
+    missing = []
+    if args.data_only:
+        helpers = runpy.run_path(os.environ.get("QUBICL_ARTIFACT_RENDERER", "/opt/qubicl/artifact-render.py"))
+        empty = helpers["cached_empty_formulas"](args.file)
+        formulas = load_workbook(args.file, data_only=False)[ws.title]
+        missing = [cell.coordinate for row in formulas for cell in row if cell.data_type == "f" and ws[cell.coordinate].value is None and (ws.title, cell.coordinate) not in empty]
+        if missing and not args.allow_missing_results:
+            raise ValueError("Missing cached formula results; recalculate or explicitly --allow-missing-results: " + ", ".join(missing))
     with open(args.output, "w", newline="", encoding=args.encoding) as fh:
         writer = csv.writer(fh, delimiter=args.delimiter)
         count = 0
@@ -57,7 +68,7 @@ def main(argv=None):
             count += 1
 
     print(json.dumps({"ok": True, "output": args.output, "sheet": ws.title,
-                      "rows": count}, ensure_ascii=False))
+                      "rows": count, "missingFormulaResults": missing, "valueComplete": not missing}, ensure_ascii=False))
     return 0
 
 

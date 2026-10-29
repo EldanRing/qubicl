@@ -10,11 +10,11 @@ gives the exact rewrite rules and honest limits.
 |---|---|---|
 | Formula references | ALL sheets | A1 refs into the edited sheet are shifted; refs into a fully deleted region become `#REF!` |
 | Merged-cell ranges | edited sheet | shifted; expanded when they span the insertion point; dropped (reported `to: null`) when fully deleted |
-| Autofilter ref | edited sheet | shifted/expanded like a range |
+| Autofilter | edited sheet | range, relative filter-column IDs and sort ranges shift together; deleted criteria are removed |
 | Freeze panes | edited sheet | anchor cell shifted (never below row/col of the pane's own minimum) |
 | Data validations | edited sheet | each range in the sqref shifted; deleted ranges removed |
 | Conditional formats | edited sheet | applied range (sqref) shifted |
-| Native tables | edited sheet | table `ref` shifted/expanded |
+| Native tables | edited sheet | table/filter/sort ranges shift together; partial table-column schema changes are rejected before saving |
 | Defined names | workbook scope | `attr_text` refs into the edited sheet rewritten |
 | Row heights / column widths | edited sheet | dimension keys re-indexed |
 
@@ -69,3 +69,14 @@ The CLI takes exactly one of `--insert-rows/--delete-rows/
 --insert-cols/--delete-cols` (as `IDX[:N]`; columns accept letters).
 For multiple operations run it repeatedly — ordering compound shifts in
 one pass is where spreadsheet tools historically corrupt references.
+
+## Table column schema changes
+
+Inserting a column strictly inside a table, or deleting some but not all table
+columns, requires coordinating header names, `tableColumns`, structured formulas
+and filter criteria. This helper rejects those operations before saving rather
+than silently changing the table schema. Inserting/deleting columns before a
+table still shifts it; deleting all its columns removes the table. To change a
+table schema, explicitly rebuild its headers/columns and affected formulas, then
+validate the saved workbook. Revisit this restriction when that schema-aware
+transformation is implemented and verified.

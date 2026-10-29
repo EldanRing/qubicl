@@ -27,6 +27,8 @@ import sys
 from copy import deepcopy
 
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.text.run import Run
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from lxml import etree
 
@@ -95,20 +97,40 @@ def list_comments(doc) -> list:
 
 def _split_run(para, run_el, offset: int):
     """Split a run element at text offset; return the new right-hand run."""
-    text = "".join(t.text or "" for t in run_el.iter(q("t")))
-    right = deepcopy(run_el)
+    right = OxmlElement("w:r")
+    right.attrib.update(run_el.attrib)
+    props = run_el.find(q("rPr"))
+    if props is not None:
+        right.append(deepcopy(props))
+    position = 0
+    for child in list(run_el):
+        if child.tag == q("rPr"):
+            continue
+        if child.tag == q("t"):
+            text = child.text or ""
+            if position >= offset:
+                right.append(child)
+            elif position + len(text) > offset:
+                tail = deepcopy(child)
+                child.text = text[:offset-position]
+                tail.text = text[offset-position:]
+                child.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+                tail.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+                right.append(tail)
+            position += len(text)
+        else:
+            if position >= offset:
+                right.append(child)
+            if child.tag in (q("tab"), q("cr")) or (child.tag == q("br") and child.get(q("type"), "textWrapping") == "textWrapping"):
+                position += 1
     run_el.addnext(right)
-    for el, s in ((run_el, text[:offset]), (right, text[offset:])):
-        for t in list(el.iter(q("t"))):
-            el.remove(t)
-        t = etree.SubElement(el, q("t"))
-        t.text = s
-        t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
     return right
 
 
 def find_anchor_runs(doc, target: str):
     """Isolate `target`'s first occurrence into whole runs; return them."""
+    if not target:
+        raise ValueError("Comment target must not be empty")
     from docx_common import iter_all_paragraphs
     for para in iter_all_paragraphs(doc):
         full = para.text
@@ -116,10 +138,13 @@ def find_anchor_runs(doc, target: str):
         if start < 0:
             continue
         end = start + len(target)
+        original_runs = list(para._p.iter(q("r")))
+        if "".join(Run(run, para).text for run in original_runs) != full:
+            raise ValueError("Comment target is inside unsupported revision or nested drawing structure")
         pos = 0
         covered = []
-        for run_el in para._p.iter(q("r")):
-            rtext = "".join(t.text or "" for t in run_el.iter(q("t")))
+        for run_el in original_runs:
+            rtext = Run(run_el, para).text
             r_start, r_end = pos, pos + len(rtext)
             pos = r_end
             if r_end <= start or r_start >= end:

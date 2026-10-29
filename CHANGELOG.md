@@ -6,6 +6,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Added
 
+- Shared PDF/DOCX/XLSX/PPTX rendering with captured-source hashes, exact page
+  manifests, formula diagnostics and explicit fidelity limitations.
+
 - Native desktop window inventory, bounded AT-SPI snapshots with exact element
   refs and semantic actions, and explicit screenshot fallback for apps with
   incomplete accessibility.
@@ -24,6 +27,10 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Changed
 
+- CSV import preserves identifiers and literal formulas by default, supports
+  explicit column types, and reports conversions. Cached-value CSV exports
+  reject unavailable formula results unless explicitly allowed.
+
 - Desktop app close defaults to a normal window request so Save/Discard/Cancel
   dialogs can be handled. Explicit termination retains unsaved-data acknowledgement;
   the legacy `discardUnsavedChanges: true` call still selects termination.
@@ -34,6 +41,16 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   published runtime images retain their original protocol and identities.
 
 ### Fixed
+
+- Spreadsheet restructuring preserves structured/external references, table
+  filters, row/column dimensions and removed validation/table ranges.
+- Word replacement processes original matches once without losing inline objects;
+  comment anchoring does not duplicate images, and reading flags incomplete views
+  of tracked revisions across document parts.
+- PowerPoint replacement covers mixed runs and groups; duplication preserves
+  explicit backgrounds and rejects grouped charts; footer IDs remain unique.
+- PDF flattening merges appearances and removes widgets/forms instead of merely
+  setting read-only flags. Rendering excludes stale pages from earlier runs.
 
 - Browser snapshots continue at the first omitted control after count or byte
   truncation, including hidden candidates, and account for frame metadata in

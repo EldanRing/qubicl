@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Convert a CSV file to a styled .xlsx workbook with type inference.
 
-Type inference per cell (disable with --no-infer):
+Conservative homogeneous-column inference (disable with --no-infer):
   int, float, bool ("true"/"false", case-insensitive), ISO date
-  (YYYY-MM-DD) and ISO datetime; everything else stays a string.
+  (YYYY-MM-DD) and ISO datetime. Leading zeros, long numbers and mixed-type
+  columns remain text. Formulas require --allow-formulas or an explicit column
+  type. --column-types accepts a JSON map of column letters to types.
 
 Styling applied by default (disable with --plain):
   bold header row with a light fill, frozen top row, autofilter over the
@@ -20,6 +22,8 @@ import argparse
 import csv
 import json
 import sys
+import re
+import math
 from datetime import date, datetime
 
 from openpyxl import Workbook
@@ -34,12 +38,15 @@ DEFAULT_COL_WIDTH = 8
 def infer(text):
     if text == "":
         return None
+    if text != text.strip() or re.fullmatch(r"[+-]?0[0-9]+", text) or len(re.sub(r"[^0-9]", "", text)) > 15:
+        return text
     low = text.lower()
     if low in ("true", "false"):
         return low == "true"
     for caster in (int, float):
         try:
-            return caster(text)
+            value = caster(text)
+            return value if not isinstance(value, float) or math.isfinite(value) else text
         except ValueError:
             pass
     for parser in (date.fromisoformat, datetime.fromisoformat):
@@ -62,7 +69,12 @@ def main(argv=None):
                     help="keep every cell as a string")
     ap.add_argument("--plain", action="store_true",
                     help="skip header styling / freeze / autofilter")
+    ap.add_argument("--column-types", default="{}", help='JSON mapping of column letters to text, number, boolean, date or formula')
+    ap.add_argument("--allow-formulas", action="store_true", help="Interpret = expressions deliberately; default is literal text")
     args = ap.parse_args(argv)
+    column_types = json.loads(args.column_types)
+    if not isinstance(column_types, dict) or any(v not in {"text", "number", "boolean", "date", "formula"} for v in column_types.values()):
+        raise ValueError("Invalid column types")
 
     with open(args.csv_file, newline="", encoding=args.encoding) as fh:
         rows = list(csv.reader(fh, delimiter=args.delimiter))
@@ -70,11 +82,26 @@ def main(argv=None):
     wb = Workbook()
     ws = wb.active
     ws.title = args.sheet_name
+    conversions = []
+    # Infer a type only when all nonempty values in a column agree.
+    inferred = {}
+    for col in range(max((len(row) for row in rows), default=0)):
+        types = {type(infer(row[col])) for row in rows[1:] if col < len(row) and row[col] != ""}
+        inferred[col] = len(types) == 1 and str not in types
     for i, row in enumerate(rows):
-        if args.no_infer or i == 0:
-            ws.append(row)
-        else:
-            ws.append([infer(cell) for cell in row])
+        for j, text in enumerate(row):
+            kind = column_types.get(get_column_letter(j + 1)) if i else "text"
+            value = text
+            if i and kind == "number": value = float(text) if any(c in text.lower() for c in ".e") else int(text)
+            elif i and kind == "boolean":
+                if text.lower() not in ("true", "false"): raise ValueError("Invalid boolean")
+                value = text.lower() == "true"
+            elif i and kind == "date": value = date.fromisoformat(text)
+            elif i and kind is None and not args.no_infer and inferred.get(j): value = infer(text)
+            cell = ws.cell(i + 1, j + 1, value)
+            if isinstance(value, str) and not (args.allow_formulas or kind == "formula"):
+                cell.data_type = "s"
+            if not isinstance(value, str): conversions.append({"cell": cell.coordinate, "type": type(value).__name__})
 
     if rows and not args.plain:
         header_font = Font(bold=True)
@@ -92,7 +119,7 @@ def main(argv=None):
 
     wb.save(args.output)
     print(json.dumps({"ok": True, "output": args.output,
-                      "rows": len(rows)}, ensure_ascii=False))
+                      "rows": len(rows), "conversions": conversions}, ensure_ascii=False))
     return 0
 
 

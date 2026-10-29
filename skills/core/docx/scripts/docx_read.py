@@ -10,8 +10,8 @@ Usage:
   docx_read.py file.docx --revisions   # JSON: tracked changes / comments present?
 
 Text output is JSON: {"body": [...], "tables": [[...rows]], "headers": [...],
-"footers": [...]}. Body text is the accepted/as-is text (python-docx ignores
-deleted-in-revision text and shows inserted text).
+"footers": [...]}. Tracked changes are flagged automatically: ordinary python-docx
+extraction is NOT a complete final view when revision markup is present.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import zipfile
+from lxml import etree
 
 from docx import Document
 
@@ -96,8 +97,9 @@ def extract_images(path: str, outdir: str) -> list:
 
 def detect_revisions(path: str) -> dict:
     """Detect tracked changes and comments by scanning the raw XML parts."""
-    markers = {"insertions": b"<w:ins ", "deletions": b"<w:del ",
-               "format_changes": b"<w:rPrChange"}
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    markers = {"insertions": {"ins", "moveTo"}, "deletions": {"del", "moveFrom"},
+               "format_changes": {"rPrChange", "pPrChange", "tblPrChange", "trPrChange", "tcPrChange", "sectPrChange"}}
     result = {k: False for k in markers}
     result["comments"] = False
     with zipfile.ZipFile(path) as zf:
@@ -105,10 +107,10 @@ def detect_revisions(path: str) -> dict:
         result["comments"] = any(n.startswith("word/comments") for n in names)
         for name in names:
             if name.startswith("word/") and name.endswith(".xml"):
-                data = zf.read(name)
-                for key, marker in markers.items():
-                    if marker in data:
-                        result[key] = True
+                root = etree.fromstring(zf.read(name), etree.XMLParser(resolve_entities=False, no_network=True))
+                tags = {etree.QName(el).localname for el in root.iter() if isinstance(el.tag, str) and etree.QName(el).namespace == namespace}
+                for key, expected in markers.items():
+                    result[key] |= bool(tags & expected)
     result["has_tracked_changes"] = any(
         result[k] for k in ("insertions", "deletions", "format_changes"))
     return result
@@ -141,6 +143,11 @@ def main() -> int:
         out = extract_structure(doc)
     else:
         out = {"styles": styles_used(doc)}
+    revisions = detect_revisions(args.path)
+    out["revisions"] = revisions
+    out["completeFinalView"] = not revisions["has_tracked_changes"]
+    if revisions["has_tracked_changes"]:
+        out["warnings"] = ["Tracked changes present: this extraction omits revision-wrapped content. Use docx_revisions.py on a copy to accept/reject revisions before reading a final/original view."]
     print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0
 

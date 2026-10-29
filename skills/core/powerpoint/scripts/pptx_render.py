@@ -12,60 +12,15 @@ When either tool is missing the script still exits 0 and reports:
 so callers can degrade gracefully (fall back to pptx_read.py --outline).
 """
 import argparse
-import glob
 import json
 import os
-import shutil
-import subprocess
+import runpy
 import sys
-import tempfile
-
-
-def find_tools():
-    """Return (soffice, splitter, missing) using shutil.which."""
-    soffice = shutil.which("soffice")
-    splitter = shutil.which("pdftoppm") or shutil.which("pdftocairo")
-    missing = []
-    if not soffice:
-        missing.append("soffice")
-    if not splitter:
-        missing.append("pdftoppm (or pdftocairo)")
-    return soffice, splitter, missing
 
 
 def render(pptx_path, out_dir, prefix, dpi):
-    soffice, splitter, missing = find_tools()
-    if missing:
-        return {
-            "rendered": False, "missing": missing,
-            "guidance": "Install LibreOffice (soffice) and poppler-utils "
-                        "(pdftoppm/pdftocairo) to render slides. Without "
-                        "them, verify decks with pptx_read.py --outline "
-                        "instead.",
-        }
-
-    os.makedirs(out_dir, exist_ok=True)
-    with tempfile.TemporaryDirectory() as tmp:
-        proc = subprocess.run(
-            [soffice, "--headless", "--convert-to", "pdf",
-             "--outdir", tmp, pptx_path],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=300)
-        pdfs = glob.glob(os.path.join(tmp, "*.pdf"))
-        if proc.returncode != 0 or not pdfs:
-            raise SystemExit(f"soffice PDF conversion failed: {proc.stderr}")
-        pdf = pdfs[0]
-        out_prefix = os.path.join(out_dir, prefix)
-        proc = subprocess.run(
-            [splitter, "-png", "-r", str(dpi), pdf, out_prefix],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=300)
-        if proc.returncode != 0:
-            raise SystemExit(f"{os.path.basename(splitter)} failed: "
-                             f"{proc.stderr}")
-
-    files = sorted(glob.glob(out_prefix + "*.png"))
-    return {"rendered": True, "files": files}
+    helper = os.environ.get('QUBICL_ARTIFACT_RENDERER', '/opt/qubicl/artifact-render.py')
+    return runpy.run_path(helper)['render'](pptx_path, out_dir, prefix, dpi)
 
 
 def main(argv=None):

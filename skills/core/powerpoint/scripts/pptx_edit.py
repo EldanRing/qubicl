@@ -83,35 +83,37 @@ def normalize_runs(para):
 
 
 def replace_in_text_frame(text_frame, old, new):
+    import re
+    if not old: return 0
     count = 0
     for para in text_frame.paragraphs:
-        joined = "".join(run.text for run in para.runs)
-        if old not in joined:
-            continue
-        if not any(old in run.text for run in para.runs):
-            # Match spans runs: merge identically-formatted neighbours
-            # first, which resolves pure spell-check splits losslessly.
-            normalize_runs(para)
-        if any(old in run.text for run in para.runs):
-            # Run-level replace: preserves each run's formatting exactly.
-            for run in para.runs:
-                if old in run.text:
-                    count += run.text.count(old)
-                    run.text = run.text.replace(old, new)
-        else:
-            # Match spans genuinely differently-formatted runs -> rewrite
-            # paragraph, keeping only the first run's formatting (caveat).
-            joined = "".join(run.text for run in para.runs)
-            count += joined.count(old)
-            first = para.runs[0]
-            first.text = joined.replace(old, new)
-            for run in para.runs[1:]:
-                run._r.getparent().remove(run._r)
+        runs = list(para.runs)
+        joined = "".join(run.text for run in runs)
+        spans, pos = [], 0
+        for run in runs:
+            spans.append((run, pos, pos + len(run.text)))
+            pos += len(run.text)
+        matches = list(re.finditer(re.escape(old), joined))
+        for match in reversed(matches):
+            first = True
+            for run, start, end in spans:
+                if end <= match.start() or start >= match.end(): continue
+                a, b = max(start, match.start()) - start, min(end, match.end()) - start
+                run.text = run.text[:a] + (new if first else "") + run.text[b:]
+                first = False
+        count += len(matches)
     return count
 
 
+def iter_shapes(shapes):
+    for shape in shapes:
+        yield shape
+        if hasattr(shape, "shapes"):
+            yield from iter_shapes(shape.shapes)
+
+
 def iter_text_frames(slide):
-    for shape in slide.shapes:
+    for shape in iter_shapes(slide.shapes):
         if shape.has_text_frame:
             yield shape.text_frame
         if shape.has_table:
@@ -210,7 +212,7 @@ def update_chart(prs, spec_path):
 
 def swap_image(prs, slide_idx, shape_name, new_path):
     slide = prs.slides[int(slide_idx)]
-    for shape in slide.shapes:
+    for shape in iter_shapes(slide.shapes):
         if (shape.shape_type == MSO_SHAPE_TYPE.PICTURE
                 and shape.name == shape_name):
             image_part, rid = slide.part.get_or_add_image_part(new_path)
@@ -246,7 +248,7 @@ def duplicate_slide(prs, index):
     graph reliably is not supported — better to refuse than corrupt.
     """
     source = prs.slides[int(index)]
-    if any(sh.has_chart for sh in source.shapes):
+    if any(sh.has_chart for sh in iter_shapes(source.shapes)):
         raise SystemExit(
             f"slide {index} contains a chart; duplication of chart slides "
             "is not supported (chart XML embeds a workbook part that "
@@ -273,7 +275,10 @@ def duplicate_slide(prs, index):
             new_rid = dest.part.relate_to(rel.target_part, rel.reltype)
         rid_map[rel.rId] = new_rid
 
-    for el in dest.shapes._spTree.iter():
+    if source._element.cSld.bg is not None:
+        dest._element.cSld.insert(0, copy.deepcopy(source._element.cSld.bg))
+
+    for el in dest._element.iter():
         for attr, val in el.attrib.items():
             if attr.startswith(R_EMBED) and val in rid_map:
                 el.set(attr, rid_map[val])
@@ -297,7 +302,7 @@ def add_hyperlink(prs, slide_idx, text, url):
     """
     slide = prs.slides[int(slide_idx)]
     hits = 0
-    for shape in slide.shapes:
+    for shape in iter_shapes(slide.shapes):
         if not shape.has_text_frame:
             continue
         for para in shape.text_frame.paragraphs:
@@ -321,6 +326,7 @@ def _copy_layout_placeholder(slide, ph_idx):
     for ph in slide.slide_layout.placeholders:
         if ph.placeholder_format.idx == ph_idx:
             el = copy.deepcopy(ph._element)
+            el.xpath(".//p:cNvPr")[0].set("id", str(slide.shapes._next_shape_id))
             slide.shapes._spTree.append(el)
             for shape in slide.placeholders:
                 if shape.placeholder_format.idx == ph_idx:

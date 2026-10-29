@@ -83,7 +83,7 @@
         "scripts/pdf_stamp.py",
         "scripts/pdf_watermark.py"
       ],
-      "sha256": "f6e414154b0ee84a2bd5c3af2ac079a7f21b50aceb5460a461776231eb2e21b8",
+      "sha256": "82bc490e545d28e8e6c8bdec1eae7058b19ce662b47024393af89b01d2ea347f",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",
@@ -123,7 +123,7 @@
         "scripts/docx_template.py",
         "scripts/docx_validate.py"
       ],
-      "sha256": "fbaf54ee274ceb4b632d6e0b6fe52b63cddc8a1a79ba89a5e5e0c90ffbf08b31",
+      "sha256": "2c60778981a342e79d93f3eca0b8759a369536eccedff2ba907a2fd323170873",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",
@@ -162,7 +162,7 @@
         "scripts/xlsx_restructure.py",
         "scripts/xlsx_to_csv.py"
       ],
-      "sha256": "ca3c1f61964f0389367662ec28074202c1242f02a503d3a91c3b6ce15e71530d",
+      "sha256": "ef50a1a126a4c60a60bee1180254b43f201666da783471682cd77ca4623ae25c",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",
@@ -198,7 +198,7 @@
         "scripts/pptx_read.py",
         "scripts/pptx_render.py"
       ],
-      "sha256": "e1d6e6a8fd53def0323a13025c2c480e8babeb4ae04336322b392d150c9c1367",
+      "sha256": "c6d02ec198f09bc6bd0d7aa988d6b38a08ebd31fbb8c9adcd393277efcd97b04",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",
@@ -334,7 +334,7 @@
         "LICENSE",
         "SKILL.md"
       ],
-      "sha256": "515d7727554f0c2a48d68924055ae0e4e12748b8420d5d03f5b7021cc8560f48",
+      "sha256": "9719d1cd5a69b209bf0921b1c8cd20cac84703c6f5de5cececa45a800a7c687c",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",

@@ -49,7 +49,7 @@ REF_RE = re.compile(
     r"(?P<start>\$?[A-Za-z]{1,3}\$?[0-9]{1,7})"
     r"(?::(?P<end>\$?[A-Za-z]{1,3}\$?[0-9]{1,7}))?"
     r"(?![\w(])")
-STRING_RE = re.compile(r'"(?:[^"]|"")*"')
+STRING_RE = re.compile(r'"(?:[^"]|"")*"|\[(?:[^\[\]]|\[[^\[\]]*\])*\]')
 COORD_RE = re.compile(r"^(\$?)([A-Za-z]{1,3})(\$?)([0-9]+)$")
 
 
@@ -89,6 +89,46 @@ def shift_range(rng, axis, idx, n, delete):
     start = f"{get_column_letter(min_col)}{min_row}"
     end = f"{get_column_letter(max_col)}{max_row}"
     return start if start == end and ":" not in rng else f"{start}:{end}"
+
+
+def shift_sort_state(state, axis, idx, n, delete):
+    if state is None:
+        return None
+    shifted = shift_range(state.ref, axis, idx, n, delete)
+    if shifted is None:
+        return None
+    state.ref = shifted
+    conditions = []
+    for condition in state.sortCondition:
+        shifted = shift_range(condition.ref, axis, idx, n, delete)
+        if shifted is not None:
+            condition.ref = shifted
+            conditions.append(condition)
+    state.sortCondition = conditions
+    return state
+
+
+def shift_auto_filter(auto_filter, axis, idx, n, delete):
+    if auto_filter is None or not auto_filter.ref:
+        return
+    previous = auto_filter.ref
+    updated = shift_range(previous, axis, idx, n, delete)
+    auto_filter.ref = updated
+    if updated is None:
+        auto_filter.filterColumn = []
+        auto_filter.sortState = None
+        return
+    if axis == "cols":
+        old_left, _, _, _ = range_boundaries(previous)
+        new_left, _, _, _ = range_boundaries(updated)
+        columns = []
+        for column in auto_filter.filterColumn:
+            absolute = shift_point(old_left + column.colId, idx, n, delete)
+            if absolute is not None:
+                column.colId = absolute - new_left
+                columns.append(column)
+        auto_filter.filterColumn = columns
+    auto_filter.sortState = shift_sort_state(auto_filter.sortState, axis, idx, n, delete)
 
 
 class RefRewriter:
@@ -158,34 +198,34 @@ class RefRewriter:
                 else f"{prefix}{pair[0]}:{pair[1]}")
 
     def rewrite(self, text, home_sheet):
-        """Rewrite refs outside quoted string literals. Returns new text."""
-        out, pos = [], 0
-        for lit in STRING_RE.finditer(text):
-            out.append(REF_RE.sub(lambda m: self._sub(m, home_sheet),
-                                  text[pos:lit.start()]))
-            out.append(lit.group(0))
-            pos = lit.end()
-        out.append(REF_RE.sub(lambda m: self._sub(m, home_sheet), text[pos:]))
-        return "".join(out)
+        """Rewrite actual RANGE tokens, never table headers or external workbooks."""
+        from openpyxl.formula.tokenizer import Tokenizer
+        prefix = "" if text.startswith("=") else "="
+        tokens = Tokenizer(prefix + text).items
+        rewritten = "".join(REF_RE.sub(lambda m: self._sub(m, home_sheet), token.value)
+                            if token.subtype == "RANGE" and "[" not in token.value else token.value
+                            for token in tokens)
+        return ("=" if not prefix else "") + rewritten
 
 
 def shift_dimensions(dims, idx, n, delete, is_row):
     """Rebuild a row/column dimensions map with shifted keys."""
     items = list(dims.items())
-    saved = {}
+    dims.clear()
+    changed = 0
     for key, dim in items:
         pos = key if is_row else column_index_from_string(key)
-        new = shift_point(pos, idx, n, delete)
-        if new is not None and new != pos:
-            saved[new if is_row else get_column_letter(new)] = dim
-            del dims[key]
-    for key, dim in saved.items():
-        if is_row:
-            dim.index = key
-        else:
-            dim.index = column_index_from_string(key)
-        dims[key] = dim
-    return len(saved)
+        span = shift_span(pos if is_row else (dim.min or pos), pos if is_row else (dim.max or pos), idx, n, delete)
+        if span is None:
+            changed += 1
+            continue
+        new, end = span
+        dim.index = new if is_row else get_column_letter(new)
+        if not is_row:
+            dim.min, dim.max = new, end
+        dims[dim.index] = dim
+        changed += int(new != pos)
+    return changed
 
 
 def main(argv=None):
@@ -217,8 +257,18 @@ def main(argv=None):
     else:
         idx = int(idx_s)
 
+    if idx < 1 or n < 1:
+        raise ValueError("Structural index and count must be positive")
+
     wb = load_workbook(args.file)
     ws = wb[args.sheet] if args.sheet else wb.active
+    if axis == "cols":
+        for table in ws.tables.values():
+            left, _, right, _ = range_boundaries(table.ref)
+            partial_delete = delete and idx <= right and idx + n - 1 >= left and not (idx <= left and idx + n - 1 >= right)
+            interior_insert = not delete and left < idx <= right
+            if partial_delete or interior_insert:
+                raise ValueError(f"Cannot safely change columns inside table {table.displayName!r}: table columns, structured formulas and filter criteria require an explicit table-schema edit. No output was saved.")
     rewriter = RefRewriter(ws.title, axis, idx, n, delete)
     report = {"ok": True, "sheet": ws.title, "axis": axis,
               "op": "delete" if delete else "insert", "index": idx, "count": n,
@@ -262,7 +312,7 @@ def main(argv=None):
         new = shift_range(ws.auto_filter.ref, axis, idx, n, delete)
         if new != ws.auto_filter.ref:
             report["autofilter"] = {"from": ws.auto_filter.ref, "to": new}
-            ws.auto_filter.ref = new
+        shift_auto_filter(ws.auto_filter, axis, idx, n, delete)
     if ws.freeze_panes:
         m = COORD_RE.match(ws.freeze_panes)
         ci = column_index_from_string(m.group(2).upper())
@@ -277,11 +327,14 @@ def main(argv=None):
             ws.freeze_panes = new
 
     # 6. data validations + conditional formatting applied ranges
-    for dv in ws.data_validations.dataValidation:
+    for dv in list(ws.data_validations.dataValidation):
         old = str(dv.sqref)
         parts = [shift_range(p, axis, idx, n, delete) for p in old.split()]
         parts = [p for p in parts if p]
-        if parts and " ".join(parts) != old:
+        if not parts:
+            ws.data_validations.dataValidation.remove(dv)
+            report["validations"].append({"from": old, "to": None})
+        elif " ".join(parts) != old:
             dv.sqref = " ".join(parts)
             report["validations"].append({"from": old, "to": str(dv.sqref)})
     new_cf = ConditionalFormattingList()
@@ -300,12 +353,17 @@ def main(argv=None):
     ws.conditional_formatting = new_cf
 
     # 7. native tables on the edited sheet
-    for table in ws.tables.values():
+    for table in list(ws.tables.values()):
         new = shift_range(table.ref, axis, idx, n, delete)
-        if new and new != table.ref:
+        if new is None:
+            report["tables"][table.displayName] = {"from": table.ref, "to": None}
+            del ws.tables[table.name]
+        elif new != table.ref:
             report["tables"][table.displayName] = {"from": table.ref,
                                                    "to": new}
             table.ref = new
+            shift_auto_filter(table.autoFilter, axis, idx, n, delete)
+            table.sortState = shift_sort_state(table.sortState, axis, idx, n, delete)
 
     # 8. workbook-scope defined names
     for name, dn in wb.defined_names.items():

@@ -6,16 +6,20 @@ from __future__ import annotations
 
 def iter_all_paragraphs(doc, include_headers_footers: bool = True):
     """Yield every paragraph in body, tables (recursively), headers, footers."""
-    yield from _iter_container(doc)
+    seen = set()
+    containers = [doc]
     if include_headers_footers:
         for section in doc.sections:
-            for part in (
-                section.header, section.footer,
-                section.first_page_header, section.first_page_footer,
-                section.even_page_header, section.even_page_footer,
-            ):
-                if part is not None:
-                    yield from _iter_container(part)
+            containers.extend((section.header, section.footer, section.first_page_header,
+                               section.first_page_footer, section.even_page_header,
+                               section.even_page_footer))
+    for container in containers:
+        if container is None:
+            continue
+        for paragraph in _iter_container(container):
+            if paragraph._p not in seen:
+                seen.add(paragraph._p)
+                yield paragraph
 
 
 def _iter_container(container):
@@ -50,45 +54,60 @@ def iter_part_roots(doc):
 
 
 def replace_in_paragraph(para, old: str, new: str) -> int:
-    """Replace `old` with `new` in a paragraph, preserving run formatting.
-
-    Strategy: first replace occurrences fully contained in a single run
-    (formatting fully preserved). If the needle spans multiple runs, the
-    matched runs are collapsed: the replacement inherits the formatting of
-    the run where the match starts. Returns number of replacements made.
-    """
-    if not old or old not in para.text:
+    """Edit original matches once; never join text across structural boundaries."""
+    import re
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    if not old:
         return 0
-    count = 0
-    # Pass 1: within-run replacements.
-    for run in para.runs:
-        if old in run.text:
-            count += run.text.count(old)
-            run.text = run.text.replace(old, new)
-    # Pass 2: cross-run occurrences.
-    while old in para.text:
-        runs = para.runs
-        # Map paragraph text offsets to (run_index, offset_in_run).
-        full = "".join(r.text for r in runs)
-        start = full.find(old)
-        if start < 0:
-            break
-        end = start + len(old)
-        pos = 0
-        spans = []  # (run_idx, cut_start, cut_end) portions inside the match
-        for i, r in enumerate(runs):
-            r_start, r_end = pos, pos + len(r.text)
-            if r_end > start and r_start < end:
-                spans.append((i, max(start, r_start) - r_start,
-                              min(end, r_end) - r_start))
-            pos = r_end
-        first = True
-        for i, cs, ce in spans:
-            t = runs[i].text
-            if first:
-                runs[i].text = t[:cs] + new + t[ce:]
+    segments, current = [], []
+    def boundary():
+        if current:
+            segments.append(list(current))
+            current.clear()
+    for child in para._p:
+        if child.tag == qn("w:pPr"):
+            continue
+        if child.tag != qn("w:r"):
+            boundary()
+            continue
+        for node in child:
+            if node.tag == qn("w:t"):
+                current.append(node)
+            elif node.tag != qn("w:rPr"):
+                boundary()
+    boundary()
+    plans = []
+    for nodes in segments:
+        text = "".join(node.text or "" for node in nodes)
+        matches = list(re.finditer(re.escape(old), text))
+        plans.append((nodes, matches))
+    count = sum(len(matches) for _, matches in plans)
+    # An unsupported visible match must not be silently skipped alongside safe ones.
+    if count != len(list(re.finditer(re.escape(old), para.text))):
+        raise ValueError("Replacement crosses a tab, break, field, drawing or unsupported paragraph structure; edit a plain-text span instead")
+    for nodes, matches in plans:
+        offsets, pos = [], 0
+        for node in nodes:
+            offsets.append((node, pos, pos + len(node.text or "")))
+            pos = offsets[-1][2]
+        for match in reversed(matches):
+            first = True
+            for node, start, end in offsets:
+                if end <= match.start() or start >= match.end():
+                    continue
+                a, b = max(start, match.start()) - start, min(end, match.end()) - start
+                text = (node.text or "")[:a] + (new if first else "") + (node.text or "")[b:]
+                pieces = re.split(r"([\t\n])", text.replace("\r\n", "\n").replace("\r", "\n"))
+                node.text = pieces[0]
+                node.set(qn("xml:space"), "preserve")
+                previous = node
+                for piece in pieces[1:]:
+                    element = OxmlElement("w:tab" if piece == "\t" else "w:br" if piece == "\n" else "w:t")
+                    if element.tag == qn("w:t"):
+                        element.text = piece
+                        element.set(qn("xml:space"), "preserve")
+                    previous.addnext(element)
+                    previous = element
                 first = False
-            else:
-                runs[i].text = t[:cs] + t[ce:]
-        count += 1
     return count

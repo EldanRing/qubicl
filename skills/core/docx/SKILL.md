@@ -19,3 +19,13 @@ Useful helpers beneath `<resourceRoot>/scripts/`:
 Read `references/revisions-and-comments.md` only for tracked-change or comment work.
 
 Inspect before editing, write to a new output unless in-place work was requested, and validate after every mutation. On workstation computers, use LibreOffice for a final PDF render when visual layout matters; on computer computers, report that structured DOCX operations work but office rendering may be unavailable. Preserve unknown OOXML parts whenever a helper supports doing so.
+
+Use the common rendering receipt for PDF, DOCX, XLSX and PPTX:
+`/opt/qubicl/skills-venv/bin/python /opt/qubicl/artifact-render.py FILE --outdir DIR`.
+Each invocation captures its source, uses an isolated Office profile, and writes a unique
+run directory with PDF, exact numbered PNGs and `manifest.json`. Read `sourceSha256`,
+`pages`, `warnings` and `validation`, then inspect the generated pages. Old previews
+are never returned as this run's outputs. `visuallyInspected: false` is intentional:
+the tool renders; the agent performs visual review. Office rendering needs workstation.
+
+Text replacements use original matches once and preserve drawings and run properties. Edits across unsupported tabs/breaks/field structures fail explicitly. Comment anchors split text without duplicating inline objects. Ordinary reading reports `completeFinalView: false` and revision warnings when tracked changes are present, including tables and headers; do not present that extraction as the complete revised document. Resolve revisions on a copy for a final/original reading, and retain warnings for unsupported revision types.

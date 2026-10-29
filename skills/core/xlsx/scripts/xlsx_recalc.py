@@ -25,29 +25,22 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
+import runpy
 import json
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 
+def artifact_helpers():
+    return runpy.run_path(os.environ.get('QUBICL_ARTIFACT_RENDERER', '/opt/qubicl/artifact-render.py'))
+
+
 def count_cached(path):
-    """Number of formula cells with a cached value present."""
-    from openpyxl import load_workbook
-    wb_f = load_workbook(path, data_only=False)
-    wb_v = load_workbook(path, data_only=True)
-    formulas = cached = 0
-    for name in wb_f.sheetnames:
-        ws_f, ws_v = wb_f[name], wb_v[name]
-        for row in ws_f.iter_rows():
-            for cell in row:
-                if isinstance(cell.value, str) and cell.value.startswith("="):
-                    formulas += 1
-                    if ws_v[cell.coordinate].value is not None:
-                        cached += 1
-    return formulas, cached
+    result = artifact_helpers()['workbook_validation'](path)
+    return result['formulaCells'], result['withCachedValues']
 
 
 def main(argv=None):
@@ -76,28 +69,32 @@ def main(argv=None):
         }, ensure_ascii=False))
         return 0
 
+    helper = artifact_helpers()
     with tempfile.TemporaryDirectory() as tmp:
-        proc = subprocess.run(
-            [soffice, "--headless", "--calc", "--convert-to", "xlsx:Calc "
-             "MS Excel 2007 XML", "--outdir", tmp, str(src)],
-            capture_output=True, text=True, encoding="utf-8",
-            timeout=args.timeout,
-            env={"HOME": tmp, "PATH": Path(soffice).parent.as_posix()
-                 + ":/usr/bin:/bin"})
-        produced = Path(tmp) / (src.stem + ".xlsx")
-        if proc.returncode != 0 or not produced.exists():
-            print(json.dumps({"ok": False,
-                              "error": "soffice conversion failed",
-                              "stderr": proc.stderr.strip()[-500:]}),
-                  file=sys.stderr)
-            return 1
-        formulas, cached = count_cached(produced)
+        captured = Path(tmp) / 'source.xlsx'
+        shutil.copyfile(src, captured)
+        source_hash = helper['sha256'](captured)
+        produced = helper['convert_office'](captured, Path(tmp) / 'converted', 'xlsx:Calc MS Excel 2007 XML', args.timeout)
+        validation = helper['workbook_validation'](produced)
+        validation.update(helper['workbook_changes'](captured, produced))
         dest = Path(args.out).resolve() if args.out else src
-        shutil.copyfile(produced, dest)
+        # Do not overwrite an input changed by another editor during conversion.
+        if dest == src and helper['sha256'](src) != source_hash:
+            raise RuntimeError('Source workbook changed during recalculation; original preserved')
+        with tempfile.NamedTemporaryFile(prefix='.qubicl-recalc-', dir=dest.parent, delete=False) as staged:
+            staged_path = Path(staged.name)
+        try:
+            shutil.copyfile(produced, staged_path)
+            os.replace(staged_path, dest)
+        finally:
+            staged_path.unlink(missing_ok=True)
 
     print(json.dumps({
         "ok": True, "recalculated": True, "output": str(dest),
-        "formula_cells": formulas, "with_cached_values": cached,
+        "formula_cells": validation["formulaCells"], "with_cached_values": validation["withCachedValues"],
+        "sourceSha256": source_hash, "outputSha256": helper["sha256"](dest),
+        "validation": validation,
+        "warnings": ["Recalculated does not mean error-free or faithful to Excel. Review formulaErrors, missingFormulaResults and changedPackageParts; inspect rendered pages."],
     }, ensure_ascii=False))
     return 0
 

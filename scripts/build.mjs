@@ -107,6 +107,7 @@ await Promise.all([
   cp(new URL('../images/computer/x11vnc-relay.sh', import.meta.url), new URL('computer/x11vnc-relay.sh', assets)),
   cp(new URL('../images/computer/libreoffice-registrymodifications.xcu', import.meta.url), new URL('computer/libreoffice-registrymodifications.xcu', assets)),
   cp(new URL('../packages/control/src/desktop-helper.py', import.meta.url), new URL('computer/desktop-helper.py', assets)),
+  cp(new URL('../packages/control/src/artifact-render.py', import.meta.url), new URL('computer/artifact-render.py', assets)),
   cp(new URL('../packages/control/src/web-provider.py', import.meta.url), new URL('computer/web-provider.py', assets)),
   cp(new URL('../images/computer/web-requirements.txt', import.meta.url), new URL('computer/web-requirements.txt', assets)),
   cp(new URL('../images/computer/WEB_THIRD_PARTY_NOTICES.txt', import.meta.url), new URL('computer/WEB_THIRD_PARTY_NOTICES.txt', assets)),

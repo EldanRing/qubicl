@@ -12,3 +12,5 @@ For reproducible scene construction, write a Python script and run `blender --ba
 Use `open_desktop_application` with `blender` for interactive inspection. Blender's custom interface may expose no useful AT-SPI tree: use the explicit screenshot fallback, observed window geometry and bounded coordinate actions. A visible viewport does not prove a final render is correct.
 
 A workstation has CPU rendering; GPU access is not promised. Start with a small representative render and choose resolution, samples and animation length for the user's task. Keep external textures linked under the durable home or pack them into the `.blend` when portability is requested. Check a rendered frame and the saved scene before delivering.
+
+The Debian Blender build may omit OpenImageDenoise. For portable CPU Cycles scripts, set `scene.cycles.use_denoising = False` unless support is confirmed; a missing denoiser can otherwise fail an ordinary render.
