@@ -257,7 +257,7 @@ export const toolDefinitions = {
     lease: true,
   },
   list_ports: {
-    description: 'List computer-user TCP listeners; host and control ports are excluded.',
+    description: 'List computer-user TCP listeners with observed PID/process/session metadata and managed task, terminal or application ownership when available. Unknown ownership is explicit; commands and lease credentials are excluded.',
     input: observationOnly,
     lease: false,
   },
@@ -271,7 +271,7 @@ export const toolDefinitions = {
     lease: true,
   },
   list_previews: {
-    description: 'List active previews without secret entry tokens.',
+    description: 'List preview registrations without secret entry tokens and refresh listener observations. Reports inspection failures and pending cleanup separately; a registered listener is not an HTTP reachability check.',
     input: observationOnly,
     lease: false,
   },

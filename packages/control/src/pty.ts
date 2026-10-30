@@ -130,9 +130,11 @@ export class PtyManager {
 
   list(): PtySummary[] { return [...this.sessions.values()].map(summary).sort((a, b) => a.startedAt.localeCompare(b.startedAt)); }
 
-  listForManagement(): Array<{ id: string; exitCode?: number; signal?: NodeJS.Signals; status: 'running' | 'exited' | 'signaled'; startedAt: string; finishedAt?: string; label: string; lifecycle: 'session' | 'task'; owner: 'agent' | 'computer'; ownerGeneration: number }> {
+  listForManagement(): Array<{ id: string; pid?: number; kind: 'terminal'; exitCode?: number; signal?: NodeJS.Signals; status: 'running' | 'exited' | 'signaled'; startedAt: string; finishedAt?: string; label: string; lifecycle: 'session' | 'task'; owner: 'agent' | 'computer'; ownerGeneration: number }> {
     return [...this.sessions.values()].map((session) => ({
       id: session.id,
+      kind: 'terminal' as const,
+      ...(session.finishedAt === undefined && session.child.pid ? { pid: session.child.pid } : {}),
       status: session.finishedAt === undefined ? 'running' : session.signal ? 'signaled' : 'exited',
       startedAt: new Date(session.startedAt).toISOString(),
       ...(session.finishedAt ? { finishedAt: new Date(session.finishedAt).toISOString() } : {}),

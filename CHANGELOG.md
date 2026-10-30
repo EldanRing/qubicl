@@ -6,6 +6,11 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Port inspection reports available process/session metadata and managed task,
+  terminal or desktop-app ownership, using the workload identity for readable
+  socket ownership and explicit unknowns when attribution is unavailable.
+  Preview listings separate registration from refreshed listener state, failed
+  probes and pending cleanup without implying HTTP reachability.
 - Clipboard reads negotiate available text formats and distinguish unavailable
   text from known empty text, with selection-owner status when detectable.
   Immutable Unicode-safe captures now provide sizes, offsets and continuation

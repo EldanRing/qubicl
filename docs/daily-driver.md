@@ -38,6 +38,13 @@ and view-only setting after refresh, automatic release or operator release.
 
 ## Ports
 
+`list_ports` returns observed process IDs, names, process groups and OS sessions
+where readable. It identifies managed tasks, services, terminals and desktop apps
+by their existing IDs, including child-process listeners. Missing process metadata
+or an unavailable management inventory yields explicit unknown ownership; known
+unmanaged listeners remain distinguishable. It does not expose commands, process
+environments or lease credentials.
+
 Agents can discover only listeners owned by the computer user, then explicitly
 publish one with `publish_port`. The returned owner URL is routed through the
 existing localhost gateway on a publication-specific origin, supports ordinary
@@ -55,6 +62,13 @@ apps. Session-scoped apps still stop with their lease, and their previews disapp
 when the listener stops. Explicit unpublish, runtime shutdown and policy revocation
 can revoke publications; file and share expiry remain independent of input ownership.
 The preview never binds the computer port directly to the host.
+
+`list_previews` distinguishes published registration from current listener state.
+Its liveness record includes the observation time, successful/failed inspection,
+and pending cleanup when a listener is absent. The monitor normally checks every
+two seconds; failed inspections defer cleanup until a successful check. HTTP
+reachability remains explicitly unprobed: listing previews sends no requests to
+the application, and a listening socket alone does not prove it serves HTTP.
 
 ## Optional remote gateway
 

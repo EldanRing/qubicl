@@ -10,6 +10,16 @@ import { staticFilePreview } from './static-file-preview.js';
 
 export interface PortSource { listPorts(): Promise<ListeningPort[]> }
 
+export interface PreviewLiveness {
+  listenerState: 'listening' | 'not-listening' | 'unknown';
+  checkedAt: string | null;
+  probe: 'listener_inventory';
+  probeStatus: 'succeeded' | 'failed' | 'not-run';
+  httpReachability: 'unprobed';
+  cleanupIntervalMs: number;
+  cleanupPending: boolean;
+}
+
 interface PublicationBase {
   id: string;
   createdAt: string;
@@ -65,6 +75,7 @@ export interface ManagementPreviewSummary {
   expiresAt?: string;
   shareExpiresAt?: string;
   port?: number;
+  liveness?: PreviewLiveness;
 }
 
 export interface ManagementPreviewTicket {
@@ -106,6 +117,7 @@ export class PreviewManager {
   private readonly expiryTimers = new Map<string, NodeJS.Timeout>();
   private readonly shareExpiryTimers = new Map<string, NodeJS.Timeout>();
   private portMonitor: NodeJS.Timeout | undefined;
+  private readonly liveness = new Map<string, PreviewLiveness>();
 
   constructor(
     private readonly ports: PortSource,
@@ -126,7 +138,7 @@ export class PreviewManager {
     return (await this.ports.listPorts()).filter(({ port }) => published.has(port));
   }
 
-  list(): Array<{ id: string; port: number; createdAt: string; lifetime: 'while-listening'; shareExpiresAt?: string; url: string; remoteUrl?: string }> {
+  list(): Array<{ id: string; port: number; createdAt: string; lifetime: 'while-listening'; shareExpiresAt?: string; url: string; remoteUrl?: string; registrationState: 'published'; liveness: PreviewLiveness }> {
     this.prune();
     const access = this.previewAccess();
     return [...this.publications.values()]
@@ -134,6 +146,8 @@ export class PreviewManager {
       .map((publication) => ({
         id: publication.id,
         port: publication.port,
+        registrationState: 'published',
+        liveness: this.publicationLiveness(publication),
         createdAt: publication.createdAt,
         lifetime: 'while-listening',
         ...(publication.share ? { shareExpiresAt: publication.share.expiresAt } : {}),
@@ -154,7 +168,7 @@ export class PreviewManager {
         lifetime: publication.kind === 'port' ? 'while-listening' : 'expiring',
         ...(publication.kind === 'file' ? { expiresAt: publication.expiresAt } : {}),
         ...(publication.kind === 'port' && publication.share ? { shareExpiresAt: publication.share.expiresAt } : {}),
-        ...(publication.kind === 'port' ? { port: publication.port } : {}),
+        ...(publication.kind === 'port' ? { port: publication.port, liveness: this.publicationLiveness(publication) } : {}),
       }));
   }
 
@@ -195,6 +209,7 @@ export class PreviewManager {
       createdAt: now.toISOString(),
     };
     this.publications.set(id, publication);
+    this.liveness.set(id, this.listenerObservation(true));
     this.schedulePortMonitor();
     const access = this.previewAccess();
     const legacyShare = legacyShareExpiresInSeconds !== undefined && access.remoteBaseUrl
@@ -296,6 +311,7 @@ export class PreviewManager {
   unpublish(id: string): boolean {
     const removed = this.publications.delete(id);
     if (removed) {
+      this.liveness.delete(id);
       this.clearManagementAccess(id);
       this.closeConnections(id);
       this.clearExpiry(id);
@@ -632,11 +648,40 @@ export class PreviewManager {
     this.shareExpiryTimers.delete(id);
   }
 
+  /** Explicit inspection refreshes health while keeping registration distinct
+   * from the monitor's next successful cleanup pass. It sends no HTTP request. */
+  async inspect(): Promise<ReturnType<PreviewManager['list']>> {
+    await this.inspectListeners();
+    return this.list();
+  }
+
+  private listenerObservation(listening: boolean | undefined): PreviewLiveness {
+    return { listenerState: listening === undefined ? 'unknown' : listening ? 'listening' : 'not-listening',
+      checkedAt: new Date().toISOString(), probe: 'listener_inventory', probeStatus: listening === undefined ? 'failed' : 'succeeded',
+      httpReachability: 'unprobed', cleanupIntervalMs: PORT_MONITOR_INTERVAL_MS, cleanupPending: listening === false };
+  }
+
+  private publicationLiveness(publication: PortPublication): PreviewLiveness {
+    return { ...this.liveness.get(publication.id) ?? { listenerState: 'unknown', checkedAt: null, probe: 'listener_inventory',
+      probeStatus: 'not-run', httpReachability: 'unprobed', cleanupIntervalMs: PORT_MONITOR_INTERVAL_MS, cleanupPending: false } };
+  }
+
+  private async inspectListeners(): Promise<Set<number> | undefined> {
+    const inspected = [...this.publications.values()].filter((publication): publication is PortPublication => publication.kind === 'port');
+    if (!inspected.length) return new Set();
+    let activePorts: Set<number> | undefined;
+    try { activePorts = new Set((await this.ports.listPorts()).map(({ port }) => port)); }
+    catch { /* Failed inspection does not establish that an application stopped. */ }
+    for (const publication of inspected) {
+      if (this.publications.get(publication.id) === publication) this.liveness.set(publication.id, this.listenerObservation(activePorts?.has(publication.port)));
+    }
+    return activePorts;
+  }
+
   private async removeStoppedPortPublications(): Promise<void> {
     const inspected = [...this.publications.values()].filter((publication) => publication.kind === 'port');
-    let activePorts: Set<number>;
-    try { activePorts = new Set((await this.ports.listPorts()).map(({ port }) => port)); }
-    catch { return; } // Failed inspection establishes no evidence that an app stopped.
+    const activePorts = await this.inspectListeners();
+    if (!activePorts) return;
     for (const publication of inspected) {
       if (publication.kind === 'port' && this.publications.get(publication.id) === publication && !activePorts.has(publication.port)) this.unpublish(publication.id);
     }

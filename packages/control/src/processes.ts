@@ -205,6 +205,8 @@ export interface CompatibilityProcessOutput extends CompatibilityProcessSummary 
 
 /** Safe host-operator metadata. It deliberately excludes commands, paths, output, and lease proofs. */
 export interface ManagementProcessSummary {
+  pid?: number;
+  kind?: 'process' | 'terminal';
   service?: ServiceState;
   id: string;
   exitCode?: number;
@@ -1866,6 +1868,7 @@ function managementSummary(managed: ManagedProcess): ManagementProcessSummary {
           : 'exited';
   return {
     id: managed.id,
+    ...(managed.child?.pid && !managed.completed ? { pid: managed.child.pid } : {}),
     label: managed.label,
     lifecycle: managed.lifecycle,
     status,

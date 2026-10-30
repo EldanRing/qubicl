@@ -32,7 +32,7 @@ import { withFileMutation } from './file-mutations.js';
 import { BrowserManager, type BrowserComputerAction, type BrowserHealth, type BrowserMouseButton, type BrowserViewerResult, type BrowserDiagnosticsInput } from './browser.js';
 import { desktopHelperEnvironment } from './environments.js';
 import { RemoteBrokerManager, RemoteBrowserManager, RemoteDesktopApplicationManager, RemoteDesktopManager, RemotePortManager, RemoteProcessManager, RemoteWebManager, type RemoteProcessStatus } from './remote-runners.js';
-import { discoverListeningPorts } from './ports.js';
+import { discoverListeningPorts, attributeListeningPorts } from './ports.js';
 import { PreviewManager, previewAccessFileSource, type ManagementPreviewSummary, type ManagementPreviewTicket, type PortSource } from './previews.js';
 import { AuditLog, contentAuditMetadata, toolAuditMetadata } from './audit.js';
 import { SkillManager } from './skills.js';
@@ -403,8 +403,13 @@ export class ToolExecutor {
         return respond(await this.processes.write(input.processId as string, input.input as string, input.close as boolean, input.yieldTimeMs as number, owner!));
       case 'stop_process':
         return respond(await this.processes.stop(input.processId as string, owner!, input.signal as StopSignal));
-      case 'list_ports':
-        return respond({ ports: await this.previews.listPorts() });
+      case 'list_ports': {
+        const [ports, processes, applications] = await Promise.all([
+          this.previews.listPorts(), Promise.resolve().then(() => this.processes.listForManagement()).catch(() => null),
+          Promise.resolve().then(() => this.desktopApplications.list()).catch(() => null),
+        ]);
+        return respond({ ports: attributeListeningPorts(ports, processes, applications), observedAt: new Date().toISOString() });
+      }
       case 'publish_port': {
         const publication = await this.previews.publish(input.port as number, input.expiresInSeconds as number | undefined);
         if (input.openInBrowser) {
@@ -418,7 +423,7 @@ export class ToolExecutor {
         return respond(publication);
       }
       case 'list_previews':
-        return respond({ previews: this.previews.list() });
+        return respond({ previews: await this.previews.inspect() });
       case 'unpublish_port':
         return respond({ publicationId: input.publicationId, unpublished: this.previews.unpublish(input.publicationId as string) });
       case 'share_preview':
@@ -1106,7 +1111,7 @@ function configuredPreviewManager(): PreviewManager {
   const executorKey = process.env.QUBICL_EXECUTOR_KEY;
   const source: PortSource = executorUrl && executorKey
     ? new RemotePortManager(executorUrl, executorKey)
-    : { listPorts: () => discoverListeningPorts(process.getuid?.() ?? 1000) };
+    : { listPorts: () => discoverListeningPorts(Number(process.env.QUBICL_HOST_UID ?? process.getuid?.() ?? 1000), Number(process.env.QUBICL_HOST_GID ?? process.getgid?.() ?? 1000)) };
   const id = process.env.QUBICL_ID ?? 'unknown';
   return new PreviewManager(
     source,

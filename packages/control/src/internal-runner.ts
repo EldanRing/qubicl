@@ -212,7 +212,7 @@ async function handleExecutor(
       send(response, 200, await processes.stopAllForManagement());
       return;
     case 'GET /v1/ports':
-      send(response, 200, { ports: await discoverListeningPorts(requiredIdentity('QUBICL_HOST_UID')) });
+      send(response, 200, { ports: await discoverListeningPorts(requiredIdentity('QUBICL_HOST_UID'), requiredIdentity('QUBICL_HOST_GID')) });
       return;
     default:
       throw new QubiclError('not_found', 'Internal runner route not found.', 404);

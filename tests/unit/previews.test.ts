@@ -10,6 +10,32 @@ const localBase = 'http://preview-example.localhost:3211/computers/example/previ
 const internalBase = 'http://gateway:3211/computers/example/previews';
 const remoteBase = 'https://preview-example.remote.test/computers/example/previews';
 
+test('preview inspection distinguishes registration listener absence and failed probes before cleanup', async (context) => {
+  let state: 'listening' | 'stopped' | 'failed' = 'listening';
+  const manager = new PreviewManager({ listPorts: async () => {
+    if (state === 'failed') throw new Error('temporary inspection failure');
+    return state === 'listening' ? [{ port: 3000, address: 'loopback', protocol: 'tcp' }] : [];
+  } }, '127.0.0.1', localBase, internalBase);
+  context.after(() => manager.clear());
+  await manager.publish(3000);
+  assert.equal((await manager.inspect())[0]!.liveness.listenerState, 'listening');
+  state = 'stopped';
+  const stopped = (await manager.inspect())[0]!;
+  assert.equal(stopped.registrationState, 'published');
+  assert.equal(stopped.liveness.listenerState, 'not-listening');
+  assert.equal(stopped.liveness.cleanupPending, true);
+  assert.equal(stopped.liveness.httpReachability, 'unprobed');
+  state = 'failed';
+  const unknown = (await manager.inspect())[0]!;
+  assert.equal(unknown.liveness.listenerState, 'unknown');
+  assert.equal(unknown.liveness.probeStatus, 'failed');
+  assert.equal(unknown.liveness.cleanupPending, false);
+  assert.equal(manager.list().length, 1, 'failed inspection must preserve the registration');
+  state = 'stopped';
+  await (manager as unknown as { removeStoppedPortPublications(): Promise<void> }).removeStoppedPortPublications();
+  assert.equal(manager.list().length, 0);
+});
+
 test('preview publication adds a remote URL without replacing existing local and browser URLs', async () => {
   const manager = new PreviewManager(
     { listPorts: async () => [{ port: 3000, address: 'loopback', protocol: 'tcp' }] },
