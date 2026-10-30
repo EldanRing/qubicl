@@ -833,9 +833,14 @@ export function isToolName(value: string): value is ToolName {
 }
 
 export function jsonSchemaForTool(name: ToolName, leaseTransparent = false): Record<string, unknown> {
-  return modelCompatibleJsonSchema(
+  const schema = modelCompatibleJsonSchema(
     z.toJSONSchema(modelRuntimeSchemaForTool(name, leaseTransparent), { target: 'draft-7', io: 'input' }),
   ) as Record<string, unknown>;
+  if (leaseTransparent) {
+    delete (schema.properties as Record<string, unknown>)?.lease;
+    if (Array.isArray(schema.required)) schema.required = schema.required.filter((key) => key !== 'lease');
+  }
+  return schema;
 }
 
 export interface ModelInputSchema {
@@ -1094,7 +1099,10 @@ function modelRuntimeSchemaForTool(name: ToolName, leaseTransparent: boolean): z
   const runtime = toolDefinitions[name].input;
   if (!leaseTransparent) return runtime;
   const object = runtime as z.ZodObject;
-  return Object.hasOwn(object.shape, 'lease') ? object.omit({ lease: true }) : runtime;
+  // Keep cross-field refinements: omitting a key from a refined object is not
+  // supported by Zod. The bridge supplies the real proof after model validation;
+  // callers cannot supply one, and the JSON projection hides this absent field.
+  return Object.hasOwn(object.shape, 'lease') ? object.safeExtend({ lease: z.never().optional() }) : runtime;
 }
 
 export type McpToolContent =

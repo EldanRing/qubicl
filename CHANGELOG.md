@@ -30,6 +30,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Open Terminal and transparent-lease MCP catalogs handle desktop tools with
+  cross-field validation, preserving those checks without requiring client lease
+  proofs or failing tool discovery.
 - PDF attachment extraction retains every duplicate-name payload, uses distinct
   safe filenames, refuses existing destinations and reports source names, payload
   indices and hashes. Metadata/attachment edits retain the full document, original

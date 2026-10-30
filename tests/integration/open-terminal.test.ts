@@ -10,7 +10,7 @@ import { OpenTerminalCompatibility } from '@qubicl/control/open-terminal';
 import { ToolExecutor } from '@qubicl/control/executor';
 import { PreviewManager } from '../../packages/control/dist/previews.js';
 import { QubiclError } from '../../packages/control/dist/errors.js';
-import type { BrowserManager } from '@qubicl/control/browser';
+import { BrowserManager } from '@qubicl/control/browser';
 import { enabledToolNames, PRESET_DEFINITIONS } from '@qubicl/core';
 import { BoundedFileSystem, type BoundedFileHookEvent } from '@qubicl/control/bounded-files';
 import { unzipSync } from 'fflate';
@@ -35,7 +35,7 @@ test('Open Terminal compatibility provides native files through a transparent fe
     'https://preview-test.example.test/computers/test/previews',
   );
   const browserPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+XZRjCAAAAABJRU5ErkJggg==', 'base64');
-  const browser = {
+  const browser = Object.assign(new BrowserManager(false, { home }), {
     count: () => 1,
     shutdown: async () => undefined,
     navigate: async (url: string) => ({ url, title: url }),
@@ -47,7 +47,7 @@ test('Open Terminal compatibility provides native files through a transparent fe
       title: 'Example',
       fullPage: false,
     }),
-  } as unknown as BrowserManager;
+  });
   const web = {
     search: async ({ query, limit }: { query: string; limit: number }) => ({ query, provider: 'ddgs', results: Array.from({ length: limit }, (_, index) => ({ title: `Result ${index + 1}`, url: `https://example.com/${index + 1}`, description: 'Keyless search result' })) }),
     extract: async ({ url }: { url: string }) => ({ finalUrl: url, contentType: 'text/html', extractionMethod: 'local-html', content: 'locally extracted', truncated: false }),
@@ -108,7 +108,7 @@ test('Open Terminal compatibility provides native files through a transparent fe
   });
   assert.equal(publication.status, 200);
   assert.deepEqual(await json(`${base}/ports`), {
-    ports: [{ port: previewPort, address: 'loopback', protocol: 'tcp', pid: process.pid, process: 'test-server' }],
+    ports: [{ port: previewPort, address: 'loopback', protocol: 'tcp', pid: process.pid, process: 'test-server', ownership: { status: 'unmanaged' } }],
   });
   const publishedProxy = await fetch(`${base}/proxy/${previewPort}/hello?answer=42`);
   assert.equal(publishedProxy.status, 200);

@@ -170,6 +170,18 @@ test('model-facing schemas retain date-time semantics and Zod defaults without l
   assert.equal(advertised.properties.lease.properties.expiresAt.pattern, undefined);
   assert.equal(advertised.$schema, undefined);
   assert.deepEqual(advertised.required, ['lease', 'command']);
+
+  for (const [name, valid, invalid] of [
+    ['desktop_window_action', { windowId: 42, action: 'reveal', geometryToken: 'a'.repeat(24), region: { x: 0, y: 0, width: 100, height: 100 } }, { windowId: 42, action: 'reveal' }],
+    ['desktop_element_action', { ref: `${'a'.repeat(24)}e1`, action: 'set_text', text: 'Hello', textMethod: 'application' }, { ref: `${'a'.repeat(24)}e1`, action: 'focus', textMethod: 'application' }],
+  ] as const) {
+    const projected = modelInputSchemaForTool(name, true)['~standard'];
+    const accepted = await projected.validate(valid);
+    assert.deepEqual('value' in accepted ? accepted.value : accepted.issues, { ...valid, observe: 'none' });
+    assert.ok((await projected.validate(invalid)).issues?.length, `${name} retains cross-field validation`);
+    assert.ok((await projected.validate({ ...valid, lease: { id: 'a'.repeat(32), generation: 1, epoch: 'b'.repeat(16) } })).issues?.length, 'the bridge alone supplies lease proofs');
+    assert.equal(toolDefinitions[name].input.safeParse(valid).success, false, 'direct callers still require a lease');
+  }
 });
 
 test('Open Terminal compatibility owns leases and exposes the remaining exact tool catalog', () => {

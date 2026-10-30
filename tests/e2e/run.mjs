@@ -424,7 +424,9 @@ try {
   assert.equal((await fetch(`${base}/openapi.json`, { headers: { origin: 'http://example.com', authorization: `Bearer ${token}` } })).status, 403);
   const openTerminalConfig = await fetch(`${base}/open-terminal/api/config`, { headers: { authorization: `Bearer ${token}` } }).then((response) => response.json());
   assert.deepEqual(openTerminalConfig.features, { terminal: false, notebooks: false, system: true });
-  const openTerminalSpec = await fetch(`${base}/open-terminal/openapi.json`, { headers: { authorization: `Bearer ${token}` } }).then((response) => response.json());
+  const openTerminalResponse = await fetch(`${base}/open-terminal/openapi.json`, { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(openTerminalResponse.status, 200, 'Open Terminal tool catalog must be available');
+  const openTerminalSpec = await openTerminalResponse.json();
   assert.equal(Object.hasOwn(openTerminalSpec.paths, '/v1/tools/acquire_lease'), false);
   assert.equal(Object.hasOwn(openTerminalSpec.paths, '/v1/tools/web_search'), true);
   assert.equal(Object.hasOwn(openTerminalSpec.paths, '/v1/tools/web_extract'), true);
