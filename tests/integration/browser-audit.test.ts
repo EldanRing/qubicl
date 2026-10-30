@@ -79,4 +79,7 @@ test('a dialog cancels queued operations that have not started instead of dispat
   finish();
   await internal.enqueue(async () => undefined);
   assert.equal(secondDispatches, 0);
+  const receipts = (await manager.listDialogs()).operations;
+  assert.ok(receipts.some((item) => item.dispatch === 'started' && item.status === 'completed'));
+  assert.ok(receipts.some((item) => item.dispatch === 'not-started' && item.status === 'interrupted'));
 });

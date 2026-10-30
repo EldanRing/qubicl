@@ -28,7 +28,7 @@ import {
 import { readEffectiveResourceLimits } from './resource-limits.js';
 import { developmentComputerManifest } from './image-manifest.js';
 import { withFileMutation } from './file-mutations.js';
-import { BrowserManager, type BrowserComputerAction, type BrowserHealth, type BrowserMouseButton, type BrowserViewerResult } from './browser.js';
+import { BrowserManager, type BrowserComputerAction, type BrowserHealth, type BrowserMouseButton, type BrowserViewerResult, type BrowserDiagnosticsInput } from './browser.js';
 import { desktopHelperEnvironment } from './environments.js';
 import { RemoteBrokerManager, RemoteBrowserManager, RemoteDesktopApplicationManager, RemoteDesktopManager, RemotePortManager, RemoteProcessManager, RemoteWebManager, type RemoteProcessStatus } from './remote-runners.js';
 import { discoverListeningPorts } from './ports.js';
@@ -217,7 +217,13 @@ export class ToolExecutor {
   async call(name: ToolName, rawInput: unknown, context: ToolCallContext = {}): Promise<unknown> {
     const started = Date.now();
     try {
-      const executed = await this.executeCall(name, rawInput, context);
+      const executed = await this.executeCall(name, rawInput, context).catch((error: unknown) => {
+        if (name.startsWith('browser_') && error instanceof QubiclError && error.code === 'browser_waiting_for_dialog') {
+          return { status: 'awaiting_dialog', ...error.details, nextTool: 'browser_respond_dialog',
+            note: error.message };
+        }
+        throw error;
+      });
       if (toolDefinitions[name].lease && requiresStrictPostCallFence(name, rawInput)) {
         const proof = (rawInput as { lease: LeaseProof }).lease;
         try {
@@ -576,7 +582,7 @@ export class ToolExecutor {
       case 'browser_type':
         return respond(await runBrowser(() => this.browser.type(input.ref as string, input.text as string, input.submit as boolean, input.clear as boolean)));
       case 'browser_select':
-        return respond(await runBrowser(() => this.browser.select(input.ref as string, input.value as string)));
+        return respond(await runBrowser(() => this.browser.select(input.ref as string, input.value as string | string[])));
       case 'browser_press':
         return respond(await runBrowser(() => this.browser.press(input.key as string, input.ref as string | undefined)));
       case 'browser_scroll':
@@ -609,7 +615,7 @@ export class ToolExecutor {
       case 'browser_permissions':
         return respond(await runBrowser(() => this.browser.permissions(input.origin as string, input.permissions as string[], input.clear as boolean, input.scope as 'origin' | 'context')));
       case 'browser_diagnostics':
-        return respond(await runBrowser(() => this.browser.browserDiagnostics()));
+        return respond(await this.browser.browserDiagnostics(input as BrowserDiagnosticsInput));
       case 'browser_set_viewport':
         return respond(await runBrowser(() => this.browser.setViewport(input.width as number, input.height as number)));
       case 'browser_click_at':

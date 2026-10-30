@@ -82,7 +82,14 @@ interface PageState {
   title: string;
 }
 
-interface HistoryState extends PageState {
+interface PageActionState extends PageState {
+  actedOnTabId: string;
+  activeTabId: string | null;
+  openedTabs: Array<{ tabId: string; url: string }>;
+  openedTabsTruncated: boolean;
+}
+
+interface HistoryState extends PageActionState {
   navigation: { action: 'back' | 'forward' | 'reload'; status: 'committed' | 'not_observed'; waitTimedOut: boolean };
   loading: { waitUntil: 'domcontentloaded'; waitStatus: 'completed' | 'timed_out' | 'not_waited'; readyState: DocumentReadyState | 'unavailable' };
   observationComplete: boolean;
@@ -118,6 +125,34 @@ interface BrowserDialogRecord {
   message: string;
   defaultValue: string;
   openedAt: string;
+  tabId: string;
+  operationId?: string;
+}
+
+interface BrowserOperationReceipt {
+  operationId: string;
+  status: 'running' | 'awaiting_dialog' | 'completed' | 'interrupted' | 'failed';
+  dispatch: 'started' | 'not-started';
+  tabId?: string;
+  dialogId?: string;
+  error?: { code: string; message: string };
+}
+
+export interface BrowserDiagnosticsInput {
+  tabId?: string;
+  since?: string;
+  until?: string;
+  type?: 'console' | 'request-failed';
+  limit?: number;
+}
+
+interface BrowserDiagnostic {
+  at: string;
+  type: 'console' | 'request-failed';
+  detail: string;
+  tabId: string;
+  pageUrl: string;
+  source: { url: string; line?: number; column?: number };
 }
 
 export interface RenderedBrowserPage {
@@ -184,6 +219,7 @@ export class BrowserManager {
   private readonly publishViewerPointer: ((update: ViewerPointerUpdate) => Promise<void>) | undefined;
   private readonly pageLastActive = new Map<Page, number>();
   private readonly tabIds = new Map<Page, string>();
+  private readonly retainedTabIds = new WeakMap<Page, string>();
   private readonly trackedPages = new WeakSet<Page>();
   private contextPromise: Promise<BrowserContext> | undefined;
   private connectedBrowser: Browser | undefined;
@@ -202,10 +238,12 @@ export class BrowserManager {
   private readonly permissionGrants = new Map<string, string[]>();
   private dialogSequence = 0;
   private readonly dialogWaiters = new Set<(id: string) => void>();
+  private runningOperation: BrowserOperationReceipt | undefined;
+  private readonly dialogOperations = new Map<string, { receipt: BrowserOperationReceipt; settled: Promise<void> }>();
   private readonly downloads = new Map<string, BrowserDownloadRecord>();
   private readonly activeDownloads = new Map<string, Download>();
   private readonly dialogs = new Map<string, { record: BrowserDialogRecord; dialog: Dialog; page: Page }>();
-  private readonly diagnostics: Array<{ at: string; type: 'console' | 'request-failed'; detail: string }> = [];
+  private readonly diagnostics: BrowserDiagnostic[] = [];
 
   constructor(private readonly enabled: boolean, options: BrowserManagerOptions = {}) {
     this.home = resolve(options.home ?? DEFAULT_HOME);
@@ -286,7 +324,7 @@ export class BrowserManager {
     });
   }
 
-  upload(ref: string, paths: string[]): Promise<PageState & { uploaded: string[] }> {
+  upload(ref: string, paths: string[]): Promise<PageActionState & { uploaded: string[] }> {
     return this.enqueue(async () => {
       if (paths.length < 1 || paths.length > MAX_UPLOAD_FILES) throw new QubiclError('browser_upload_invalid', `Choose 1 through ${MAX_UPLOAD_FILES} files.`, 400);
       const selected: string[] = [];
@@ -299,17 +337,19 @@ export class BrowserManager {
         selected.push(canonical);
       }
       const page = await this.getPage();
+      const before = new Set(this.tabIds.keys());
       const locator = await this.referencedElement(ref);
       await this.dispatchInput(() => locator.setInputFiles(selected));
-      return { ...await pageState(page), uploaded: selected.map((path) => relative(this.home, path)) };
+      return { ...await this.actionState(page, before), uploaded: selected.map((path) => relative(this.home, path)) };
     });
   }
 
-  listDialogs(): Promise<{ dialogs: BrowserDialogRecord[] }> {
-    return Promise.resolve({ dialogs: [...this.dialogs.values()].map(({ record }) => ({ ...record })) });
+  listDialogs(): Promise<{ dialogs: BrowserDialogRecord[]; operations: BrowserOperationReceipt[] }> {
+    return Promise.resolve({ dialogs: [...this.dialogs.values()].map(({ record }) => ({ ...record })),
+      operations: [...this.dialogOperations.values()].map(({ receipt }) => ({ ...receipt })) });
   }
 
-  respondDialog(id: string, action: 'accept' | 'dismiss', promptText?: string): Promise<{ id: string; action: 'accepted' | 'dismissed' }> {
+  respondDialog(id: string, action: 'accept' | 'dismiss', promptText?: string): Promise<{ id: string; action: 'accepted' | 'dismissed'; tabId: string; operation?: BrowserOperationReceipt }> {
     return (async () => {
       const pending = this.dialogs.get(id);
       if (!pending) throw new QubiclError('browser_dialog_not_found', `Browser dialog ${id} is no longer pending.`, 404);
@@ -318,7 +358,16 @@ export class BrowserManager {
         else await pending.dialog.dismiss();
         this.dialogs.delete(id);
       });
-      return { id, action: action === 'accept' ? 'accepted' as const : 'dismissed' as const };
+      const tracked = pending.record.operationId ? this.dialogOperations.get(pending.record.operationId) : undefined;
+      if (tracked) {
+        if (tracked.receipt.status === 'awaiting_dialog') tracked.receipt.status = 'running';
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([tracked.settled, new Promise<void>((resolve) => { timer = setTimeout(resolve, 1_000); })]);
+        } finally { clearTimeout(timer); }
+      }
+      return { id, action: action === 'accept' ? 'accepted' as const : 'dismissed' as const,
+        tabId: pending.record.tabId, ...(tracked ? { operation: { ...tracked.receipt } } : {}) };
     })();
   }
 
@@ -352,8 +401,23 @@ export class BrowserManager {
     });
   }
 
-  browserDiagnostics(): Promise<{ events: Array<{ at: string; type: 'console' | 'request-failed'; detail: string }> }> {
-    return this.enqueue(async () => ({ events: this.diagnostics.slice(-MAX_BROWSER_DIAGNOSTICS) }));
+  browserDiagnostics(input: BrowserDiagnosticsInput = {}): Promise<{ events: BrowserDiagnostic[]; truncated: boolean }> {
+    const since = input.since === undefined ? -Infinity : Date.parse(input.since);
+    const until = input.until === undefined ? Infinity : Date.parse(input.until);
+    if (Number.isNaN(since) || Number.isNaN(until) || since > until) throw new QubiclError('browser_diagnostics_invalid_range', 'Choose a valid time range with since no later than until.');
+    const matching = this.diagnostics.filter((event) => (!input.tabId || event.tabId === input.tabId)
+      && (!input.type || event.type === input.type) && Date.parse(event.at) >= since && Date.parse(event.at) <= until);
+    const selected: BrowserDiagnostic[] = [];
+    const limit = Math.max(1, Math.min(input.limit ?? MAX_BROWSER_DIAGNOSTICS, MAX_BROWSER_DIAGNOSTICS));
+    let bytes = 0;
+    for (const event of matching.toReversed()) {
+      const size = Buffer.byteLength(JSON.stringify(event));
+      if (selected.length >= limit || bytes + size > MODEL_TEXT_BUDGET_BYTES - 128) break;
+      selected.unshift(event);
+      bytes += size + 1;
+    }
+    // Diagnostics remain readable while a page is waiting for a dialog.
+    return Promise.resolve({ events: selected, truncated: selected.length < matching.length });
   }
 
   setViewport(width: number, height: number): Promise<PageState & { viewport: { width: number; height: number; deviceScaleFactor: 1 }; geometryGeneration: number }> {
@@ -366,12 +430,13 @@ export class BrowserManager {
     });
   }
 
-  navigate(url: string): Promise<PageState> {
+  navigate(url: string): Promise<PageActionState> {
     return this.enqueue(async () => {
       const page = await this.getPage();
+      const before = new Set(this.tabIds.keys());
       await this.dispatchInput(() => page.goto(safeHttpUrl(url), { waitUntil: 'domcontentloaded', timeout: 30_000 }));
       this.clearReferences();
-      return pageState(page);
+      return this.actionState(page, before);
     });
   }
 
@@ -447,7 +512,7 @@ export class BrowserManager {
         'input:not([type=hidden])',
         'textarea',
         'select',
-        '[contenteditable=true]',
+        '[contenteditable=true], [contenteditable=""], [contenteditable=plaintext-only]',
         '[role=button]',
         '[role=link]',
         '[role=checkbox]',
@@ -463,7 +528,7 @@ export class BrowserManager {
       const generation = ++this.referenceGeneration;
       const handles = new Set<ElementHandle<SVGElement | HTMLElement>>();
       try {
-        const candidatesWithDetails: Array<{ index: number; locator: ElementHandle<SVGElement | HTMLElement>; details: { tag: string; role: string; name: string; type: string; disabled: boolean } }> = [];
+        const candidatesWithDetails: Array<{ index: number; locator: ElementHandle<SVGElement | HTMLElement>; details: { tag: string; role: string; name: string; type: string; disabled: boolean; value?: string; valueLength?: number; valueTruncated?: boolean } }> = [];
         let scannedCandidates = 0;
         // Look ahead one visible candidate; hidden entries retain their DOM positions.
         for (let start = 0; start < count && candidatesWithDetails.length <= limit; start += 16) {
@@ -497,12 +562,21 @@ export class BrowserManager {
                 text,
                 input.type === 'password' ? '' : clean(input.value),
               ].find(Boolean) ?? '';
+              const editable = (element as HTMLElement).isContentEditable;
+              const field = element.tagName === 'INPUT' || element.tagName === 'TEXTAREA';
+              const value = input.type === 'password' ? undefined
+                : editable ? (element as HTMLElement).innerText ?? element.textContent ?? ''
+                  : field ? input.value ?? '' : undefined;
+              // Keep the current editor contents distinct from its accessible
+              // label, and preserve whitespace/newlines. Passwords stay omitted.
+              const boundedValue = value?.slice(0, 1500).replace(/[\uD800-\uDBFF]$/u, '');
               return {
                 tag: element.tagName.toLowerCase(),
                 role: element.getAttribute('role') ?? '',
                 name,
                 type: element.getAttribute('type') ?? '',
                 disabled: Boolean(input.disabled) || element.getAttribute('aria-disabled') === 'true',
+                ...(boundedValue === undefined ? {} : { value: boundedValue, valueLength: value!.length, valueTruncated: boundedValue.length < value!.length }),
               };
             }).catch(() => undefined);
             return details ? { index, locator, details } : undefined;
@@ -521,6 +595,8 @@ export class BrowserManager {
         const base = {
           url: truncateUtf8Text(state.url, 2048).text,
           title: truncateUtf8Text(state.title, 512).text,
+          tabId: this.tabId(page),
+          activeTabId: this.activePage ? this.tabId(this.activePage) : null,
           viewport: { ...viewportSize, deviceScaleFactor: 1 },
           geometryGeneration: await this.updateGeometry(page),
           scroll,
@@ -567,12 +643,22 @@ export class BrowserManager {
             name: candidate.details.name.slice(0, 160),
             ...(candidate.details.type ? { type: candidate.details.type } : {}),
             ...(candidate.details.disabled ? { disabled: true } : {}),
+            ...(candidate.details.value === undefined ? {} : {
+              value: candidate.details.value, valueLength: candidate.details.valueLength, valueTruncated: candidate.details.valueTruncated,
+            }),
           };
           const prospective = {
             ...base,
             refs: [...refs, record],
             truncated: { snapshot: boundedSnapshot.truncated, refs: false },
           };
+          if (!refs.length && record.value !== undefined) {
+            const excess = Buffer.byteLength(JSON.stringify(prospective)) - (MODEL_TEXT_BUDGET_BYTES - 64);
+            if (excess > 0) {
+              record.value = truncateJsonText(record.value, Math.max(0, Buffer.byteLength(JSON.stringify(record.value)) - 2 - excess)).text;
+              record.valueTruncated = true;
+            }
+          }
           if (Buffer.byteLength(JSON.stringify(prospective)) > MODEL_TEXT_BUDGET_BYTES - 64) { firstOmitted = candidate.index; break; }
           refs.push(record);
           references.set(ref, this.references.get(ref) ?? candidate.locator);
@@ -617,13 +703,14 @@ export class BrowserManager {
     });
   }
 
-  async click(ref: string, button: 'left' | 'right'): Promise<PageState> {
+  async click(ref: string, button: 'left' | 'right'): Promise<PageActionState> {
     return (await this.clickWithViewerPointer(ref, button)).result;
   }
 
-  clickWithViewerPointer(ref: string, button: 'left' | 'right', generation?: number): Promise<BrowserViewerResult<PageState>> {
+  clickWithViewerPointer(ref: string, button: 'left' | 'right', generation?: number): Promise<BrowserViewerResult<PageActionState>> {
     return this.enqueue(async () => {
       const page = await this.getPage();
+      const before = new Set(this.tabIds.keys());
       const locator = await this.referencedElement(ref);
       // Playwright clicks scroll refs into view. Do that explicitly before
       // sampling the box so the viewer receipt describes the actual target.
@@ -646,11 +733,11 @@ export class BrowserManager {
         throw error;
       }
       await this.enforceTabLimit(await this.getContext(), this.activePage);
-      return { result: await pageState(page), pointerActions: pointer && !publication ? [pointer] : [] };
+      return { result: await this.actionState(page, before), pointerActions: pointer && !publication ? [pointer] : [] };
     });
   }
 
-  type(ref: string, text: string, submit: boolean, clear: boolean): Promise<PageState> {
+  type(ref: string, text: string, submit: boolean, clear: boolean): Promise<PageActionState> {
     return this.act(async (page) => {
       const locator = await this.referencedElement(ref);
       if (clear) {
@@ -665,16 +752,22 @@ export class BrowserManager {
     });
   }
 
-  select(ref: string, value: string): Promise<PageState> {
+  select(ref: string, value: string | string[]): Promise<PageActionState> {
     return this.act(async (page) => {
       const locator = await this.referencedElement(ref);
-      const hasLabel = await locator.evaluate((node, label) => Array.from((node as HTMLSelectElement).options ?? []).some((option) => option.label === label), value);
-      await this.dispatchInput(() => locator.selectOption(hasLabel ? { label: value } : { value }));
+      const values = Array.isArray(value) ? value : [value];
+      const labels = await locator.evaluate((node, requested) => {
+        const select = node as HTMLSelectElement;
+        return { multiple: Boolean(select.multiple), labels: requested.map((label) => Array.from(select.options ?? []).some((option) => option.label === label)) };
+      }, values);
+      if (values.length > 1 && !labels.multiple) throw new QubiclError('browser_select_not_multiple', 'This select does not accept multiple options. No selection was changed.', 409, { dispatch: 'not-started' });
+      const options = values.map((item, index) => labels.labels[index] ? { label: item } : { value: item });
+      await this.dispatchInput(() => locator.selectOption(Array.isArray(value) ? options : options[0]!));
       return page;
     });
   }
 
-  press(key: string, ref?: string): Promise<PageState> {
+  press(key: string, ref?: string): Promise<PageActionState> {
     return this.act(async (page) => {
       if (ref) {
         const locator = await this.referencedElement(ref);
@@ -684,7 +777,7 @@ export class BrowserManager {
     });
   }
 
-  scroll(direction: 'up' | 'down', amount: number): Promise<PageState> {
+  scroll(direction: 'up' | 'down', amount: number): Promise<PageActionState> {
     return this.act(async (page) => {
       await this.dispatchInput(() => page.mouse.wheel(0, direction === 'up' ? -amount : amount));
       return page;
@@ -694,6 +787,7 @@ export class BrowserManager {
   history(action: 'back' | 'forward' | 'reload'): Promise<HistoryState> {
     return this.enqueue(async () => {
       const page = await this.getPage();
+      const before = new Set(this.tabIds.keys());
       let navigated = false;
       let waitTimedOut = false;
       const onNavigation = (frame: Frame): void => { if (frame === page.mainFrame()) navigated = true; };
@@ -728,6 +822,7 @@ export class BrowserManager {
         await this.enforceTabLimit(await this.getContext(), this.activePage);
         return {
           ...observed,
+          ...this.actionTabs(page, before),
           navigation: { action, status: navigated ? 'committed' : 'not_observed', waitTimedOut },
           loading: { waitUntil: 'domcontentloaded', waitStatus, readyState },
           ...(waitTimedOut || waitStatus === 'timed_out' ? {
@@ -741,7 +836,7 @@ export class BrowserManager {
     });
   }
 
-  wait(milliseconds: number): Promise<PageState> {
+  wait(milliseconds: number): Promise<PageActionState> {
     return this.act(async (page) => {
       await page.waitForTimeout(milliseconds);
       return page;
@@ -875,6 +970,8 @@ export class BrowserManager {
         throw new QubiclError('browser_batch_too_long', `Browser action batches are limited to ${MAX_COMPUTER_BATCH_MS} milliseconds. Split this batch into smaller calls.`, 400);
       }
       let page = await this.getPage();
+      const target = page;
+      const before = new Set(this.tabIds.keys());
       await this.assertGeometry(page, geometryGeneration);
       const pointerActions: ViewerPointerAction[] = [];
       for (const action of actions) {
@@ -898,7 +995,7 @@ export class BrowserManager {
       page = await this.getPage();
       const image = await page.screenshot({ type: 'png', fullPage: false, animations: 'disabled', timeout: 30_000 });
       return {
-        result: { ...await pageState(page), ...await this.imageResult(page, image), actionCount: actions.length },
+        result: { ...await pageState(page), ...await this.imageResult(page, image), ...this.actionTabs(target, before), actionCount: actions.length },
         pointerActions,
       };
     });
@@ -937,12 +1034,14 @@ export class BrowserManager {
     }
   }
 
-  private act(operation: (page: Page) => Promise<Page>, settleMilliseconds = 0): Promise<PageState> {
+  private act(operation: (page: Page) => Promise<Page>, settleMilliseconds = 0): Promise<PageActionState> {
     return this.enqueue(async () => {
-      const page = await operation(await this.getPage());
+      const target = await this.getPage();
+      const before = new Set(this.tabIds.keys());
+      const page = await operation(target);
       if (settleMilliseconds) await page.waitForTimeout(settleMilliseconds);
       await this.enforceTabLimit(await this.getContext(), this.activePage);
-      return pageState(page);
+      return this.actionState(page, before);
     });
   }
 
@@ -976,7 +1075,12 @@ export class BrowserManager {
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.dialogs.size) return Promise.reject(new QubiclError('browser_waiting_for_dialog', 'Resolve the pending dialog before issuing more browser operations.', 409, { dispatch: 'not-started', dialogId: this.dialogs.keys().next().value }));
+    const receipt: BrowserOperationReceipt = { operationId: randomBytes(12).toString('base64url'), status: 'running', dispatch: 'not-started' };
+    if (this.dialogs.size) {
+      const pending = this.dialogs.values().next().value!;
+      return Promise.reject(new QubiclError('browser_waiting_for_dialog', 'Resolve the pending dialog before issuing more browser operations.', 409,
+        { dispatch: 'not-started', dialogId: pending.record.id, dialog: { ...pending.record }, operationId: receipt.operationId }));
+    }
     if (this.queuedOperations >= MAX_BROWSER_QUEUE_DEPTH) {
       return Promise.reject(new QubiclError('browser_queue_full', `The browser already has ${MAX_BROWSER_QUEUE_DEPTH} queued operations. Wait for current work or take control to cancel it.`, 429));
     }
@@ -988,11 +1092,17 @@ export class BrowserManager {
       if (!this.enabled) throw new QubiclError('browser_unsupported', 'This computer does not provide the browser capability.', 404);
       try {
         started = true;
-        return await operation();
+        receipt.dispatch = 'started';
+        this.runningOperation = receipt;
+        const result = await operation();
+        receipt.status = 'completed';
+        return result;
       } catch (error) {
+        receipt.status = error instanceof QubiclError && error.code === 'browser_batch_interrupted' ? 'interrupted' : 'failed';
+        receipt.error = { code: error instanceof QubiclError ? error.code : 'browser_operation_failed', message: (error instanceof Error ? error.message : String(error)).slice(0, 512) };
         if (error instanceof QubiclError) throw error;
         throw new QubiclError('browser_operation_failed', error instanceof Error ? error.message : String(error), 502);
-      }
+      } finally { if (this.runningOperation === receipt) this.runningOperation = undefined; }
     };
     const next = this.operationQueue.then(execute, execute).finally(() => { this.queuedOperations -= 1; });
     this.operationQueue = next.catch(() => undefined);
@@ -1000,7 +1110,14 @@ export class BrowserManager {
     const dialog = new Promise<never>((_resolve, reject) => {
       notify = (id) => {
         if (!started) cancelled = true;
-        reject(new QubiclError('browser_waiting_for_dialog', started ? 'The operation is waiting for a JavaScript dialog. Resolve it with browser_respond_dialog; do not repeat the action.' : 'A dialog interrupted the queue before this operation started. Resolve it and reassess the requested action.', 409, { dispatch: started ? 'started' : 'not-started', dialogId: id }));
+        receipt.status = started ? 'awaiting_dialog' : 'interrupted';
+        receipt.dialogId = id;
+        this.dialogOperations.set(receipt.operationId, { receipt, settled: next.then(() => undefined, () => undefined) });
+        while (this.dialogOperations.size > MAX_BROWSER_QUEUE_DEPTH) this.dialogOperations.delete(this.dialogOperations.keys().next().value!);
+        const record = this.dialogs.get(id)?.record;
+        if (started && record && !record.operationId) record.operationId = receipt.operationId;
+        reject(new QubiclError('browser_waiting_for_dialog', started ? 'The operation is waiting for a JavaScript dialog. Resolve it with browser_respond_dialog; do not repeat the action.' : 'A dialog interrupted the queue before this operation started. Resolve it and reassess the requested action.', 409,
+          { dispatch: started ? 'started' : 'not-started', dialogId: id, operationId: receipt.operationId, ...(record ? { dialog: { ...record } } : {}) }));
       };
       this.dialogWaiters.add(notify);
     });
@@ -1083,8 +1200,9 @@ export class BrowserManager {
     context.on('close', () => this.clearContext(context));
     context.on('page', (page) => {
       void this.preparePage(context, page).then(() => {
-        this.setActivePage(page);
-        return this.enqueue(async () => this.enforceTabLimit(context, page));
+        // A popup must not silently redirect later agent input. Explicit newTab
+        // and useTab still select their targets; other pages are discoverable.
+        return this.enforceTabLimit(context, page);
       }).catch((error) => console.error(`Qubicl browser page setup failed: ${error instanceof Error ? error.message : String(error)}`));
     });
     for (const page of context.pages()) await this.preparePage(context, page);
@@ -1120,7 +1238,6 @@ export class BrowserManager {
     this.trackedPages.add(page);
     this.tabId(page);
     this.touchPage(page);
-    await page.setViewportSize({ width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT }).catch(() => undefined);
     page.on('download', (download) => { void this.retainDownload(download); });
     page.on('dialog', (dialog) => {
       const id = randomBytes(12).toString('base64url');
@@ -1131,6 +1248,8 @@ export class BrowserManager {
           message: dialog.message().slice(0, 2_000),
           defaultValue: dialog.defaultValue().slice(0, 2_000),
           openedAt: new Date().toISOString(),
+          tabId: this.tabId(page),
+          ...(this.runningOperation?.tabId === this.tabId(page) ? { operationId: this.runningOperation.operationId } : {}),
         },
         dialog,
         page,
@@ -1138,8 +1257,13 @@ export class BrowserManager {
       this.dialogSequence += 1;
       for (const notify of this.dialogWaiters) notify(id);
     });
-    page.on('console', (message) => this.addDiagnostic('console', `${message.type()}: ${message.text()}`));
-    page.on('requestfailed', (request) => this.addDiagnostic('request-failed', `${request.method()} ${diagnosticUrl(request.url())}: ${request.failure()?.errorText ?? 'failed'}`));
+    page.on('console', (message) => {
+      const location = message.location();
+      this.addDiagnostic(page, 'console', `${message.type()}: ${message.text()}`, {
+        url: diagnosticUrl(location.url), line: location.lineNumber, column: location.columnNumber,
+      });
+    });
+    page.on('requestfailed', (request) => this.addDiagnostic(page, 'request-failed', `${request.method()} ${diagnosticUrl(request.url())}: ${request.failure()?.errorText ?? 'failed'}`, { url: diagnosticUrl(request.url()) }));
     page.on('framenavigated', (frame) => {
       if (page !== this.activePage) return;
       if (frame === page.mainFrame()) this.clearReferences();
@@ -1155,10 +1279,13 @@ export class BrowserManager {
       const replacement = context.pages().findLast((candidate) => !candidate.isClosed());
       if (replacement) this.setActivePage(replacement);
     });
+    await page.setViewportSize({ width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT }).catch(() => undefined);
   }
 
-  private addDiagnostic(type: 'console' | 'request-failed', detail: string): void {
-    this.diagnostics.push({ at: new Date().toISOString(), type, detail: detail.replace(/[\r\n]+/gu, ' ').slice(0, 1_000) });
+  private addDiagnostic(page: Page, type: BrowserDiagnostic['type'], detail: string, source: BrowserDiagnostic['source']): void {
+    const redacted = detail.replace(/https?:\/\/[^\s<>"']+/gu, (value) => diagnosticUrl(value));
+    this.diagnostics.push({ at: new Date(this.now()).toISOString(), type, detail: redacted.replace(/[\r\n]+/gu, ' ').slice(0, 1_000),
+      tabId: this.tabId(page), pageUrl: diagnosticUrl(page.url()), source });
     if (this.diagnostics.length > MAX_BROWSER_DIAGNOSTICS) this.diagnostics.splice(0, this.diagnostics.length - MAX_BROWSER_DIAGNOSTICS);
   }
 
@@ -1207,11 +1334,13 @@ export class BrowserManager {
     const context = await this.getContext();
     if (this.activePage && !this.activePage.isClosed()) {
       this.touchPage(this.activePage);
+      if (this.runningOperation) this.runningOperation.tabId = this.tabId(this.activePage);
       return this.activePage;
     }
     const page = context.pages().findLast((candidate) => !candidate.isClosed()) ?? await context.newPage();
     await this.preparePage(context, page);
     this.setActivePage(page);
+    if (this.runningOperation) this.runningOperation.tabId = this.tabId(page);
     return page;
   }
 
@@ -1247,12 +1376,34 @@ export class BrowserManager {
     })));
   }
 
+  private actionTabs(page: Page, before: Set<Page>): Omit<PageActionState, keyof PageState> {
+    const opened = [...this.tabIds.keys()].filter((candidate) => !before.has(candidate) && !candidate.isClosed());
+    return {
+      actedOnTabId: this.tabId(page),
+      activeTabId: this.activePage && !this.activePage.isClosed() ? this.tabId(this.activePage) : null,
+      openedTabs: opened.slice(0, 20).map((candidate) => ({ tabId: this.tabId(candidate), url: candidate.url().slice(0, 512) })),
+      openedTabsTruncated: opened.length > 20,
+    };
+  }
+
+  private async actionState(page: Page, before: Set<Page>): Promise<PageActionState> {
+    const state = await pageState(page);
+    if (![...this.tabIds.keys()].some((candidate) => !before.has(candidate))) {
+      // The click acknowledgement can precede Playwright's popup event. Observe
+      // that event briefly rather than returning an empty list in that gap.
+      // Later script-created popups remain discoverable through browser_tabs.
+      await page.waitForEvent('popup', { timeout: 300 }).catch(() => undefined);
+    }
+    return { ...state, ...this.actionTabs(page, before) };
+  }
+
   private tabId(page: Page): string {
-    let id = this.tabIds.get(page);
+    let id = this.tabIds.get(page) ?? this.retainedTabIds.get(page);
     if (!id) {
       id = randomBytes(12).toString('base64url');
-      this.tabIds.set(page, id);
+      this.retainedTabIds.set(page, id);
     }
+    if (!page.isClosed()) this.tabIds.set(page, id);
     return id;
   }
 
@@ -1654,7 +1805,7 @@ function safeDownloadFilename(value: string): string {
 
 
 function diagnosticUrl(value: string): string {
-  try { const url = new URL(value); return `${url.origin}${url.pathname}`.slice(0, 1_000); }
+  try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) ? `${url.origin}${url.pathname}`.slice(0, 1_000) : `${url.protocol}[redacted]`; }
   catch { return 'invalid-url'; }
 }
 

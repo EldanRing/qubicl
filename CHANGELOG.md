@@ -14,6 +14,20 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   structural containers. Hidden elements no longer consume output pages by
   default and remain available with `includeHidden: true`; continuation retains
   that selection and preserves exact references.
+- Browser popup actions retain the originating active tab and identify the
+  acted-on, newly observed and active tabs. Explicit tab switching remains
+  available; popup event delivery no longer races an immediately empty receipt.
+- Browser snapshots include bounded current rich-text and form-field values,
+  separately from accessible labels, while continuing to omit passwords.
+- Browser selection accepts an array to replace a multi-select's entire
+  selection in one call, including an empty array to clear it.
+- Browser diagnostics attribute console and request failures to tabs and source
+  locations, support time/tab/type filters, and redact URL credentials, queries
+  and fragments in metadata and absolute URLs in messages.
+- JavaScript dialogs return an actionable `awaiting_dialog` tool result instead
+  of a tool failure. Dialog responses and recent operation receipts correlate
+  the waiting action with completion, interruption or failure without repeating
+  its input.
 
 ## 0.8.0 - 2026-10-29
 

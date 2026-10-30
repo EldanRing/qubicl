@@ -13,6 +13,19 @@ page before deciding what to do next. Older servers without dispatch receipts
 are handled conservatively: their errors are returned without an automatic retry.
 A receipt is evidence about dispatch, not proof that the application accepted it.
 
+Popups no longer change the agent's selected tab automatically. Use
+`browser_use_tab` with the popup's stable ID to act in it; `browser_new_tab`
+continues to select the tab it explicitly creates. Navigation, semantic input
+and visual-batch receipts include
+`actedOnTabId`, `activeTabId`, `openedTabs` and `openedTabsTruncated`. The URL/title
+describe the acted-on page for semantic input, while a visual batch's screenshot
+describes its final observed page. Snapshots also identify their tab.
+Up to 20 newly observed tabs are included, with bounded URLs. Semantic actions
+briefly observe popup events (up to 300 ms) because a click can return before the
+new page is announced. Later script-created popups remain visible in
+`browser_tabs`; an empty list is an observation, not a guarantee against a future
+popup. Opening a popup preserves valid parent-page refs.
+
 `browser_history` dispatches Back, Forward or Reload once and waits up to five
 seconds for navigation to commit, then at most one second for `DOMContentLoaded`.
 It returns the observed URL/title, `navigation.status` (`committed` or
@@ -42,12 +55,46 @@ that capacity. Snapshot metadata reports this retention policy. Navigation,
 frame replacement, tab changes and disconnected nodes still invalidate affected
 refs; refresh the snapshot after `stale_browser_ref`.
 
-JavaScript alert, confirm and prompt dialogs return `browser_waiting_for_dialog`
-with a dialog ID. `browser_dialogs` and authorized `browser_respond_dialog` bypass
-the blocked action queue. They do not accept or dismiss dialogs automatically.
+JavaScript alert, confirm and prompt dialogs return a successful tool response
+with `status: "awaiting_dialog"`, `dialogId`, `operationId`, dispatch information
+and the dialog's tab. This is a waiting state, not proof that the action finished.
+`dispatch: "not-started"` means a pending dialog prevented the requested
+operation from starting; resolving it does not launch that operation later.
+`browser_dialogs` and authorized `browser_respond_dialog` bypass the blocked
+action queue. They do not accept or dismiss dialogs automatically.
+
+The response to a dialog includes its originating operation receipt when known.
+It waits up to one second for that operation to settle; otherwise it reports the
+current state. `browser_dialogs.operations` retains the latest 32 dialog-related
+receipts so clients can reconcile `operationId` as `running`, `awaiting_dialog`,
+`completed`, `interrupted` or `failed`. Completion describes tool execution, not
+the application's intended outcome. Clients should track waiting dialogs
+separately from failed calls and update the same operation after resolution.
+Older Qubicl runtimes return the legacy `browser_waiting_for_dialog` error.
 After resolving a dialog, observe the page. A dialog interrupts remaining batched
-computer actions; issue only actions that are still needed. Fill/select failures
-are reported without repeating input through a different mechanism.
+computer actions; issue only actions still needed. Fill/select failures never
+cause input to be repeated through a different mechanism.
+
+Snapshot refs for contenteditable editors (including empty and plaintext-only
+attributes), inputs and textareas include a current `value`, `valueLength` and
+`valueTruncated`, separately from their accessible name. Values preserve
+whitespace and line breaks, are bounded to 1,500 UTF-16 code units without splitting
+a surrogate pair, and can be shortened further to respect the response budget.
+Use `browser_read` for longer document prose. Password values remain omitted.
+
+`browser_select.value` accepts a string or an array of labels/values. Labels retain
+precedence when both could match. An array selects all requested options together
+and replaces the previous selection; `[]` clears it. Multiple values on a
+single-select are rejected before changing its selection.
+
+`browser_diagnostics` includes event time, stable `tabId`, redacted `pageUrl`,
+source URL and console line/column when available. Filter with `tabId`, `type`,
+`since` and `until` (inclusive ISO timestamps), plus `limit` up to 200. Only the
+latest 200 events are retained; output also respects the text budget and reports
+`truncated` when matching retained events are omitted. It remains readable during
+dialogs. URL credentials, query strings and fragments are removed from metadata
+and absolute HTTP(S) URLs in messages; arbitrary secrets printed as ordinary
+console text cannot be inferred or automatically redacted.
 
 Browser snapshots never use password values as element names. The pinned browser
 library also includes password values in its raw accessibility text, so that text

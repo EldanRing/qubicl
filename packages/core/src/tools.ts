@@ -474,7 +474,7 @@ export const toolDefinitions = {
     lease: false,
   },
   browser_click: {
-    description: 'Click an element ref from the latest browser_snapshot.',
+    description: 'Click an observed element ref. The receipt identifies the acted-on, opened and active tabs. Popups do not select themselves; use browser_use_tab explicitly.',
     input: leaseOnly.extend({ ref: browserRef, button: z.enum(['left', 'right']).default('left') }),
     lease: true,
   },
@@ -484,8 +484,8 @@ export const toolDefinitions = {
     lease: true,
   },
   browser_select: {
-    description: 'Choose an option label or value in a select element ref from the latest browser_snapshot.',
-    input: leaseOnly.extend({ ref: browserRef, value: z.string().max(10_000) }),
+    description: 'Select option labels or values in one operation. Pass a string for one option, an array for a multi-select, or [] to clear its selection. Arrays replace the entire selection.',
+    input: leaseOnly.extend({ ref: browserRef, value: z.union([z.string().max(10_000), z.array(z.string().max(10_000)).max(200)]) }),
     lease: true,
   },
   browser_press: {
@@ -556,12 +556,12 @@ export const toolDefinitions = {
     lease: true,
   },
   browser_dialogs: {
-    description: 'List pending JavaScript dialogs without changing them.',
+    description: 'List pending JavaScript dialogs with tab/operation IDs and recent dialog-related operation states. Read this to reconcile a waiting operation without repeating input.',
     input: observationOnly,
     lease: false,
   },
   browser_respond_dialog: {
-    description: 'Accept or dismiss a pending JavaScript dialog explicitly.',
+    description: 'Accept or dismiss a pending JavaScript dialog explicitly. Returns its tab and the linked operation state so an awaiting_dialog action can be reconciled without repeating input.',
     input: leaseOnly.extend({ dialogId: z.string().regex(/^[A-Za-z0-9_-]{16}$/), action: z.enum(['accept', 'dismiss']), promptText: z.string().max(10_000).optional() }),
     lease: true,
   },
@@ -576,8 +576,13 @@ export const toolDefinitions = {
     lease: true,
   },
   browser_diagnostics: {
-    description: 'Return bounded recent console and failed-request diagnostics with query strings removed.',
-    input: observationOnly,
+    description: 'Read recent console/request failures with tab and source attribution. Filter by tabId, type and inclusive ISO timestamps since/until. URL credentials, queries and fragments are redacted; output is bounded.',
+    input: observationOnly.extend({
+      tabId: z.string().regex(/^[A-Za-z0-9_-]{16}$/).optional(),
+      type: z.enum(['console', 'request-failed']).optional(),
+      since: z.iso.datetime({ offset: true }).optional(), until: z.iso.datetime({ offset: true }).optional(),
+      limit: z.number().int().min(1).max(200).default(200),
+    }),
     lease: false,
   },
   browser_set_viewport: {

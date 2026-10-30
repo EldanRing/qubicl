@@ -19,7 +19,7 @@ import type {
   StopSignal,
   ServiceOptions,
 } from './processes.js';
-import { BrowserManager, type BrowserComputerAction, type BrowserMouseButton } from './browser.js';
+import { BrowserManager, type BrowserComputerAction, type BrowserMouseButton, type BrowserDiagnosticsInput } from './browser.js';
 import type { WebExtractRenderedInput } from './web.js';
 import type { ListeningPort } from './ports.js';
 import type { EffectiveResourceLimits } from './resource-limits.js';
@@ -205,7 +205,7 @@ export class RemoteBrowserManager extends BrowserManager {
   override click(ref: string, button: 'left' | 'right'): ReturnType<BrowserManager['click']> { return this.invoke('click', [ref, button]); }
   override clickWithViewerPointer(ref: string, button: 'left' | 'right', generation?: number): ReturnType<BrowserManager['clickWithViewerPointer']> { return this.invoke('clickWithViewerPointer', [ref, button, generation]); }
   override type(ref: string, text: string, submit: boolean, clear: boolean): ReturnType<BrowserManager['type']> { return this.invoke('type', [ref, text, submit, clear]); }
-  override select(ref: string, value: string): ReturnType<BrowserManager['select']> { return this.invoke('select', [ref, value]); }
+  override select(ref: string, value: string | string[]): ReturnType<BrowserManager['select']> { return this.invoke('select', [ref, value]); }
   override press(key: string, ref?: string): ReturnType<BrowserManager['press']> { return this.invoke('press', [key, ref]); }
   override scroll(direction: 'up' | 'down', amount: number): ReturnType<BrowserManager['scroll']> { return this.invoke('scroll', [direction, amount]); }
   override history(action: 'back' | 'forward' | 'reload'): ReturnType<BrowserManager['history']> { return this.invoke('history', [action]); }
@@ -221,7 +221,7 @@ export class RemoteBrowserManager extends BrowserManager {
   override listDialogs(): ReturnType<BrowserManager['listDialogs']> { return this.invoke('listDialogs', []); }
   override respondDialog(id: string, action: 'accept' | 'dismiss', promptText?: string): ReturnType<BrowserManager['respondDialog']> { return this.invoke('respondDialog', [id, action, promptText]); }
   override permissions(origin: string, permissions: string[], clear: boolean, scope: 'origin' | 'context' = 'origin'): ReturnType<BrowserManager['permissions']> { return this.invoke('permissions', [origin, permissions, clear, scope]); }
-  override browserDiagnostics(): ReturnType<BrowserManager['browserDiagnostics']> { return this.invoke('browserDiagnostics', []); }
+  override browserDiagnostics(input: BrowserDiagnosticsInput = {}): ReturnType<BrowserManager['browserDiagnostics']> { return this.invoke('browserDiagnostics', [input]); }
   override setViewport(width: number, height: number): ReturnType<BrowserManager['setViewport']> { return this.invoke('setViewport', [width, height]); }
   override clickAt(x: number, y: number, button: BrowserMouseButton, clickCount = 1, geometryGeneration?: number): ReturnType<BrowserManager['clickAt']> { return this.invoke('clickAt', [x, y, button, clickCount, geometryGeneration]); }
   override hoverAt(x: number, y: number, geometryGeneration?: number): ReturnType<BrowserManager['hoverAt']> { return this.invoke('hoverAt', [x, y, geometryGeneration]); }

@@ -28,7 +28,9 @@ test('browser manager provides the Terminal1 semantic, tab, and screenshot-groun
   context.after(() => manager.shutdown());
 
   assert.equal(manager.count(), 0);
-  assert.deepEqual(await manager.navigate('https://example.test/start'), { url: 'https://example.test/start', title: 'Fake page' });
+  const navigation = await manager.navigate('https://example.test/start');
+  assert.deepEqual(navigation, { url: 'https://example.test/start', title: 'Fake page', actedOnTabId: navigation.actedOnTabId,
+    activeTabId: navigation.actedOnTabId, openedTabs: [], openedTabsTruncated: false });
   assert.equal(manager.count(), 1);
   assert.deepEqual(await manager.health(), {
     state: 'attached',
@@ -58,7 +60,7 @@ test('browser manager provides the Terminal1 semantic, tab, and screenshot-groun
   assert.ok(Buffer.byteLength(JSON.stringify(snapshot)) <= 24_000);
 
   const semanticClick = await manager.clickWithViewerPointer('g1e1', 'left');
-  assert.deepEqual(semanticClick.result, { url: 'https://example.test/start', title: 'Fake page' });
+  assert.deepEqual(semanticClick.result, navigation);
   assert.deepEqual(semanticClick.pointerActions, [{ type: 'click', x: 74, y: 111, button: 1 }]);
   await manager.type('g1e1', 'typed', true, true);
   await manager.select('g1e2', 'Selected');
@@ -557,12 +559,12 @@ class FakeLocator {
 
   async isVisible(): Promise<boolean> { return this.visible; }
   async dispose(): Promise<void> { this.disposals += 1; }
-  async evaluate<T>(callback: (element: HTMLElement) => T): Promise<T> {
+  async evaluate<T, A>(callback: (element: HTMLElement, argument?: A) => T, argument?: A): Promise<T> {
     const name = this.index === 0 ? 'First control' : this.index === 1 ? 'Second control' : `Control ${this.index} ${'x'.repeat(240)}`;
     return callback({
       tagName: 'BUTTON', textContent: name, isConnected: this.connected,
       getAttribute: (attribute: string) => attribute === 'role' ? 'button' : null,
-    } as unknown as HTMLElement);
+    } as unknown as HTMLElement, argument!);
   }
   async boundingBox(): Promise<{ x: number; y: number; width: number; height: number }> {
     return { x: 10 + this.index, y: 20, width: 100, height: 30 };
@@ -611,6 +613,7 @@ class FakePage {
   }
   async route(): Promise<void> {}
   async waitForLoadState(): Promise<void> {}
+  async waitForEvent(): Promise<void> {}
   async setViewportSize(): Promise<void> {}
   async bringToFront(): Promise<void> {}
   async waitForTimeout(): Promise<void> {}
