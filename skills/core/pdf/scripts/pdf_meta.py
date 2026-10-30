@@ -16,9 +16,62 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
+import re
+import tempfile
 import os
 import sys
 from pathlib import Path
+
+
+def extract_attachments(reader, directory):
+    from pdf_preservation import attachment_records
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    planned, used = [], set()
+    for name, index, data in attachment_records(reader):
+        safe = re.split(r"[/\\]", name)[-1]
+        safe = re.sub(r'[<>:"|?*\x00-\x1f\x7f]', '_', safe).strip(' .') or 'attachment.bin'
+        stem, suffix = os.path.splitext(safe)
+        # Bound UTF-8 filenames and leave room for collision suffixes.
+        suffix = suffix[:20]
+        while len((stem + suffix).encode()) > 160:
+            stem = stem[:-1]
+        if re.fullmatch(r'(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])', stem):
+            stem = 'attachment_' + stem
+        safe = stem + suffix
+        counter = 1
+        while safe.casefold() in used:
+            counter += 1
+            safe = f'{stem}__{counter}{suffix}'
+        used.add(safe.casefold())
+        if os.path.lexists(directory / safe):
+            raise FileExistsError(f'Attachment destination already exists: {directory / safe}; no files overwritten')
+        planned.append((name, index, data, safe))
+    published = []
+    receipts = []
+    try:
+        with tempfile.TemporaryDirectory(prefix='.qubicl-attachments-', dir=directory) as temporary:
+            for number, (name, index, data, safe) in enumerate(planned):
+                staged = Path(temporary) / str(number)
+                staged.write_bytes(data)
+                staged.chmod(0o600)
+                digest = hashlib.sha256(data).hexdigest()
+                if hashlib.sha256(staged.read_bytes()).hexdigest() != digest:
+                    raise ValueError('Attachment write verification failed')
+                target = directory / safe
+                # link is an atomic create-only publication, including symlinks.
+                os.link(staged, target)
+                published.append((target, target.stat().st_ino))
+                receipts.append({'sourceName': name, 'payloadIndex': index, 'destination': str(target),
+                                 'bytes': len(data), 'sha256': digest})
+    except BaseException:
+        for path, inode in published:
+            if path.exists() and not path.is_symlink() and path.stat().st_ino == inode:
+                path.unlink()
+        raise
+    return {'extracted': [item['destination'] for item in receipts], 'attachments': receipts,
+            'payloadCount': len(receipts), 'indexBase': 0, 'overwrite': False}
 
 
 def main() -> int:
@@ -44,7 +97,8 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        from pypdf import PdfReader, PdfWriter
+        from pypdf import PdfReader
+        from pdf_preservation import attachment_records, cloned_writer, write_verified
     except ImportError:
         print("Required Qubicl PDF dependency is unavailable: pypdf", file=sys.stderr)
         return 2
@@ -63,26 +117,15 @@ def main() -> int:
         return 0
 
     if args.extract_attachments:
-        out_dir = Path(args.extract_attachments)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        written = []
-        for name, contents in reader.attachments.items():
-            data = contents[0] if isinstance(contents, list) else contents
-            safe = os.path.basename(name) or "attachment.bin"
-            target = out_dir / safe
-            with open(target, "wb") as fh:
-                fh.write(bytes(data))
-            written.append(str(target))
-        json.dump({"extracted": written}, sys.stdout, ensure_ascii=False, indent=2)
-        print()
+        print(json.dumps(extract_attachments(reader, args.extract_attachments), ensure_ascii=False, indent=2))
         return 0
 
     if not args.output:
         print("Error: -o/--output is required for write modes", file=sys.stderr)
         return 4
 
-    writer = PdfWriter()
-    writer.append(reader)
+    writer = cloned_writer(reader)
+    attachments = list(attachment_records(reader))
 
     if args.set_meta:
         meta = {}
@@ -102,14 +145,22 @@ def main() -> int:
     else:  # --attach
         attach_path = Path(args.attach)
         with open(attach_path, "rb") as fh:
-            writer.add_attachment(attach_path.name, fh.read())
+            data = fh.read()
+            writer.add_attachment(attach_path.name, data)
+        index = sum(name == attach_path.name for name, _, _ in attachments)
+        attachments.append((attach_path.name, index, data))
+        attachments.sort(key=lambda item: (item[0], item[1]))
         result = {"output": args.output, "attached": attach_path.name}
 
-    with open(args.output, "wb") as fh:
-        writer.write(fh)
+    write_verified(writer, reader, args.output, args.password, attachments)
+    result.update(preservationVerified=True, encrypted=reader.is_encrypted, attachmentPayloadCount=len(attachments))
     print(json.dumps(result, ensure_ascii=False))
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)

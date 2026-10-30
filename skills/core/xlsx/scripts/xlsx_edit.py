@@ -114,6 +114,8 @@ def rewrite_workbook_references(wb, ws, rewrite, snapshots=None):
                     cell.value = rewrite_typed_formula(cell.value, rewrite, sheet.title)
                 if cell.hyperlink and cell.hyperlink.location:
                     cell.hyperlink.location = rewrite(cell.hyperlink.location, sheet.title)
+                if cell.hyperlink and cell.hyperlink.target and cell.hyperlink.target.startswith("#"):
+                    cell.hyperlink.target = "#" + rewrite(cell.hyperlink.target[1:], sheet.title)
         for table in sheet.tables.values():
             for column in table.tableColumns:
                 for attr in ("calculatedColumnFormula", "totalsRowFormula"):

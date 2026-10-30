@@ -39,7 +39,9 @@ def chart_info(chart):
 
 
 def slide_record(index, slide):
-    rec = {"index": index, "layout": slide.slide_layout.name,
+    show = slide._element.get("show", "1").lower() not in ("0", "false")
+    rec = {"index": index, "slide_number": index + 1, "slide_id": slide.slide_id,
+           "show": show, "hidden": not show, "layout": slide.slide_layout.name,
            "texts": [], "tables": [], "images": [], "charts": [],
            "notes": None}
     for shape in iter_shapes(slide.shapes):
@@ -112,13 +114,17 @@ def main(argv=None):
                          indent=2, ensure_ascii=True))
         return 0
 
+    slides = [slide_record(i, s) for i, s in enumerate(prs.slides)]
     outline = {
         "ok": True,
         "slide_size_inches": [round(Emu(prs.slide_width).inches, 3),
                               round(Emu(prs.slide_height).inches, 3)],
         "slide_count": len(prs.slides._sldIdLst),
+        "visible_slide_count": sum(slide["show"] for slide in slides),
+        "hidden_slide_count": sum(slide["hidden"] for slide in slides),
+        "includes_hidden_slides": True,
         "layouts_available": [lay.name for lay in prs.slide_layouts],
-        "slides": [slide_record(i, s) for i, s in enumerate(prs.slides)],
+        "slides": slides,
     }
     print(json.dumps(outline, indent=2, ensure_ascii=True))
     return 0

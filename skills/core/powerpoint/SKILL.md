@@ -25,6 +25,14 @@ run directory with PDF, exact numbered PNGs and `manifest.json`. Read `sourceSha
 are never returned as this run's outputs. `visuallyInspected: false` is intentional:
 the tool renders; the agent performs visual review. Office rendering needs workstation.
 
+Outlines include all slides, with `show`, `hidden`, zero-based `index`, one-based
+`slide_number`, stable `slide_id` and visible/hidden counts. The renderer explicitly
+exports visible slides only; hidden content remains in the source and outline.
+Its `presentation` inventory records each slide's `renderedPage` (null for hidden
+slides), and each page has `sourceSlide` identity/order. Do not equate output page
+numbers with source slide numbers. An all-hidden deck returns `rendered: false`,
+`reason: no_visible_slides` and a manifest with the complete source inventory.
+
 Replacement visits grouped shapes and all original matches across runs, preserving unaffected formatting. Slide duplication copies chart XML, embedded workbooks, styles/colors, notes and media into independent parts, including nested grouped charts. Editing the duplicate leaves the source data and styles unchanged. Layout/master definitions and links to other slides remain shared presentation references; self-links target the duplicate. The chart-data command indexes charts recursively through groups. Explicit replacement of a linked chart's data creates a private embedded workbook without accessing its external source. Footer placeholders receive unique shape IDs.
 
 Slide deletion removes incoming click/hover actions, custom-show references and

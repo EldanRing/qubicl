@@ -60,7 +60,9 @@ CSV imports preserve leading-zero/long identifiers and mixed-type columns; strin
 
 `xlsx_edit.py --rename-sheet OLD:NEW` updates worksheet references in cells,
 workbook/local names, tables, charts, validation/formatting rules and internal
-hyperlinks; external workbook links and formula string literals are preserved.
+hyperlinks, including `Hyperlink.location` and local `#Sheet!Cell` targets with
+quoted/apostrophe-containing names. External workbook/URL links and formula
+string literals (including literal `HYPERLINK` arguments) are preserved.
 Its row/column operations use the same reference-aware engine as
 `xlsx_restructure.py`. `--table-append NAME=ROWJSON` inserts space before the next
 row (or the totals row), preserving other content and formulas below the table.

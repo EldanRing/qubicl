@@ -50,6 +50,11 @@ class EditPreservation(unittest.TestCase):
         report['A2']="='[external.xlsx]Data'!A2"
         report['A3']='=[external.xlsx]Data!A2'
         report['A4']='jump';report['A4'].hyperlink=Hyperlink(ref='A4',location="'Data'!A2")
+        report['A5'].hyperlink='#Data!A2'
+        report['A6'].hyperlink="#'Data'!$A$2"
+        report['A7'].hyperlink='https://example.test/book#Data!A2'
+        report['A8'].hyperlink='external.xlsx#Data!A2'
+        report['A9']='=HYPERLINK("#Data!A2","literal")'
         wb.defined_names.add(DefinedName('GlobalAmount',attr_text="'Data'!$A$2"))
         report.defined_names.add(DefinedName('LocalAmount',attr_text='Data!$A$2'))
         table.tableColumns[1].calculatedColumnFormula.attr_text='Data!A2*2'
@@ -65,6 +70,11 @@ class EditPreservation(unittest.TestCase):
         self.assertEqual(report['A2'].value,"='[external.xlsx]Data'!A2")
         self.assertEqual(report['A3'].value,'=[external.xlsx]Data!A2')
         self.assertEqual(report['A4'].hyperlink.location,target+'A2')
+        self.assertEqual(report['A5'].hyperlink.target,'#'+target+'A2')
+        self.assertEqual(report['A6'].hyperlink.target,'#'+target+'$A$2')
+        self.assertEqual(report['A7'].hyperlink.target,'https://example.test/book#Data!A2')
+        self.assertEqual(report['A8'].hyperlink.target,'external.xlsx#Data!A2')
+        self.assertEqual(report['A9'].value,'=HYPERLINK("#Data!A2","literal")')
         self.assertEqual(out.defined_names['GlobalAmount'].attr_text,target+'$A$2')
         self.assertEqual(report.defined_names['LocalAmount'].attr_text,target+'$A$2')
         self.assertEqual(ws.tables['Sales'].tableColumns[1].calculatedColumnFormula.attr_text,target+'A2*2')
@@ -80,6 +90,19 @@ class EditPreservation(unittest.TestCase):
         self.assertIn('data',out.sheetnames);self.assertNotIn('data1',out.sheetnames)
         self.assertEqual(out['data']['A4'].value,'keep');self.assertEqual(out['data']['A3'].value,3)
         self.assertEqual(out['Report']['A1'].value,"='data'!A2")
+
+    def test_helper_created_fragment_links_follow_quoted_sheet_rename(self):
+        wb=Workbook();wb.active.title="O'Brien";wb.create_sheet('Report')
+        source=self.root/'source.xlsx';wb.save(source)
+        created=self.root/'linked.xlsx';renamed=self.root/'renamed.xlsx'
+        for arguments in [
+            [str(source),'--sheet','Report','--hyperlink',"A1=#'O''Brien'!A1",'--out',str(created)],
+            [str(created),'--sheet',"O'Brien",'--rename-sheet',"O'Brien:Final Report",'--out',str(renamed)],
+        ]:
+            result=subprocess.run([sys.executable,str(SCRIPT),*arguments],capture_output=True,text=True,timeout=20)
+            self.assertEqual(result.returncode,0,result.stderr)
+        saved=load_workbook(renamed)
+        self.assertEqual(saved['Report']['A1'].hyperlink.target,"#'Final Report'!A1")
 
     def test_append_moves_unrelated_cells_and_extends_calculated_chart_sources(self):
         wb,ws,report,table=self.table();ws['A3']='keep';ws['C3']=99;report['A1']='=Data!C3'

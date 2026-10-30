@@ -138,6 +138,27 @@ def workbook_changes(before, after):
             'fidelityVerified': False}
 
 
+def presentation_slides(path):
+    """Inventory source order and visibility, including slides omitted from export."""
+    main = '{http://schemas.openxmlformats.org/presentationml/2006/main}'
+    rel_id = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id'
+    slides = []
+    with zipfile.ZipFile(path) as archive:
+        relationships = ET.fromstring(archive.read('ppt/_rels/presentation.xml.rels'))
+        targets = {item.get('Id'): item.get('Target') for item in relationships if item.get('TargetMode') != 'External'}
+        presentation = ET.fromstring(archive.read('ppt/presentation.xml'))
+        for index, slide in enumerate(presentation.findall(main + 'sldIdLst/' + main + 'sldId')):
+            target = targets[slide.get(rel_id)]
+            part = target.lstrip('/') if target.startswith('/') else posixpath.normpath(posixpath.join('ppt', target))
+            xml = ET.fromstring(archive.read(part))
+            show = xml.get('show', '1').lower() not in ('0', 'false')
+            slides.append({'index': index, 'number': index + 1, 'id': int(slide.get('id')),
+                           'part': part, 'show': show, 'hidden': not show, 'renderedPage': None})
+    return {'policy': 'visible_slides_only', 'includesHiddenSlides': False,
+            'slideCount': len(slides), 'visibleSlideCount': sum(slide['show'] for slide in slides),
+            'hiddenSlideCount': sum(slide['hidden'] for slide in slides), 'slides': slides}
+
+
 def render(source, out_dir, prefix='page', dpi=100, timeout=180):
     source = Path(source).resolve()
     extension = source.suffix.lower()
@@ -159,6 +180,7 @@ def render(source, out_dir, prefix='page', dpi=100, timeout=180):
     run_dir = Path(tempfile.mkdtemp(prefix='render-', dir=Path(out_dir).resolve()))
     warnings = ['Inspect generated pages for layout and content; conversion success is not visual verification.']
     validation = {'visuallyInspected': False, 'fidelityVerified': False}
+    presentation = None
     try:
         with tempfile.TemporaryDirectory(prefix='qubicl-artifact-') as temporary:
             captured = Path(temporary) / ('source' + extension)
@@ -173,6 +195,21 @@ def render(source, out_dir, prefix='page', dpi=100, timeout=180):
                 pdf = convert_office(recalculated, Path(temporary) / 'pdf', 'pdf', timeout)
             elif extension == '.pdf':
                 pdf = captured
+            elif extension == '.pptx':
+                presentation = presentation_slides(captured)
+                if not presentation['visibleSlideCount']:
+                    result = {'schemaVersion': 1, 'rendered': False, 'reason': 'no_visible_slides',
+                              'source': str(source), 'sourceSha256': source_hash, 'files': [], 'pages': [],
+                              'presentation': presentation, 'warnings': ['No visible slides; hidden source slides were retained.'],
+                              'validation': {**validation, 'generatedPages': 0}, 'manifest': str(run_dir / 'manifest.json')}
+                    (run_dir / 'manifest.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
+                    return result
+                options = {'ExportHiddenSlides': {'type': 'boolean', 'value': 'false'},
+                           'ExportNotesPages': {'type': 'boolean', 'value': 'false'},
+                           'ExportOnlyNotesPages': {'type': 'boolean', 'value': 'false'}}
+                pdf = convert_office(captured, Path(temporary) / 'pdf',
+                                     'pdf:impress_pdf_Export:' + json.dumps(options), timeout)
+                warnings.append('Presentation rendering includes visible slides only, in source order; hidden slides remain in the source and outline. LibreOffice layout may differ from PowerPoint.')
             else:
                 pdf = convert_office(captured, Path(temporary) / 'pdf', 'pdf', timeout)
                 warnings.append('LibreOffice rendering may differ from Microsoft Office; review fonts, pagination and object layout.')
@@ -180,6 +217,8 @@ def render(source, out_dir, prefix='page', dpi=100, timeout=180):
             page_count = len(PdfReader(pdf).pages)
             if page_count < 1:
                 raise RuntimeError('Conversion produced an empty PDF')
+            if presentation and page_count != presentation['visibleSlideCount']:
+                raise RuntimeError('Rendered page count does not match visible slides; source-slide mapping cannot be verified')
             retained_pdf = run_dir / 'document.pdf'
             shutil.copyfile(pdf, retained_pdf)
             output_prefix = run_dir / prefix
@@ -195,6 +234,11 @@ def render(source, out_dir, prefix='page', dpi=100, timeout=180):
                   'pages': [{'page': i + 1, 'path': str(path), 'sha256': sha256(path)} for i, path in enumerate(files)],
                   'pdf': {'path': str(retained_pdf), 'sha256': sha256(retained_pdf)},
                   'warnings': warnings, 'validation': validation, 'manifest': str(run_dir / 'manifest.json')}
+        if presentation:
+            for page, slide in zip(result['pages'], (slide for slide in presentation['slides'] if slide['show'])):
+                slide['renderedPage'] = page['page']
+                page['sourceSlide'] = {key: slide[key] for key in ('index', 'number', 'id', 'part')}
+            result['presentation'] = presentation
         (run_dir / 'manifest.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
         return result
     except BaseException:

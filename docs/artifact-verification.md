@@ -22,6 +22,15 @@ provided by workstation; unavailable tools produce `rendered: false`, no files a
 explicit guidance. Existing `pptx_render.py` delegates to this renderer while
 preserving its positional input and `--outdir`, `--prefix`, `--dpi` options.
 
+PPTX export explicitly includes visible slides only, in source order, without
+notes pages. `presentation` reports the policy, visible/hidden counts and every
+source slide's zero-based `index`, one-based `number`, stable `id`, package part,
+visibility and `renderedPage` (null when hidden). Each generated page's `sourceSlide`
+maps back to that inventory. A mismatched visible-slide/page count fails instead
+of publishing an uncertain mapping. Hidden slides are preserved in the source
+and included by `pptx_read.py --outline`. An all-hidden deck returns no pages,
+`rendered: false`, `reason: no_visible_slides` and its inventory manifest.
+
 Open the images listed by the returned manifest and inspect the content and layout
 that matters to the task. `rendered: true` means pages were generated and counted;
 `visuallyInspected` and `fidelityVerified` stay false. It does not imply Word,

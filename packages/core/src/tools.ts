@@ -678,8 +678,8 @@ export const toolDefinitions = {
     lease: true,
   },
   list_desktop_applications: {
-    description: 'List running apps and installed desktop-entry IDs, preserving distinct launchers and reporting bundled workflow capabilities/package versions.',
-    input: observationOnly,
+    description: 'List tracked running apps. Use view=running for compact routine checks; view=all (the compatible default) also discovers installed desktop-entry IDs, distinct launchers, bundled workflow capabilities and package versions.',
+    input: observationOnly.extend({ view: z.enum(['running', 'all']).default('all') }),
     lease: false,
   },
   close_desktop_application: {

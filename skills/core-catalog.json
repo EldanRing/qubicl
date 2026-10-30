@@ -78,13 +78,14 @@
         "scripts/pdf_merge.py",
         "scripts/pdf_meta.py",
         "scripts/pdf_page_image.py",
+        "scripts/pdf_preservation.py",
         "scripts/pdf_read.py",
         "scripts/pdf_secure.py",
         "scripts/pdf_split.py",
         "scripts/pdf_stamp.py",
         "scripts/pdf_watermark.py"
       ],
-      "sha256": "4914507b1e3008a240e9f2d539bb79ea9fb48f2911dc6fddd751dc1c6755b66c",
+      "sha256": "1e359cc6f31b30f99c4a48543422562b8c9fffd1a5a7f0682ba1d377e2088cf9",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",
@@ -166,7 +167,7 @@
         "scripts/xlsx_restructure_dependents.py",
         "scripts/xlsx_to_csv.py"
       ],
-      "sha256": "3d6f6ba795d0d2ce53639da2deba212df39e52221eb8b860dbed31c84f8587d1",
+      "sha256": "736ed674fe597705a542cb89b453851234a6e715eafd84aadf6fea4395a8c3a8",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",
@@ -203,7 +204,7 @@
         "scripts/pptx_read.py",
         "scripts/pptx_render.py"
       ],
-      "sha256": "e75bf4be256b486b937be27775dcd8f540bf351ae65a1dbb8d8e67998b929daf",
+      "sha256": "e0930d1df366c842f76082a719369a8534e49573cf89c801aef288c07b66838d",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",

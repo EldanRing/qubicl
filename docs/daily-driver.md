@@ -16,8 +16,11 @@ the separate profile-wipe workflow below removes the stored profile.
 
 For documents on `computer` or `workstation`, use the client's file tools to
 create or upload files below `/home/qubicl`. Where supported by the preset,
-`list_desktop_applications` returns running apps plus a bounded catalog of safe
-built-ins and installed user/system desktop entries. Open an available
+`list_desktop_applications` with `view: running` returns tracked running apps
+without rediscovering launchers. Omit `view` or use `view: all` for running apps
+plus the bounded catalog of safe built-ins and installed user/system desktop
+entries. The running-only response omits `availableApplications`; it does not
+mean no launchers are installed. Open an available
 executable name with `open_desktop_application`. Managed applications and the
 browser survive human takeover. Qubicl records launch identity and capacity;
 normal close requests allow save dialogs. Explicit process termination requires

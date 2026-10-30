@@ -6,6 +6,11 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Added
 
+- Desktop application inventory accepts `view: running` to omit launcher discovery
+  during routine observations. The default full catalog remains compatible.
+- PowerPoint outlines identify hidden slides; rendering receipts declare their
+  visible-only policy and map generated pages back to source slide IDs and order.
+
 - Desktop window inventories offer compact metadata and single-window reads.
   Actions can return only the affected element's value/focus and related windows,
   with optional snapshot bounds. Existing full observations remain available.
@@ -14,6 +19,15 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   from `not_observed_yet` without replaying input or treating timeout as failure.
 
 ### Fixed
+
+- PDF attachment extraction retains every duplicate-name payload, uses distinct
+  safe filenames, refuses existing destinations and reports source names, payload
+  indices and hashes. Metadata/attachment edits retain the full document, original
+  metadata and encryption policy, then reopen and verify before replacing output.
+  Signed/certified or unpreservable documents fail without replacing the destination.
+- Worksheet renames update local `#Sheet!Cell` hyperlink targets, including quoted
+  sheet names and helper-created links, while preserving external links and formula
+  string literals.
 
 - Targeted desktop post-action snapshots avoid a redundant window-list round trip.
   Native snapshot documentation and schemas clarify that byte budgets cover

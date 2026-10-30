@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Render every slide of a .pptx to per-slide PNG images.
+"""Render visible slides of a .pptx to per-slide PNG images.
 
 Pipeline: LibreOffice (soffice --headless --convert-to pdf) turns the deck
 into a PDF, then poppler (pdftoppm, or pdftocairo as an alternate) splits
-the PDF into one PNG per slide.
+the PDF into one PNG per visible slide. Hidden slides remain in the source;
+the manifest inventories them and maps output pages to source slide IDs/order.
+An all-hidden deck reports rendered=false with reason=no_visible_slides.
 
 Output is JSON. When both tools are present:
   {"rendered": true, "files": ["render/slide-1.png", ...]}
@@ -27,7 +29,7 @@ def main(argv=None):
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(
-        description="Render each slide of a .pptx to a PNG via "
+        description="Render each visible slide of a .pptx to a PNG via "
                     "soffice + pdftoppm/pdftocairo.",
         epilog=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("pptx", help="path to the .pptx file")

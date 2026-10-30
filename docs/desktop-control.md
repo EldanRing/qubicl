@@ -298,7 +298,9 @@ frei0r/SWH video effects and icon assets.
 
 ## Launchers, crops and application workflows
 
-`list_desktop_applications` reports desktop-entry identifiers such as
+For routine running-app observations, use `list_desktop_applications` with
+`view: running`; its response omits launcher discovery and `availableApplications`.
+The compatible default (`view: all`) reports desktop-entry identifiers such as
 `desktop:org.inkscape.Inkscape.desktop`. Pass the identifier to
 `open_desktop_application` to retain the launcher's fixed arguments and declared
 file handling. Entries sharing an interpreter remain distinct. Execution uses

@@ -22,6 +22,20 @@ Common helpers beneath `<resourceRoot>/scripts/`:
 
 Read `references/forms.md` only for AcroForm work.
 
+`pdf_meta.py --extract-attachments DIR` extracts every payload, including several
+attachments with the same stored name. Safe basenames receive deterministic
+`__2`, `__3` collision suffixes; existing files or symlinks cause failure without
+overwriting them. The receipt maps each `sourceName` and zero-based `payloadIndex`
+to its destination, byte count and SHA-256. Use a new directory for another copy.
+
+Metadata/attachment edits clone the full document, retaining other DocInfo fields,
+forms, outlines, existing attachments and the original encryption/password/permission
+policy (`--password` is required for encrypted input). They stage, reopen and
+verify preservation before atomically replacing the destination. Signed/certified
+PDFs and content or encryption that cannot be preserved fail before replacement;
+these helpers do not re-sign documents. `--clear-meta` removes only DocInfo; XMP
+is retained and may disagree with changed DocInfo. Check the preservation receipt.
+
 Merge and split retain interactive AcroForm field trees, selected-page widgets,
 values and appearance resources. Later inputs with colliding field names receive
 a deterministic `source_N.` namespace; the JSON receipt lists each rename.

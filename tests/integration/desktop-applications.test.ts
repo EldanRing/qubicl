@@ -10,6 +10,28 @@ import { ToolExecutor } from '@qubicl/control/executor';
 import { ProcessManager } from '@qubicl/control/processes';
 import { NativeDesktopManager } from '@qubicl/control/desktop-native';
 
+test('running-only application observations skip launcher discovery and retain compatible full discovery', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-app-list-'));
+  const manager = new DesktopApplicationManager('computer', { root });
+  let discoveries = 0;
+  manager.available = async () => { discoveries++; return []; };
+  const manifest = buildComputerManifest('workstation', 'test', 'revision');
+  const executor = new ToolExecutor({ manifest, sha256: manifestSha256(manifest) }, {
+    desktopApplications: manager, processes: new ProcessManager({ outputDirectory: join(root, 'output') }),
+  });
+  context.after(async () => { await executor.shutdown(); await rm(root, { recursive: true, force: true }); });
+  const running = await executor.call('list_desktop_applications', { view: 'running' }) as Record<string, unknown>;
+  assert.deepEqual(running.applications, []);
+  assert.equal(Object.hasOwn(running, 'availableApplications'), false);
+  assert.equal(discoveries, 0);
+  for (const input of [{}, { view: 'all' }]) {
+    const full = await executor.call('list_desktop_applications', input) as Record<string, unknown>;
+    assert.deepEqual(full.availableApplications, []);
+  }
+  assert.equal(discoveries, 2);
+  await assert.rejects(executor.call('list_desktop_applications', { view: 'unsupported' }), /Invalid/);
+});
+
 test('single-instance launch handoffs reuse the canonical app and retain delayed aliases', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'qubicl-app-handoff-'));
   const script = join(root, 'editor.cjs');

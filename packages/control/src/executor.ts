@@ -675,7 +675,7 @@ export class ToolExecutor {
       case 'list_desktop_applications':
         return respond({
           applications: await this.desktopApplications.list(),
-          availableApplications: await this.desktopApplications.available(),
+          ...(input.view === 'running' ? {} : { availableApplications: await this.desktopApplications.available() }),
         });
       case 'close_desktop_application':
         return respond(await runDesktop(() => this.desktopApplications.close(input.applicationId as string, input.discardUnsavedChanges as boolean, input.mode as 'request' | 'terminate' | undefined)));
