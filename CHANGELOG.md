@@ -6,6 +6,9 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- CSV imports reject overflowing/nonfinite explicit numbers with cell context
+  before saving, accept an initial UTF-8 BOM by default, and preserve blanks in
+  explicitly typed columns with an optional strict nonempty policy.
 - Browser reading and search traverse visible open shadow DOM and assigned slots
   without duplicating slotted text. Snapshot text, refs and point inspection use
   shared control names; disclosure controls and nested scroll areas receive refs.

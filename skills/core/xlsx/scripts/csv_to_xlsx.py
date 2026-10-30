@@ -62,8 +62,8 @@ def main(argv=None):
     ap.add_argument("csv_file", help="input CSV path")
     ap.add_argument("output", help="output .xlsx path")
     ap.add_argument("--sheet-name", default="Sheet1")
-    ap.add_argument("--encoding", default="utf-8",
-                    help="CSV file encoding (default utf-8)")
+    ap.add_argument("--encoding", default="utf-8-sig",
+                    help="CSV file encoding (default UTF-8, accepting an initial BOM)")
     ap.add_argument("--delimiter", default=",")
     ap.add_argument("--no-infer", action="store_true",
                     help="keep every cell as a string")
@@ -71,6 +71,8 @@ def main(argv=None):
                     help="skip header styling / freeze / autofilter")
     ap.add_argument("--column-types", default="{}", help='JSON mapping of column letters to text, number, boolean, date or formula')
     ap.add_argument("--allow-formulas", action="store_true", help="Interpret = expressions deliberately; default is literal text")
+    ap.add_argument("--empty-cells", choices=("blank", "reject"), default="blank",
+                    help="Empty explicitly typed cells become blanks by default; reject enforces nonempty typed values")
     args = ap.parse_args(argv)
     column_types = json.loads(args.column_types)
     if not isinstance(column_types, dict) or any(v not in {"text", "number", "boolean", "date", "formula"} for v in column_types.values()):
@@ -92,12 +94,21 @@ def main(argv=None):
         for j, text in enumerate(row):
             kind = column_types.get(get_column_letter(j + 1)) if i else "text"
             value = text
-            if i and kind == "number": value = float(text) if any(c in text.lower() for c in ".e") else int(text)
-            elif i and kind == "boolean":
-                if text.lower() not in ("true", "false"): raise ValueError("Invalid boolean")
-                value = text.lower() == "true"
-            elif i and kind == "date": value = date.fromisoformat(text)
-            elif i and kind is None and not args.no_infer and inferred.get(j): value = infer(text)
+            try:
+                if i and kind not in (None, "text") and text == "":
+                    if args.empty_cells == "reject": raise ValueError("Empty typed value is not allowed")
+                    value = None
+                elif i and kind == "number":
+                    value = float(text) if any(c in text.lower() for c in ".e") else int(text)
+                    if not math.isfinite(value): raise ValueError("Numeric overflow or nonfinite value cannot be stored in Excel")
+                elif i and kind == "boolean":
+                    if text.lower() not in ("true", "false"): raise ValueError("Invalid boolean")
+                    value = text.lower() == "true"
+                elif i and kind == "date": value = date.fromisoformat(text)
+                elif i and kind is None and not args.no_infer and inferred.get(j): value = infer(text)
+            except (ValueError, OverflowError) as exc:
+                coordinate = f"{get_column_letter(j + 1)}{i + 1}"
+                raise ValueError(f"CSV row {i + 1}, column {j + 1} ({coordinate}), type {kind}: {exc}") from exc
             cell = ws.cell(i + 1, j + 1, value)
             if isinstance(value, str) and not (args.allow_formulas or kind == "formula"):
                 cell.data_type = "s"
