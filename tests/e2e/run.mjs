@@ -818,7 +818,12 @@ try {
 
   await paired('control_computer', { lease: contractLease, action: { type: 'wait', durationMs: 1 } });
   await paired('write_clipboard', { lease: contractLease, text: 'transport-clipboard' });
-  await paired('read_clipboard', { lease: contractLease });
+  await paired('read_clipboard', { lease: contractLease }, undefined, (value) => {
+    const { captureId, capturedAt, ...stable } = value;
+    assert.match(captureId, /^[a-f0-9]{24}$/);
+    assert.ok(Number.isFinite(Date.parse(capturedAt)));
+    return stable;
+  });
   const framedClipboard = await client.callTool({ name: 'read_clipboard', arguments: { lease: contractLease } });
   assert.match(framedClipboard.content.find(({ type }) => type === 'text')?.text ?? '', new RegExp(`^<${UNTRUSTED_RESULT_TAG}>`));
   await paired('take_screenshot', { lease: contractLease }, undefined, (value) => {
