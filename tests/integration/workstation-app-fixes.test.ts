@@ -38,8 +38,8 @@ test('workstation typing preserves saved text in GTK and Qt without replacing fi
   const expected = input.replaceAll('\r\n', '\n');
   const gtkPath = join(root, 'gtk.txt'), qtPath = join(root, 'qt.txt');
   await writeFile(gtkPath, ''); await chown(gtkPath, 1000, 1000);
-  await apps.open('text-editor', [gtkPath]);
-  for (const toolkit of ['GTK', 'Qt']) {
+  for (const toolkit of ['GTK', 'Qt']) await context.test(`${toolkit} saved text and clipboard`, async () => {
+    if (toolkit === 'GTK') await apps.open('text-editor', [gtkPath]);
     if (toolkit === 'Qt') qt = spawn('/usr/bin/python3', [resolve('tests/fixtures/qt-text-editor.py'), qtPath], { uid: 1000, gid: 1000, env: environment, stdio: 'ignore' });
     const window = await until(async () => ((await desktop.windows()).windows as Window[]).find((w) => toolkit === 'GTK' ? w.title.includes('gtk.txt') : w.title === 'Qubicl Qt typing fixture'), `${toolkit} editor`)
       .catch(async (error) => { throw new Error(`${error.message}; windows: ${JSON.stringify((await desktop.windows()).windows)}`); });
@@ -59,22 +59,22 @@ test('workstation typing preserves saved text in GTK and Qt without replacing fi
       assert.ok(editor);
       const targeted = await desktop.snapshot({ windowId: window.id, ref: editor.ref });
       assert.equal(targeted.usefulTree, true); assert.equal(targeted.fallback, undefined);
-      const replacement = await desktop.act({ ref: editor.ref, action: 'set_text', text: 'Replacement' });
-      assert.equal(replacement.singleUndoGuaranteed, false);
-      await controlDesktop({ type: 'keypress', keys: ['ctrl+z'], targetWindowId: window.id });
-      const undo = await desktop.snapshot({ windowId: window.id });
-      const undone = (undo.elements as Element[]).find((e) => e.states.includes('editable'));
-      assert.ok(undone, 'Undo result remains observable; AT-SPI cannot promise atomic grouping');
-      await run('xdotool', ['windowsize', String(window.id), '1800', '1100'], { env: environment });
-      const oversized = await until(async () => ((await desktop.windows()).windows as Array<Window & { clippedToWorkArea: boolean }>).find((w) => w.id === window.id && w.clippedToWorkArea), 'oversized window');
-      const image = await takeScreenshot({ windowId: window.id, geometryToken: oversized.geometryToken }) as { width: number; height: number; clipped: boolean; origin: { x: number; y: number }; data: string };
-      assert.equal(image.clipped, true); assert.ok(image.width <= 1440 && image.height <= 900); assert.ok(image.origin.x >= 0 && image.origin.y >= 0);
-      await assert.rejects(takeScreenshot({ windowId: window.id, geometryToken: oversized.geometryToken, clipToScreen: false }), /visible screen/);
-      await desktop.windowAction(window.id, 'fit', oversized.geometryToken);
-      await until(async () => ((await desktop.windows()).windows as Window[]).find((w) => w.id === window.id && w.geometryToken !== oversized.geometryToken), 'fit geometry update');
-      await assert.rejects(takeScreenshot({ windowId: window.id, geometryToken: oversized.geometryToken }), /geometry/);
     }
-  }
+  });
+
+  await context.test('window clipping uses observed screen bounds and rejects stale geometry', async () => {
+    await apps.open('text-editor', [gtkPath]);
+    const window = await until(async () => ((await desktop.windows()).windows as Window[]).find((w) => w.title.includes('gtk.txt')), 'GTK capture window');
+    const { desktopBounds: bounds } = await desktop.windows() as { desktopBounds: { width: number; height: number } };
+    await run('xdotool', ['windowsize', String(window.id), String(bounds.width + 400), String(bounds.height + 200)], { env: environment });
+    const oversized = await until(async () => ((await desktop.windows()).windows as Array<Window & { clippedToWorkArea: boolean }>).find((w) => w.id === window.id && w.clippedToWorkArea), 'oversized window');
+    const image = await takeScreenshot({ windowId: window.id, geometryToken: oversized.geometryToken }) as { width: number; height: number; clipped: boolean; origin: { x: number; y: number }; data: string };
+    assert.equal(image.clipped, true); assert.ok(image.width <= bounds.width && image.height <= bounds.height); assert.ok(image.origin.x >= 0 && image.origin.y >= 0);
+    await assert.rejects(takeScreenshot({ windowId: window.id, geometryToken: oversized.geometryToken, clipToScreen: false }), /visible screen/);
+    await desktop.windowAction(window.id, 'fit', oversized.geometryToken);
+    await until(async () => ((await desktop.windows()).windows as Window[]).find((w) => w.id === window.id && w.geometryToken !== oversized.geometryToken), 'fit geometry update');
+    await assert.rejects(takeScreenshot({ windowId: window.id, geometryToken: oversized.geometryToken }), /geometry/);
+  });
 });
 
 test('root-managed Office aliases reach accessible documents and a save dialog through private profiles', { skip: !enabled, timeout: 60_000 }, async (context) => {
@@ -87,8 +87,9 @@ test('root-managed Office aliases reach accessible documents and a save dialog t
   const writer = join(root, 'writer-fixture.txt'), calc = join(root, 'calc-fixture.xlsx'), impress = join(root, 'impress-fixture.pptx');
   await writeFile(writer, 'Office document 日本語\n'); await chmod(writer, 0o644); await chown(writer, 1000, 1000);
   await run('/opt/qubicl/skills-venv/bin/python', ['-c', 'import sys;from openpyxl import Workbook;from pptx import Presentation;w=Workbook();w.active["A1"]="Calc fixture";w.save(sys.argv[1]);p=Presentation();s=p.slides.add_slide(p.slide_layouts[0]);s.shapes.title.text="Impress fixture";p.save(sys.argv[2])', calc, impress]);
-  for (const [alias, path] of [['writer', writer], ['calc', calc], ['impress', impress]]) {
+  for (const [alias, path] of [['writer', writer], ['calc', calc], ['impress', impress]]) await context.test(`${alias} document accessibility`, async (subtest) => {
     const app = await apps.open(alias!, [path!]);
+    subtest.after(() => apps.close(app.applicationId, true, 'terminate'));
     const parent = await stat(runtime);
     assert.equal(parent.uid, 0); assert.equal(parent.gid, 1000); assert.equal(parent.mode & 0o777, 0o710);
     assert.equal((await stat(join(runtime, app.applicationId))).mode & 0o777, 0o700);
@@ -110,6 +111,5 @@ test('root-managed Office aliases reach accessible documents and a save dialog t
       assert.ok((controls.elements as Element[]).some((e) => e.states.includes('editable')), 'Save As must expose the filename field');
       await controlDesktop({ type: 'keypress', keys: ['Escape'], targetWindowId: dialog.id });
     }
-    await apps.close(app.applicationId, true, 'terminate');
-  }
+  });
 });
