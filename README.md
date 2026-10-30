@@ -143,6 +143,10 @@ Office helpers support independent chart-slide copies, native table restructurin
 with dependent charts/formulas, and final/original/markup tracked-change reads.
 See [browser safety](docs/browser-control.md), [files and services](docs/runtime-reliability.md), and [artifact verification](docs/artifact-verification.md) for the implemented behavior and limits.
 
+Qubicl 0.8.1 improves browser tab/dialog receipts, complete control observations,
+native typing and compact desktop reads, and document preservation. Existing
+tool policies and durable computer data remain under the managed upgrade path.
+
 Every preset includes native keyless `web_search`, local `web_extract`, and
 verified Qubicl-native skill baselines with durable, agent-editable working
 copies. Operators choose which tools and skills each computer exposes:

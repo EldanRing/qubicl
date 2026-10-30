@@ -4,6 +4,8 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
+## 0.8.1 - 2026-10-30
+
 ### Added
 
 - Native window `reveal` exposes a chosen client rectangle by moving only its

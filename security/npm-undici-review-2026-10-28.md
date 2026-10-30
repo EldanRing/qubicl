@@ -61,3 +61,14 @@ apply the scoped records; this review does not approve other findings.
 The original expiry remains `2026-11-12T01:36:44Z`; preparing 0.8 does not extend
 it. The accepted availability risks and TLS applicability limits remain as
 stated above and must stay disclosed in the 0.8 release notes.
+
+
+## 0.8.1 revalidation — 2026-10-30
+
+Official npm registry dist-tags still select 12.2.1 for latest/next-12 and
+11.21.1 for next-11. The retained upstream 12.2.1 archive and node-gyp downloader
+again match the hashes above; bundled Undici remains 6.29.0. The 0.8.1 browser,
+desktop and document changes do not change this private downloader consumer.
+The same exact four-preset initial-tier scope and original November 12 expiry
+apply. Candidate scans must verify the affected bytes; no other finding is
+approved and no exception is extended by this revalidation.
