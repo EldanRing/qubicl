@@ -59,6 +59,8 @@ export interface FilePreviewPublication {
   expiresAt: string;
   url: string;
   remoteUrl?: string;
+  browserUrl?: string;
+  browserAccess: { available: boolean; context: 'integrated-browser'; reason?: string };
 }
 
 export interface PreviewAccess {
@@ -225,7 +227,7 @@ export class PreviewManager {
       url: `${this.externalPath(id, access.publicBaseUrl)}?token=${encodeURIComponent(ownerToken)}`,
       remoteSharingAvailable: Boolean(access.remoteBaseUrl),
       ...(legacyShare ? { remoteUrl: legacyShare.remoteUrl, shareExpiresAt: legacyShare.expiresAt } : {}),
-      browserUrl: `${this.internalPath(id)}?token=${encodeURIComponent(ownerToken)}`,
+      ...this.browserAccess(id, ownerToken),
     };
   }
 
@@ -302,6 +304,7 @@ export class PreviewManager {
       createdAt: publication.createdAt,
       expiresAt: publication.expiresAt,
       url: `${this.externalPath(id, access.publicBaseUrl)}${suffix}?token=${encodeURIComponent(token)}`,
+      ...this.browserAccess(id, token, suffix),
       ...(access.remoteBaseUrl
         ? { remoteUrl: `${this.externalPath(id, access.remoteBaseUrl)}${suffix}?token=${encodeURIComponent(token)}` }
         : {}),
@@ -325,6 +328,27 @@ export class PreviewManager {
     this.managementTickets.clear();
     this.managementSessions.clear();
     this.stopPortMonitor();
+  }
+
+  /** Guest-local isolated origins never enter the controller's API router. */
+  handleBrowser(request: IncomingMessage, response: ServerResponse): boolean {
+    const route = this.browserRoute(request);
+    if (!route) return false;
+    if ('error' in route) {
+      json(response, route.status, { error: { code: 'preview_origin_boundary', message: route.error } });
+      return true;
+    }
+    return this.handle(request, response, route.url);
+  }
+
+  handleBrowserUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): boolean {
+    const route = this.browserRoute(request);
+    if (!route) return false;
+    if ('error' in route) {
+      socket.end(`HTTP/1.1 ${route.status} Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+      return true;
+    }
+    return this.handleUpgrade(request, socket, head, route.url);
   }
 
   handle(request: IncomingMessage, response: ServerResponse, url: URL): boolean {
@@ -555,7 +579,57 @@ export class PreviewManager {
     target.hash = '';
     return target.href;
   }
-  private internalPath(id: string): string { return `${this.internalBaseUrl.replace(/\/$/u, '')}/${id}/`; }
+  private browserBase(): URL | undefined {
+    try {
+      const base = new URL(this.internalBaseUrl);
+      if (base.protocol === 'http:' && /^preview-[a-z0-9-]+\.localhost$/u.test(base.hostname)
+        && !base.username && !base.password && !base.search && !base.hash) return base;
+    } catch { /* Legacy split runtimes do not have a guest-loopback preview route. */ }
+    return undefined;
+  }
+
+  private browserAccess(id: string, token: string, suffix = ''): Pick<FilePreviewPublication, 'browserUrl' | 'browserAccess'> {
+    const base = this.browserBase();
+    return base ? {
+      browserUrl: `${this.externalPath(id, base.href)}${suffix}?token=${encodeURIComponent(token)}`,
+      browserAccess: { available: true, context: 'integrated-browser' },
+    } : {
+      browserAccess: { available: false, context: 'integrated-browser', reason: 'This runtime has no isolated guest-local preview route. Open url in a browser on the Qubicl host.' },
+    };
+  }
+
+  private browserRoute(request: IncomingMessage): { url: URL } | { status: number; error: string } | undefined {
+    const host = request.headers.host?.toLowerCase() ?? '';
+    const match = /^([a-f0-9]{16})--(preview-[a-z0-9-]+\.localhost)(?::([0-9]+))?$/u.exec(host);
+    if (!match) return undefined;
+    const base = this.browserBase();
+    const address = request.socket.remoteAddress?.replace(/^::ffff:/u, '');
+    if (!base || match[2] !== base.hostname || (match[3] ?? '80') !== (base.port || '80')
+      || !(address === '::1' || /^127\.\d+\.\d+\.\d+$/u.test(address ?? ''))) {
+      return { status: 403, error: 'This preview origin is available only inside its own computer.' };
+    }
+    let url: URL;
+    const origin = `http://${host}`;
+    try { url = new URL(request.url ?? '/', origin); }
+    catch { return { status: 400, error: 'Invalid preview request target.' }; }
+    if (url.origin !== new URL(origin).origin || (request.headers.origin !== undefined && request.headers.origin !== url.origin)) {
+      return { status: 403, error: 'Preview application requests must remain on their publication origin.' };
+    }
+    // These headers are gateway attestations on the normal control route, never
+    // credentials or authority supplied by an application on a preview origin.
+    const authorization = request.headers.authorization;
+    for (const name of Object.keys(request.headers)) {
+      if (name.startsWith('x-qubicl-') || name === 'forwarded' || name.startsWith('x-forwarded-')) delete request.headers[name];
+    }
+    request.rawHeaders = request.rawHeaders.flatMap((value, index, all) => index % 2 === 0
+      && !/^(?:x-qubicl-|x-forwarded-|forwarded$)/iu.test(value) ? [value, all[index + 1]!] : []);
+    request.headers['x-qubicl-access-surface'] = 'local';
+    request.headers['x-qubicl-preview-host'] = host;
+    request.headers['x-qubicl-preview-proto'] = 'http';
+    if (typeof authorization === 'string') request.headers['x-qubicl-preview-authorization'] = authorization;
+    url.pathname = `/_qubicl/previews/${match[1]}${url.pathname}`;
+    return { url };
+  }
   private cookiePath(id: string): string {
     const value = this.externalPath(id);
     try { return new URL(value).pathname; } catch { return value.startsWith('/') ? value : '/'; }

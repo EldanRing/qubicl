@@ -273,9 +273,9 @@ async function runnerRequest<T>(
       503,
     );
   }
-  let value: T | { error?: { code?: string; message?: string } } | undefined;
+  let value: T | { error?: { code?: string; message?: string; details?: Record<string, unknown> } } | undefined;
   try {
-    value = await response.json() as T | { error?: { code?: string; message?: string } };
+    value = await response.json() as T | { error?: { code?: string; message?: string; details?: Record<string, unknown> } };
   } catch (error) {
     if (response.ok && ambiguousOnFailure) {
       throw new QubiclError('internal_runner_ambiguous', `The isolated runner returned an invalid success response after the operation may have started: ${(error as Error).message}`, 503);
@@ -283,8 +283,8 @@ async function runnerRequest<T>(
     if (response.ok) throw new QubiclError('internal_runner_invalid_response', `The isolated runner returned an invalid success response: ${(error as Error).message}`, 502);
   }
   if (!response.ok) {
-    const payload = value as { error?: { code?: string; message?: string } } | undefined;
-    throw new QubiclError(payload?.error?.code ?? 'internal_runner_error', payload?.error?.message ?? `Internal runner returned HTTP ${response.status}.`, response.status);
+    const payload = value as { error?: { code?: string; message?: string; details?: Record<string, unknown> } } | undefined;
+    throw new QubiclError(payload?.error?.code ?? 'internal_runner_error', payload?.error?.message ?? `Internal runner returned HTTP ${response.status}.`, response.status, payload?.error?.details);
   }
   if (value === undefined) throw new QubiclError('internal_runner_invalid_response', 'The isolated runner returned an empty success response.', 502);
   return value as T;

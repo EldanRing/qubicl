@@ -63,6 +63,15 @@ when the listener stops. Explicit unpublish, runtime shutdown and policy revocat
 can revoke publications; file and share expiry remain independent of input ownership.
 The preview never binds the computer port directly to the host.
 
+On unified runtimes, `browserUrl` is a separate publication-specific loopback
+origin inside the computer; use it with the integrated browser, or request
+`publish_port.openInBrowser`. The normal `url` remains for browsers on the host.
+Both port and file previews report `browserAccess.available`. Legacy split
+runtimes report it as false and omit `browserUrl`; opening through the integrated
+browser then returns a capability error rather than navigating to a broken URL.
+The guest route supports relative assets, cookies and WebSockets without exposing
+controller API routes on the preview origin.
+
 `list_previews` distinguishes published registration from current listener state.
 Its liveness record includes the observation time, successful/failed inspection,
 and pending cleanup when a listener is absent. The monitor normally checks every

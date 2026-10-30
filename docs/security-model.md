@@ -205,6 +205,13 @@ loopback routes. Review audit exports before sharing them.
   active HTTP streams and WebSockets, preserving owner and management access.
   Connections outside Qubicl's managed proxy are possible in the
   unrestricted `developer` profile and are outside this revocation mechanism.
+- Unified-runtime browser previews use per-publication `*.localhost` origins on
+  the computer's control listener. That route requires a loopback peer, the exact
+  configured computer/publication host, a valid publication token or cookie and,
+  when supplied, a matching Origin. It dispatches only preview HTTP/WebSocket
+  traffic; it never enters the controller API router. Client-supplied internal
+  attestation headers are stripped. Host and remote preview routes retain their
+  existing gateway boundaries.
 - Docker shares the host kernel; runtime/kernel escape is out of scope.
 - Docker itself is a privileged host boundary.
 - Standard Linux discovery commands inside a container can report Docker-host or Docker-VM metadata—including CPU model/logical CPUs, total memory, kernel, uptime, load, and backing-filesystem capacity. These observations are not the computer's usable budget; Qubicl's cgroup CPU, memory, and PID ceilings are the enforced limits reported by `get_computer_status`.

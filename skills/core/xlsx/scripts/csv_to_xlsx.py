@@ -24,15 +24,75 @@ import json
 import sys
 import re
 import math
+import os
+import tempfile
 from datetime import date, datetime
+from pathlib import Path
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 MAX_COL_WIDTH = 60
 COL_PADDING = 2
 DEFAULT_COL_WIDTH = 8
+# Excel worksheet limits, independent of what openpyxl permits or truncates.
+# https://support.microsoft.com/en-us/excel/excel-specifications-and-limits
+MAX_ROWS = 1_048_576
+MAX_COLUMNS = 16_384
+MAX_CELL_CHARACTERS = 32_767
+MAX_FORMULA_CHARACTERS = 8_192
+
+
+def read_rows(stream, delimiter):
+    rows = []
+    reader = csv.reader(stream, delimiter=delimiter)
+    try:
+        for index, row in enumerate(reader, start=1):
+            if index > MAX_ROWS:
+                raise ValueError(f"CSV row {index} exceeds Excel's {MAX_ROWS}-row limit")
+            if len(row) > MAX_COLUMNS:
+                raise ValueError(f"CSV row {index}, column {MAX_COLUMNS + 1} (XFE{index}) exceeds Excel's {MAX_COLUMNS}-column limit")
+            for column, value in enumerate(row, start=1):
+                if len(value) > MAX_CELL_CHARACTERS:
+                    coordinate = f"{get_column_letter(column)}{index}"
+                    raise ValueError(f"CSV row {index}, column {column} ({coordinate}) contains {len(value)} characters; Excel allows {MAX_CELL_CHARACTERS} per cell")
+            rows.append(row)
+    except csv.Error as exc:
+        raise ValueError(f"CSV record {len(rows) + 1}, source line {reader.line_num}: {exc}") from exc
+    return rows
+
+
+def save_verified(workbook, output, input_rows):
+    """Publish only a complete archive whose text and formulas survived saving."""
+    destination = Path(output)
+    with tempfile.NamedTemporaryFile(prefix='.qubicl-csv-', suffix='.xlsx',
+                                     dir=destination.parent, delete=False) as staged:
+        staged_path = Path(staged.name)
+    try:
+        workbook.save(staged_path)
+        saved = load_workbook(staged_path, data_only=False)
+        try:
+            expected, actual = workbook.active, saved.active
+            if (actual.max_row, actual.max_column) != (expected.max_row, expected.max_column):
+                raise ValueError("Saved workbook dimensions differ from the converted CSV")
+            # Visit CSV cells only: a single wide row must not expand every
+            # narrower row into a large blank rectangle during verification.
+            for row_index, source_row in enumerate(input_rows, start=1):
+                for column_index in range(1, len(source_row) + 1):
+                    original = expected.cell(row_index, column_index)
+                    cell = actual.cell(row_index, column_index)
+                    value = original.value
+                    # Empty CSV strings are represented as blank cells by Excel.
+                    if isinstance(value, str) and value and (cell.value != value or cell.data_type != original.data_type):
+                        raise ValueError(f"Saved workbook changed text or formula at {original.coordinate}; output was not replaced")
+                    if value not in (None, '') and cell.value is None:
+                        raise ValueError(f"Saved workbook lost a value at {original.coordinate}; output was not replaced")
+        finally:
+            saved.close()
+        os.replace(staged_path, destination)
+    finally:
+        staged_path.unlink(missing_ok=True)
 
 
 def infer(text):
@@ -79,7 +139,7 @@ def main(argv=None):
         raise ValueError("Invalid column types")
 
     with open(args.csv_file, newline="", encoding=args.encoding) as fh:
-        rows = list(csv.reader(fh, delimiter=args.delimiter))
+        rows = read_rows(fh, args.delimiter)
 
     wb = Workbook()
     ws = wb.active
@@ -109,6 +169,9 @@ def main(argv=None):
             except (ValueError, OverflowError) as exc:
                 coordinate = f"{get_column_letter(j + 1)}{i + 1}"
                 raise ValueError(f"CSV row {i + 1}, column {j + 1} ({coordinate}), type {kind}: {exc}") from exc
+            if isinstance(value, str) and value.startswith('=') and (args.allow_formulas or kind == 'formula') and len(value) > MAX_FORMULA_CHARACTERS:
+                coordinate = f"{get_column_letter(j + 1)}{i + 1}"
+                raise ValueError(f"CSV row {i + 1}, column {j + 1} ({coordinate}) formula contains {len(value)} characters; Excel allows {MAX_FORMULA_CHARACTERS}")
             cell = ws.cell(i + 1, j + 1, value)
             if isinstance(value, str) and not (args.allow_formulas or kind == "formula"):
                 cell.data_type = "s"
@@ -128,7 +191,7 @@ def main(argv=None):
             ws.column_dimensions[get_column_letter(col_idx)].width = \
                 min(longest + COL_PADDING, MAX_COL_WIDTH)
 
-    wb.save(args.output)
+    save_verified(wb, args.output, rows)
     print(json.dumps({"ok": True, "output": args.output,
                       "rows": len(rows), "conversions": conversions}, ensure_ascii=False))
     return 0

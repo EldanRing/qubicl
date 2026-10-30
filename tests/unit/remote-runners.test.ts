@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import test from 'node:test';
+import { QubiclError } from '../../packages/control/dist/errors.js';
 import {
   RemoteBrokerManager,
   RemoteBrowserManager,
@@ -25,7 +26,7 @@ test('isolated runner clients use the intended route, method, body, and protecte
     if (request.url === '/v1/ports') return response.end(JSON.stringify({ ports: [{ port: 3000, address: 'loopback', protocol: 'tcp' }] }));
     if (request.url === '/v1/applications' && request.method === 'GET') return response.end(JSON.stringify({ applications: [], availableApplications: [] }));
     if (request.url === '/v1/status') return response.end(JSON.stringify({ desktopApplications: 2 }));
-    if (request.url === '/v1/clipboard' && request.method === 'GET') return response.end(JSON.stringify({ text: 'clipboard' }));
+    if (request.url === '/v1/clipboard/read' && request.method === 'POST') return response.end(JSON.stringify({ text: 'clipboard' }));
     response.end(JSON.stringify({ ok: true, written: true, applicationId: 'app-1', application: 'writer', state: 'closed', lifecycle: 'desktop_session', forcedKill: false }));
   });
   await listen(server);
@@ -70,12 +71,31 @@ test('isolated runner clients use the intended route, method, body, and protecte
     assert.equal(browser.count(), 0);
 
     assert.ok(requests.some(({ path, method, runnerKey }) => path === '/v1/ports' && method === 'GET' && runnerKey === 'runner-secret'));
+    assert.ok(requests.some(({ path, method, body }) => path === '/v1/clipboard/read' && method === 'POST' && JSON.stringify(body) === '{}'));
     assert.ok(requests.some(({ path, brokerKey }) => path === '/v1/broker/request' && brokerKey === 'broker-secret'));
     assert.ok(requests.some(({ path, body }) => path === '/v1/browser/invoke' && (body as { method?: string }).method === 'computer'));
     assert.ok(requests.every(({ brokerKey, runnerKey }) => Boolean(brokerKey || runnerKey)));
   } finally {
     await close(server);
   }
+});
+
+test('isolated browser errors preserve dialog correlation and dispatch evidence', async () => {
+  const details = { operationId: 'operation-one', dialogId: 'dialog-one', dispatch: 'started', dialog: { type: 'prompt' } };
+  const server = createServer((_request, response) => {
+    response.writeHead(409, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { code: 'browser_waiting_for_dialog', message: 'Resolve the prompt.', details } }));
+  });
+  await listen(server);
+  try {
+    const browser = new RemoteBrowserManager(`http://127.0.0.1:${(server.address() as AddressInfo).port}`, 'runner-secret');
+    await assert.rejects(browser.click('g1e1', 'left'), error => {
+      assert.ok(error instanceof QubiclError);
+      assert.equal(error.code, 'browser_waiting_for_dialog');
+      assert.deepEqual(error.details, details);
+      return true;
+    });
+  } finally { await close(server); }
 });
 
 async function readJson(request: IncomingMessage): Promise<unknown | undefined> {

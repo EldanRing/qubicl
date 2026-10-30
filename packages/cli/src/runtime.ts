@@ -549,10 +549,13 @@ export async function renderRuntime(state: LoadedState): Promise<void> {
       QUBICL_EXPECTED_MANIFEST_SHA256: computer.image.manifestSha256!,
       QUBICL_EXECUTOR_URL: `http://${unifiedRuntime ? '127.0.0.1' : executorService}:3213`,
       QUBICL_EXECUTOR_KEY: executorKey,
-      QUBICL_EXECUTOR_HOST: unifiedRuntime ? computerContainerName(state, computer) : executorService,
+      QUBICL_EXECUTOR_HOST: unifiedRuntime ? '127.0.0.1' : executorService,
       QUBICL_PUBLIC_PREVIEW_BASE: localPreviewBase,
       QUBICL_PREVIEW_ACCESS_PATH: PREVIEW_ACCESS_CONTAINER_PATH,
-      QUBICL_INTERNAL_PREVIEW_BASE: `http://${gatewayContainerName(installationId, state.paths.root)}:3211/computers/${computer.id}/previews`,
+      // The integrated browser resolves *.localhost in its own namespace.
+      // Unified runtimes serve isolated publications on their loopback controller;
+      // a split runtime must not advertise an unusable gateway-origin URL.
+      QUBICL_INTERNAL_PREVIEW_BASE: unifiedRuntime ? `http://${previewHostname(computer.id)}:3212/computers/${computer.id}/previews` : '',
       QUBICL_BROKER_URL: `http://${egressHost}:3128`,
       QUBICL_BROKER_KEY: brokerKey,
       ...(webRuntime ? { QUBICL_WEB_URL: `http://${unifiedRuntime ? '127.0.0.1' : webService}:3215`, QUBICL_WEB_KEY: webKey } : {}),

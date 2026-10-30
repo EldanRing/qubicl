@@ -175,10 +175,12 @@ export function browserDOM(request: BrowserDOMRequest): unknown {
     const inert = Boolean(request.barriers?.inert) || [...ancestors(element)].some((current) => current.hasAttribute('inert'));
     const blockedByModal = Boolean(request.barriers?.blockedByModal) || Boolean(currentModal && ![...ancestors(element)].includes(currentModal));
     const disabled = element.matches(':disabled') || [...ancestors(element)].some((current) => current.getAttribute('aria-disabled') === 'true');
-    const readOnly = Boolean(field.readOnly) || element.getAttribute('aria-readonly') === 'true';
+    const textControl = isField || roleOf(element) === 'textbox' || roleOf(element) === 'searchbox' || element.hasAttribute('contenteditable');
+    const editable = textControl && (isField || (element as HTMLElement).isContentEditable);
+    const readOnly = Boolean(field.readOnly) || element.getAttribute('aria-readonly') === 'true' || (textControl && !editable);
     const result: BrowserControl = {
       tag: clip(element.tagName.toLowerCase(), 64), role: roleOf(element), name: nameOf(element) || (scroll ? 'Scrollable region' : ''),
-      disabled, readOnly, inert, blockedByModal, actionable: !disabled && !inert && !blockedByModal && visible(element),
+      disabled, readOnly, ...(textControl ? { editable: editable && !readOnly && !disabled && !inert && !blockedByModal } : {}), inert, blockedByModal, actionable: !disabled && !inert && !blockedByModal && visible(element),
       focused: element === focused,
       ...(element.getAttribute('type') ? { type: clip(element.getAttribute('type')!, 64) } : {}),
       ...(scroll ? { scroll } : {}),

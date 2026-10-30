@@ -483,7 +483,7 @@ test('browser extraction waits for rendered content and returns only bounded san
 
 type EventListener = (...values: unknown[]) => void;
 
-test('history separates navigation from load timeouts and accepts response-less same-URL transitions', async (context) => {
+test('history observes ready documents without waiting for absent loading events or replaying navigation', async (context) => {
   const fake = new FakeBrowserRuntime();
   const connection = await fake.browserType.connectOverCDP('http://fake');
   const page = connection.contexts()[0]!.pages()[0]! as unknown as FakePage;
@@ -497,13 +497,14 @@ test('history separates navigation from load timeouts and accepts response-less 
     page.emit('framenavigated', page);
     return null;
   });
-  context.mock.method(page, 'waitForLoadState', async (_state: string, options: { timeout: number }) => {
+  const loading = context.mock.method(page, 'waitForLoadState', async (_state: string, options: { timeout: number }) => {
     assert.ok(options.timeout <= 1_000);
     throw Object.assign(new Error('No load event'), { name: 'TimeoutError' });
   });
   const result = await manager.history('back');
   assert.deepEqual(result.navigation, { action: 'back', status: 'committed', waitTimedOut: false });
-  assert.deepEqual(result.loading, { waitUntil: 'domcontentloaded', waitStatus: 'timed_out', readyState: 'complete' });
+  assert.deepEqual(result.loading, { waitUntil: 'domcontentloaded', waitStatus: 'completed', readyState: 'complete' });
+  assert.equal(loading.mock.callCount(), 0);
   assert.equal(result.url, 'about:blank');
   assert.equal(result.title, 'Fake page');
   assert.equal(result.observationComplete, true);
@@ -559,6 +560,7 @@ class FakeLocator {
   visible = true;
   clicks = 0;
   disposals = 0;
+  page?: FakePage;
 
   constructor(private readonly index: number) {}
 
@@ -566,23 +568,33 @@ class FakeLocator {
   async dispose(): Promise<void> { this.disposals += 1; }
   async evaluate<T, A>(callback: (element: HTMLElement, argument?: A) => T, argument?: A): Promise<T> {
     const name = this.index === 0 ? 'First control' : this.index === 1 ? 'Second control' : `Control ${this.index} ${'x'.repeat(240)}`;
-    return callback({
+    const element = {
       tagName: 'BUTTON', textContent: name, isConnected: this.connected,
       getAttribute: (attribute: string) => attribute === 'role' ? 'button' : null,
-    } as unknown as HTMLElement, argument!);
+      getBoundingClientRect: () => ({ x: 10 + this.index, y: 20, width: 100, height: 30 }),
+      ownerDocument: { elementFromPoint: (): unknown => element },
+    } as unknown as HTMLElement;
+    return callback(element, argument!);
   }
   async boundingBox(): Promise<{ x: number; y: number; width: number; height: number }> {
     return { x: 10 + this.index, y: 20, width: 100, height: 30 };
   }
   async scrollIntoViewIfNeeded(): Promise<void> {}
-  async click(): Promise<void> { this.clicks += 1; }
-  async fill(value: string): Promise<void> { this.fills.push(value); }
+  async ownerFrame(): Promise<FakePage | undefined> { return this.page; }
+  async focus(): Promise<void> { if (this.page) this.page.focusedLocator = this; }
+  async click(options?: { trial?: boolean }): Promise<void> {
+    if (options?.trial) { if (this.page) this.page.pointerTarget = this; }
+    else { this.clicks += 1; await this.focus(); }
+  }
+  async fill(value: string): Promise<void> { this.fills.push(value); await this.focus(); }
   async press(value: string): Promise<void> { this.presses.push(value); }
   async selectOption(value: unknown): Promise<void> { this.selections.push(value); }
 }
 
 class FakePage {
   urlValue = 'about:blank';
+  pointerTarget?: FakeLocator;
+  focusedLocator?: FakeLocator;
   private closed = false;
   private readonly listeners = new Map<string, EventListener[]>();
 
@@ -593,7 +605,7 @@ class FakePage {
 
   readonly keyboard = {
     type: async (text: string): Promise<void> => { this.runtime.keyboardEvents.push(`type:${text}`); },
-    press: async (key: string): Promise<void> => { this.runtime.keyboardEvents.push(`press:${key}`); },
+    press: async (key: string): Promise<void> => { this.runtime.keyboardEvents.push(`press:${key}`); this.focusedLocator?.presses.push(key); },
     insertText: async (text: string): Promise<void> => { this.runtime.keyboardEvents.push(`insert:${text}`); },
     down: async (key: string): Promise<void> => { this.runtime.keyboardEvents.push(`down:${key}`); },
     up: async (key: string): Promise<void> => { this.runtime.keyboardEvents.push(`up:${key}`); },
@@ -603,6 +615,7 @@ class FakePage {
     move: async (x: number, y: number): Promise<void> => { this.runtime.mouseEvents.push(`move:${x}:${y}`); },
     click: async (_x: number, _y: number, options: { button?: string; clickCount?: number }): Promise<void> => {
       this.runtime.mouseEvents.push(`click:${options.button ?? 'left'}:${options.clickCount ?? 1}`);
+      if (this.pointerTarget) { await this.pointerTarget.click(); delete this.pointerTarget; }
     },
     down: async (options: { button?: string }): Promise<void> => { this.runtime.mouseEvents.push(`down:${options.button ?? 'left'}`); },
     up: async (options: { button?: string }): Promise<void> => { this.runtime.mouseEvents.push(`up:${options.button ?? 'left'}`); },
@@ -627,6 +640,7 @@ class FakePage {
   async goForward(): Promise<unknown> { this.urlValue = 'https://example.test/forward'; return {}; }
   async reload(): Promise<unknown> { return {}; }
   mainFrame(): object { return this; }
+  parentFrame(): null { return null; }
   on(event: string, listener: EventListener): void { this.listeners.set(event, [...this.listeners.get(event) ?? [], listener]); }
   once(event: string, listener: EventListener): void { this.on(event, listener); }
   off(event: string, listener: EventListener): void { this.listeners.set(event, (this.listeners.get(event) ?? []).filter((entry) => entry !== listener)); }
@@ -660,6 +674,7 @@ class FakePage {
   }
   async evaluateHandle(): Promise<unknown> {
     const nodes = [...this.runtime.locators];
+    for (const node of nodes) node.page = this;
     return { evaluate: async () => nodes.length, getProperty: async (index: string) => ({ asElement: () => nodes[Number(index)] }), dispose: async () => undefined };
   }
   async evaluate(_callback: unknown, argument?: { mode?: string; element?: FakeLocator; elements?: FakeLocator[]; pointX?: number; pointY?: number; minimumMs?: number; maximumCharacters?: number; qubiclViewerMetrics?: boolean; qubiclScreenshotDimensions?: boolean; observed?: FakeLocator[]; retained?: Array<{ ref: string; node: FakeLocator }> }): Promise<unknown> {

@@ -58,11 +58,14 @@ test('real download receipts correlate progress, exact artifacts and intentional
   assert.deepEqual(await readFile(completed.path!), payload);
   assert.equal((await manager.cancelDownload(id)).status, 'completed');
   const second = await click();
+  const partial = (await manager.listDownloads({ downloadId: second.downloadStartedIds[0]!, waitMs: 650 })).downloads[0]!;
+  assert.ok(partial.receivedBytes! > 0);
   const finishing = manager.listDownloads({ downloadId: second.downloadStartedIds[0]!, waitMs: 5000 });
   const cancelled = await manager.cancelDownload(second.downloadStartedIds[0]!);
   assert.equal(cancelled.status, 'cancelled');
   const terminal = (await finishing).downloads[0]!;
   assert.equal(terminal.status, 'cancelled');
   assert.equal(terminal.error, undefined);
+  assert.ok(terminal.receivedBytes! >= partial.receivedBytes!, 'Cancellation retains the observed partial transfer count');
   assert.equal((await manager.listDownloads({ operationId: first.operationId })).downloads.length, 1);
 });

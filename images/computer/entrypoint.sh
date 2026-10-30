@@ -485,6 +485,7 @@ case "$baked_profile" in
     start_viewer
     start_as_user env DISPLAY="$DISPLAY" /usr/local/bin/qubicl-chromium \
       --no-first-run \
+      --disable-back-forward-cache \
       --no-default-browser-check \
       --remote-debugging-address=127.0.0.1 \
       --remote-debugging-port=9222 \

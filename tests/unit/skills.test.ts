@@ -124,6 +124,48 @@ test('core materialization creates one editable canonical copy and four relative
   }
 });
 
+test('core upgrades ignore generated Python caches while preserving actual edits', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'qubicl-skill-cache-upgrade-'));
+  const id = 'qubicl-core/xlsx';
+  const computer = { skillPolicy: { enabledCatalogSkills: [id] } } as ComputerConfig;
+  try {
+    await materializeCatalogSkills(computer, home);
+    const paths = skillStorePaths(home);
+    const root = join(paths.installed, 'xlsx');
+    const script = join(root, 'scripts', 'csv_to_xlsx.py');
+    const expected = await readFile(script, 'utf8');
+    await writeFile(script, `${expected}\n# previous packaged version\n`);
+    const previous = (await listInstalledSkills(home, [id])).find(({ name }) => name === 'xlsx')!;
+    const registry = JSON.parse(await readFile(paths.registry, 'utf8'));
+    registry.packages[id].baselineSha256 = previous.currentSha256;
+    registry.packages[id].updateAvailableSha256 = 'a'.repeat(64);
+    await writeFile(paths.registry, JSON.stringify(registry));
+    const cache = join(root, 'scripts', '__pycache__');
+    const cacheFile = join(cache, 'xlsx_common.cpython-313.pyc');
+    await mkdir(cache);
+    await writeFile(cacheFile, Buffer.from([0, 255, 13, 10]));
+    const manager = new SkillManager({ durableRoot: home, catalogRoot: CATALOG_ROOT, enabledCatalogSkills: () => [id] });
+    const status = async () => (await manager.list('core', 'xlsx', 0, 10) as { skills: Array<{ drift: string }> }).skills[0]!.drift;
+    assert.equal((await listInstalledSkills(home, [id])).find(({ name }) => name === 'xlsx')?.drift, 'unchanged');
+    assert.equal(await status(), 'unchanged');
+    await materializeCatalogSkills(computer, home);
+    assert.equal(await readFile(script, 'utf8'), expected);
+    assert.equal(await status(), 'unchanged');
+    assert.equal(JSON.parse(await readFile(paths.registry, 'utf8')).packages[id].updateAvailableSha256, undefined);
+
+    await mkdir(cache);
+    await writeFile(cacheFile, Buffer.from([0, 255, 13, 10]));
+    await writeFile(script, `${expected}\n# user customization\n`);
+    await writeFile(join(cache, 'notes.txt'), 'user notes\n');
+    await materializeCatalogSkills(computer, home);
+    assert.match(await readFile(script, 'utf8'), /# user customization/);
+    assert.equal(await readFile(join(cache, 'notes.txt'), 'utf8'), 'user notes\n');
+    assert.equal(await status(), 'modified');
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('core reset restores the reviewed baseline while normal materialization preserves edits', async () => {
   const home = await mkdtemp(join(tmpdir(), 'qubicl-skill-reset-'));
   const computer = { skillPolicy: { enabledCatalogSkills: [CORE_SKILL_IDS[0]!] } } as ComputerConfig;

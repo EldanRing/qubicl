@@ -145,6 +145,7 @@ export async function materializeSkills(computer: ComputerConfig, homeRoot: stri
       const inspected = await inspectCoreWorkingCopy(target);
       if (existing.baselineSha256 === inspected.sha256 && existing.baselineSha256 !== skill.sha256) {
         await atomicReplace(source, target);
+        delete existing.updateAvailableSha256;
         registry.packages[skill.id] = { ...existing, description: skill.description, baselineSha256: skill.sha256, updatedAt: new Date().toISOString(), source: { type: 'core', catalogSha256: skill.sha256 }, security: { scannerVersion: CONTENT_SECURITY_SCANNER_VERSION, findings: skill.security.findings } };
       } else if (existing.baselineSha256 !== skill.sha256) {
         registry.packages[skill.id] = { ...existing, updateAvailableSha256: skill.sha256 };
@@ -395,7 +396,7 @@ export async function inspectEditableSkill(root: string): Promise<{ sha256: stri
 }
 
 async function inspectCoreWorkingCopy(root: string): Promise<{ sha256: string; findings: SkillSecurityFinding[] }> {
-  const entries = await enumeratePackage(root);
+  const entries = await enumeratePackage(root, true);
   entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
   return digestEntries(entries);
 }
@@ -420,7 +421,7 @@ async function inspectImport(root: string, expectedName: string): Promise<{ name
   return { name, description: description.trim(), ...inspected, detectedRequirements: detectRequirements(entries), snapshot: entries };
 }
 
-async function enumeratePackage(root: string): Promise<PackageEntry[]> {
+async function enumeratePackage(root: string, ignorePythonCaches = false): Promise<PackageEntry[]> {
   const selected = await lstat(root);
   if (!selected.isDirectory() || selected.isSymbolicLink()) throw new Error('Skill package root must be a regular directory, not a symlink.');
   const canonical = await realpath(root);
@@ -445,6 +446,7 @@ async function enumeratePackage(root: string): Promise<PackageEntry[]> {
       if (stat.isSymbolicLink()) throw new Error(`Skill package contains unsupported symlink ${path}.`);
       if (stat.isDirectory()) { pending.push({ directory: target, prefix: path }); continue; }
       if (!stat.isFile() || stat.nlink > 1) throw new Error(`Skill resource ${path} must be an ordinary, non-hard-linked file.`);
+      if (ignorePythonCaches && /(?:^|\/)__pycache__\/[^/]+\.(?:cpython|pypy)-[0-9]+(?:\.opt-[0-9]+)?\.pyc$/u.test(path)) continue;
       if (stat.size > MAX_FILE_BYTES) throw new Error(`Skill resource ${path} exceeds the ${MAX_FILE_BYTES}-byte limit.`);
       const bytes = await readFile(target);
       if (!isTextResource(bytes) && !allowedBinaryResource(bytes)) throw new Error(`Skill resource ${path} has an unsupported binary format.`);

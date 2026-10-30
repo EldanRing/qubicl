@@ -7,7 +7,7 @@ import { ToolExecutor } from '../../packages/control/dist/executor.js';
 import { PreviewManager, previewAccessFileSource } from '../../packages/control/dist/previews.js';
 
 const localBase = 'http://preview-example.localhost:3211/computers/example/previews';
-const internalBase = 'http://gateway:3211/computers/example/previews';
+const internalBase = 'http://preview-example.localhost:3212/computers/example/previews';
 const remoteBase = 'https://preview-example.remote.test/computers/example/previews';
 
 test('preview inspection distinguishes registration listener absence and failed probes before cleanup', async (context) => {
@@ -56,7 +56,7 @@ test('preview publication adds a remote URL without replacing existing local and
   const browser = new URL(published.browserUrl);
   assert.equal(local.origin, `http://${published.id}--preview-example.localhost:3211`);
   assert.equal(remote.origin, `https://${published.id}--preview-example.remote.test`);
-  assert.equal(browser.origin, new URL(internalBase).origin);
+  assert.equal(browser.origin, `http://${published.id}--preview-example.localhost:3212`);
   assert.notEqual(remote.searchParams.get('token'), local.searchParams.get('token'));
   assert.equal(browser.searchParams.get('token'), local.searchParams.get('token'));
   assert.equal(local.pathname, '/');
@@ -74,6 +74,16 @@ test('preview publication adds a remote URL without replacing existing local and
     internalBase,
   );
   assert.equal('remoteUrl' in await localOnly.publish(3000, 300), false);
+});
+
+test('legacy preview publication explicitly omits an unusable integrated-browser URL', async (context) => {
+  const manager = new PreviewManager({ listPorts: async () => [{ port: 3000, address: 'loopback', protocol: 'tcp' }] },
+    '127.0.0.1', localBase, 'http://gateway:3211/computers/example/previews');
+  context.after(() => manager.clear());
+  const publication = await manager.publish(3000);
+  assert.equal('browserUrl' in publication, false);
+  assert.deepEqual(publication.browserAccess, { available: false, context: 'integrated-browser',
+    reason: 'This runtime has no isolated guest-local preview route. Open url in a browser on the Qubicl host.' });
 });
 
 test('owner previews follow the listener while remote shares rotate and revoke independently', async () => {

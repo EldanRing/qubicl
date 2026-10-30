@@ -76,6 +76,44 @@ test('targeted keyboard input confirms focus before XTEST dispatch and reports b
   assert.equal(result.focusEvidence.targetStillActiveAfterDispatch, true);
 });
 
+test('guarded multiline typing stops after Return changes focus and preserves original CRLF offsets', async () => {
+  let active = 42;
+  const dispatched: string[][] = [];
+  const runner = async (_command: string, args: string[]) => {
+    if (args[0] === 'getactivewindow') return { stdout: String(active), stderr: '' };
+    if (args[0] === 'type' || args[0] === 'key') {
+      dispatched.push(args);
+      if (args.at(-1) === 'Return') active = 43;
+    }
+    return { stdout: 'fixture', stderr: '' };
+  };
+  const result = await controlDesktop({ type: 'type', text: 'FIRST\r\nSECOND\nTAIL', targetWindowId: 42, stopOnFocusChange: true }, runner) as {
+    dispatch: string; typing: { nextOffset: number; remainingCharacters: number; stoppedOnFocusChange: boolean };
+  };
+  assert.equal(result.dispatch, 'interrupted');
+  assert.equal(result.typing.nextOffset, 7);
+  assert.equal(result.typing.remainingCharacters, 11);
+  assert.equal(result.typing.stoppedOnFocusChange, true);
+  assert.equal(dispatched.length, 2);
+  assert.equal(dispatched[0]!.at(-1), 'FIRST');
+  assert.equal(dispatched[1]!.at(-1), 'Return');
+});
+
+test('guarded typing checks bounded chunks without splitting Unicode or replaying input', async () => {
+  let active = 42;
+  const text = '😀'.repeat(65);
+  const dispatched: string[] = [];
+  const runner = async (_command: string, args: string[]) => {
+    if (args[0] === 'getactivewindow') return { stdout: String(active), stderr: '' };
+    if (args[0] === 'type') { dispatched.push(args.at(-1)!); active = 43; }
+    return { stdout: 'fixture', stderr: '' };
+  };
+  const result = await controlDesktop({ type: 'type', text, stopOnFocusChange: true }, runner) as { typing: { nextOffset: number; remainingCharacters: number } };
+  assert.deepEqual(dispatched, ['😀'.repeat(64)]);
+  assert.equal(result.typing.nextOffset, 128);
+  assert.equal(result.typing.remainingCharacters, 2);
+});
+
 test('targeted keyboard input fails before dispatch when focus cannot be confirmed', async () => {
   const commands: string[][] = [];
   const runner = async (_command: string, args: string[]): Promise<{ stdout: string; stderr: string }> => {

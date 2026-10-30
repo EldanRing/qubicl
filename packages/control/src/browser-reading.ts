@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { ElementHandle, Frame, Page } from 'playwright-core';
 import { QubiclError } from './errors.js';
 import { browserDOM, frameBarriers } from './browser-dom.js';
+import { browserDisplayUrl, browserDisplayTitle } from './browser-observation-url.js';
 
 const MAX_DOCUMENT_BYTES = 8_000_000;
 const MAX_RETAINED_BYTES = 16_000_000;
@@ -81,7 +82,7 @@ export class BrowserReader {
         document = {
           id: randomBytes(12).toString('hex'), page, frame, document: identity,
           text: captured.text, bytes: captured.bytes, capturedAt: this.now(),
-          url: frame.url().slice(0, 1024), title: (await page.title()).slice(0, 256), frameIndex,
+          url: browserDisplayUrl(frame.url()).slice(0, 1024), title: browserDisplayTitle(browserDisplayTitle(await page.title(), page.url()), frame.url()).slice(0, 256), frameIndex,
           ...(input.query === undefined ? {} : { query: input.query }), caseSensitive: input.caseSensitive ?? false,
           mode: input.mode ?? ('text' as const),
         };

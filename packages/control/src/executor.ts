@@ -414,6 +414,7 @@ export class ToolExecutor {
         const publication = await this.previews.publish(input.port as number, input.expiresInSeconds as number | undefined);
         if (input.openInBrowser) {
           try {
+            if (typeof publication.browserUrl !== 'string') throw new QubiclError('capability_unsupported', 'This runtime has no isolated in-computer preview route. Use the owner URL in the host browser, or update to the unified runtime.', 400, { browserAccess: publication.browserAccess });
             publication.browser = await runBrowser(() => this.browser.navigate(publication.browserUrl as string));
           } catch (error) {
             this.previews.unpublish(publication.id as string);
@@ -1134,6 +1135,7 @@ export interface ControlAction {
   toY?: number;
   durationMs?: number;
   text?: string;
+  stopOnFocusChange?: boolean;
   keys?: string[];
   deltaY?: number;
   targetWindowId?: number;
@@ -1446,6 +1448,7 @@ async function dispatchDesktop(action: ControlAction, runner: DesktopCommandRunn
       : mouse ? [[action.x, action.y]] : [];
     await inspector.validate({ windowId: action.targetWindowId, geometryToken: action.geometryToken, points });
   }
+  let typing: { nextOffset: number; totalCharacters: number; remainingCharacters: number; offsetUnit: 'utf16'; stoppedOnFocusChange: boolean } | undefined;
   switch (action.type) {
     case 'click':
       await runner('xdotool', ['mousemove', `${action.x}`, `${action.y}`, 'click', `${action.button}`]);
@@ -1462,17 +1465,26 @@ async function dispatchDesktop(action: ControlAction, runner: DesktopCommandRunn
     case 'drag':
       await drag(action, runner);
       break;
-    case 'type':
-      // xdotool type drops LF. Send newline runs as explicit Return events;
-      // never borrow CLIPBOARD (which may contain file lists or binary data).
-      for (const part of (action.text ?? '').replace(/\r\n?/gu, '\n').split(/(\n+)/u)) {
-        if (!part) continue;
-        if (part[0] === '\n') await runner('xdotool', ['key', '--clearmodifiers', '--delay', '12', '--repeat-delay', '12', '--repeat', String(part.length), 'Return']);
-        // Unicode may require temporary X11 key mappings. Qt can miss mapping
-        // changes at 1 ms; retain xdotool's normal 12 ms pacing for those runs.
-        else await runner('xdotool', ['type', '--clearmodifiers', '--delay', /\P{ASCII}/u.test(part) ? '12' : '1', '--', part]);
+    case 'type': {
+      const text = action.text ?? '';
+      if (action.stopOnFocusChange && !focusBefore) throw new QubiclError('window_focus_failed', 'Typing focus could not be observed; no input was dispatched.', 409);
+      // Guarded mode checks each bounded run and each individual Return. Keep
+      // offsets in the original input, even when a CRLF is one Return event.
+      const parts = action.stopOnFocusChange ? [...text.matchAll(/\r\n|[\r\n]|[^\r\n]{1,64}/gu)].map(match => match[0])
+        : text.replace(/\r\n?/gu, '\n').split(/(\n+)/u).filter(Boolean);
+      let offset = 0, stopped = false;
+      for (const part of parts) {
+        if (action.stopOnFocusChange && (await activeWindowEvidence(runner))?.id !== focusBefore!.id) { stopped = true; break; }
+        if (/^[\r\n]/u.test(part)) {
+          await runner('xdotool', ['key', '--clearmodifiers', '--delay', '12', ...(action.stopOnFocusChange ? [] : ['--repeat-delay', '12', '--repeat', String(part.length)]), 'Return']);
+          // Give activation handlers a chance to publish their new active window.
+          if (action.stopOnFocusChange) await new Promise(resolve => setTimeout(resolve, 25));
+        } else await runner('xdotool', ['type', '--clearmodifiers', '--delay', /\P{ASCII}/u.test(part) ? '12' : '1', '--', part]);
+        offset += part.length;
       }
+      if (action.stopOnFocusChange) typing = { nextOffset: offset, totalCharacters: text.length, remainingCharacters: text.length - offset, offsetUnit: 'utf16', stoppedOnFocusChange: stopped };
       break;
+    }
     case 'keypress':
       {
         const result = await runner('xdotool', keypressCommandArguments(action.keys ?? []));
@@ -1495,7 +1507,8 @@ async function dispatchDesktop(action: ControlAction, runner: DesktopCommandRunn
   const focusAfter = recordsFocus ? await activeWindowEvidence(runner) : null;
   return {
     action: action.type,
-    dispatch: 'completed',
+    dispatch: typing?.stoppedOnFocusChange ? 'interrupted' : 'completed',
+    ...(typing ? { typing } : {}),
     verified: false,
     verification: 'dispatch_only',
     ...(recordsFocus ? {
@@ -1507,7 +1520,7 @@ async function dispatchDesktop(action: ControlAction, runner: DesktopCommandRunn
         targetStillActiveAfterDispatch: action.targetWindowId === undefined || focusAfter === null ? null : focusAfter.id === action.targetWindowId,
       },
     } : {}),
-    note: 'Qubicl completed input dispatch only. Focus evidence does not prove that the application accepted the input or changed state; verify the semantic effect before sending dependent input.',
+    note: typing?.stoppedOnFocusChange ? 'Typing stopped after the active window changed. nextOffset counts original UTF-16 input units already dispatched, not verified insertion. Inspect the new target before deciding what remaining input is still needed; Qubicl never replays it.' : 'Qubicl completed input dispatch only. Focus evidence does not prove that the application accepted the input or changed state; verify the semantic effect before sending dependent input.',
   };
 }
 

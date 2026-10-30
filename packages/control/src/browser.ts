@@ -19,6 +19,8 @@ import type {
 import { MODEL_TEXT_BUDGET_BYTES } from '@qubicl/core';
 import { QubiclError } from './errors.js';
 import { BrowserReader, type BrowserReadInput } from './browser-reading.js';
+import { browserDisplayUrl, browserDisplayTitle } from './browser-observation-url.js';
+export { browserDisplayUrl, browserDisplayTitle } from './browser-observation-url.js';
 import { browserDOM, frameBarriers, type BrowserControl, type BrowserDOMPage } from './browser-dom.js';
 import { isGloballyRoutableIp } from './network-address.js';
 import type { ViewerPointerAction, ViewerPointerUpdate } from './viewer-actions.js';
@@ -53,7 +55,6 @@ const HISTORY_LOAD_TIMEOUT_MS = 1_000;
 export const INTERACTIVE_BROWSER_IGNORED_DEFAULT_ARGS = [
   '--disable-background-timer-throttling',
   '--disable-backgrounding-occluded-windows',
-  '--disable-back-forward-cache',
   '--disable-client-side-phishing-detection',
   '--disable-component-extensions-with-background-pages',
   '--disable-component-update',
@@ -407,14 +408,14 @@ export class BrowserManager {
     return (async () => {
       const pending = this.dialogs.get(id);
       if (!pending) throw new QubiclError('browser_dialog_not_found', `Browser dialog ${id} is no longer pending.`, 404);
+      const tracked = pending.record.operationId ? this.dialogOperations.get(pending.record.operationId) : undefined;
       await this.dispatchInput(async () => {
+        if (tracked?.receipt.status === 'awaiting_dialog' && tracked.receipt.dialogId === id) tracked.receipt.status = 'running';
         if (action === 'accept') await pending.dialog.accept(promptText);
         else await pending.dialog.dismiss();
         this.dialogs.delete(id);
       });
-      const tracked = pending.record.operationId ? this.dialogOperations.get(pending.record.operationId) : undefined;
       if (tracked) {
-        if (tracked.receipt.status === 'awaiting_dialog') tracked.receipt.status = 'running';
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           await Promise.race([tracked.settled, new Promise<void>((resolve) => { timer = setTimeout(resolve, 1_000); })]);
@@ -613,8 +614,11 @@ export class BrowserManager {
           selection: observation.selection,
           generation,
           referenceRetention: { maxElements: MAX_RETAINED_REFERENCES, eviction: 'least-recently-observed' },
-          frame: { index: frameIndex, url: truncateUtf8Text(frame.url(), 2048).text },
-          frames: frames.slice(frameCursor, frameCursor + 64).map((item, index) => ({ index: frameCursor + index, url: truncateUtf8Text(item.url(), 128).text, urlTruncated: Buffer.byteLength(item.url()) > 128, main: item === page.mainFrame() })),
+          frame: { index: frameIndex, url: truncateUtf8Text(browserDisplayUrl(frame.url()), 2048).text },
+          frames: frames.slice(frameCursor, frameCursor + 64).map((item, index) => {
+            const url = truncateUtf8Text(browserDisplayUrl(item.url()), 128);
+            return { index: frameCursor + index, url: url.text, urlTruncated: url.truncated, main: item === page.mainFrame() };
+          }),
           totalFrames: frames.length,
           nextFrameCursor: frameCursor + 64 < frames.length ? frameCursor + 64 : null,
           snapshot: '',
@@ -752,8 +756,12 @@ export class BrowserManager {
       let observation: Record<string, unknown> | undefined;
       try {
         ({ observation } = await this.observeAction(page, options.observe, async () => {
-          await this.dispatchInput(() => options.checked === undefined ? locator.click({ button, timeout: 15_000 })
-            : locator.setChecked(options.checked, { timeout: 15_000 }));
+          if (options.checked === undefined || wasChecked !== options.checked) {
+            await this.clickElementOnce(page, locator, button);
+            if (options.checked !== undefined && await locator.isChecked() !== options.checked) {
+              throw new QubiclError('browser_checked_state_unchanged', 'The click was dispatched but the requested checked state was not observed. Inspect the control before further input.', 409, { dispatch: 'started' });
+            }
+          }
         }, this.referenceFrames.get(ref)));
 
         if (publication) await this.finishViewerPointer(publication, generation!, 'confirm');
@@ -774,11 +782,11 @@ export class BrowserManager {
       if (clear) {
         await this.dispatchInput(() => locator.fill(text));
       } else {
-        await this.dispatchInput(() => locator.click());
-        await this.dispatchInput(() => locator.press('End').catch(() => undefined));
+        await this.clickElementOnce(page, locator, 'left');
+        await this.dispatchInput(() => page.keyboard.press('End'));
         await this.dispatchInput(() => page.keyboard.type(text));
       }
-      if (submit) await this.dispatchInput(() => locator.press('Enter'));
+      if (submit) await this.dispatchInput(() => page.keyboard.press('Enter'));
       return page;
     }, 0, options, ref);
   }
@@ -804,7 +812,8 @@ export class BrowserManager {
       if (ref) {
         const locator = await this.referencedElement(ref);
         await this.assertControl(ref, locator);
-        await this.dispatchInput(() => locator.press(key));
+        await this.dispatchInput(() => locator.focus());
+        await this.dispatchInput(() => page.keyboard.press(key));
       } else await this.dispatchInput(() => page.keyboard.press(key));
       return page;
     }, 0, options, ref);
@@ -852,16 +861,24 @@ export class BrowserManager {
           await this.inputOwnership.getStore()?.verify();
         }
         let waitStatus: HistoryState['loading']['waitStatus'] = 'not_waited';
+        let observation = await observeHistoryPage(page);
         if (navigated) {
-          try {
-            await page.waitForLoadState('domcontentloaded', { timeout: HISTORY_LOAD_TIMEOUT_MS });
-            waitStatus = 'completed';
-          } catch (error) {
-            if (!(error instanceof Error) || error.name !== 'TimeoutError') throw error;
-            waitStatus = 'timed_out';
+          if (observation.readyState === 'interactive' || observation.readyState === 'complete') waitStatus = 'completed';
+          else {
+            try {
+              await page.waitForLoadState('domcontentloaded', { timeout: HISTORY_LOAD_TIMEOUT_MS });
+              waitStatus = 'completed';
+            } catch (error) {
+              if (!(error instanceof Error) || error.name !== 'TimeoutError') throw error;
+              waitStatus = 'timed_out';
+            }
+            observation = await observeHistoryPage(page);
+            // History restoration can omit the protocol loading event even when
+            // the live document has reached the requested readiness already.
+            if (observation.readyState === 'interactive' || observation.readyState === 'complete') waitStatus = 'completed';
           }
         }
-        const { readyState, ...observed } = await observeHistoryPage(page);
+        const { readyState, ...observed } = observation;
         await this.enforceTabLimit(await this.getContext(), this.activePage);
         return {
           ...observed,
@@ -1083,6 +1100,45 @@ export class BrowserManager {
         : editing && control.readOnly ? 'This control is read-only.' : 'This control is hidden, disabled or inert.', 409, { dispatch: 'not-started', control });
     }
     return control;
+  }
+
+  /** Bound actionability before input; never run a 15-second action timer while
+   * the user is intentionally answering a JavaScript dialog. Raw input has no
+   * locator retry loop and is dispatched exactly once after a fresh hit test. */
+  private async clickElementOnce(page: Page, element: ElementHandle<SVGElement | HTMLElement>, button: 'left' | 'right'): Promise<void> {
+    await this.dispatchInput(() => element.click({ button, trial: true, timeout: 15_000 }));
+    const box = await element.boundingBox();
+    if (!box) throw new QubiclError('browser_target_not_visible', 'The target disappeared before input.', 409, { dispatch: 'not-started' });
+    const viewport = browserViewportSize(page);
+    const left = Math.max(0, box.x), top = Math.max(0, box.y);
+    const right = Math.min(viewport.width, box.x + box.width), bottom = Math.min(viewport.height, box.y + box.height);
+    if (right <= left || bottom <= top) throw new QubiclError('browser_target_not_visible', 'The target is outside the viewport.', 409, { dispatch: 'not-started' });
+    const point = { x: (left + right) / 2, y: (top + bottom) / 2 };
+    let target: ElementHandle<SVGElement | HTMLElement> = element;
+    let frame = await element.ownerFrame();
+    const owned: ElementHandle<SVGElement | HTMLElement>[] = [];
+    try {
+      while (frame) {
+        const bounds = await target.boundingBox();
+        if (!bounds || !await target.evaluate((node, value) => {
+          const rect = node.getBoundingClientRect();
+          const x = value.point.x - value.bounds.x + rect.x, y = value.point.y - value.bounds.y + rect.y;
+          let hit = node.ownerDocument.elementFromPoint(x, y);
+          while (hit?.shadowRoot) {
+            const child = hit.shadowRoot.elementFromPoint(x, y);
+            if (!child || child === hit) break;
+            hit = child;
+          }
+          for (let current = hit; current; current = current.parentElement ?? (current.getRootNode() as ShadowRoot).host ?? null) {
+            if (current === node) return true;
+          }
+          return false;
+        }, { point, bounds })) throw new QubiclError('browser_target_obscured', 'The target moved or became covered before input. Observe it again.', 409, { dispatch: 'not-started' });
+        if (!frame.parentFrame()) break;
+        target = await frame.frameElement() as ElementHandle<SVGElement | HTMLElement>; owned.push(target); frame = frame.parentFrame();
+      }
+      await this.dispatchInput(() => page.mouse.click(point.x, point.y, { button }));
+    } finally { await Promise.all(owned.map((handle) => handle.dispose().catch(() => undefined))); }
   }
 
   /** Observe before tab/pointer settling; never replay an action if observation fails. */
@@ -1328,6 +1384,10 @@ export class BrowserManager {
     await this.observeDownloadProgress(context, page);
     page.on('dialog', (dialog) => {
       const id = randomBytes(12).toString('base64url');
+      if (this.runningOperation?.tabId === this.tabId(page)) {
+        this.runningOperation.status = 'awaiting_dialog';
+        this.runningOperation.dialogId = id;
+      }
       this.dialogs.set(id, {
         record: {
           id,
@@ -1446,7 +1506,7 @@ export class BrowserManager {
       session.on('Page.downloadProgress', (event) => {
         const progress = this.downloadProgress.get(event.guid);
         if (!progress) return;
-        Object.assign(progress, { receivedBytes: event.receivedBytes, totalBytes: event.totalBytes > 0 ? event.totalBytes : null, lastProgressAt: new Date().toISOString() });
+        Object.assign(progress, { receivedBytes: Math.max(progress.receivedBytes, event.receivedBytes), totalBytes: event.totalBytes > 0 ? event.totalBytes : progress.totalBytes, lastProgressAt: new Date().toISOString() });
         const record = progress.recordId ? this.downloads.get(progress.recordId) : undefined;
         if (record?.status === 'in-progress') Object.assign(record, { receivedBytes: progress.receivedBytes, totalBytes: progress.totalBytes, lastProgressAt: progress.lastProgressAt });
       });
@@ -1528,7 +1588,7 @@ export class BrowserManager {
     return {
       actedOnTabId: this.tabId(page),
       activeTabId: this.activePage && !this.activePage.isClosed() ? this.tabId(this.activePage) : null,
-      openedTabs: opened.slice(0, 20).map((candidate) => ({ tabId: this.tabId(candidate), url: candidate.url().slice(0, 512) })),
+      openedTabs: opened.slice(0, 20).map((candidate) => ({ tabId: this.tabId(candidate), url: browserDisplayUrl(candidate.url()).slice(0, 512) })),
       openedTabsTruncated: opened.length > 20,
       operationId: this.runningOperation?.operationId,
       downloadStartedIds: [...this.downloads.values()].filter((download) => download.operationId === this.runningOperation?.operationId && download.operationId !== undefined).map(({ id }) => id).slice(0, 20),
@@ -1922,7 +1982,8 @@ function requirePageIndex(pages: Page[], index: number): Page {
 }
 
 async function pageState(page: Page): Promise<PageState> {
-  return { url: page.url().slice(0, 8192), title: (await page.title().catch(() => '')).slice(0, 512) };
+  const url = page.url();
+  return { url: browserDisplayUrl(url).slice(0, 8192), title: browserDisplayTitle(await page.title().catch(() => ''), url).slice(0, 512) };
 }
 
 async function observeHistoryPage(page: Page): Promise<PageState & { readyState: DocumentReadyState | 'unavailable'; observationComplete: boolean }> {
@@ -1933,8 +1994,8 @@ async function observeHistoryPage(page: Page): Promise<PageState & { readyState:
       new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 1_000); }),
     ]);
     return observed
-      ? { url: observed.url.slice(0, 8192), title: observed.title.slice(0, 512), readyState: observed.readyState, observationComplete: true }
-      : { url: page.url().slice(0, 8192), title: '', readyState: 'unavailable', observationComplete: false };
+      ? { url: browserDisplayUrl(observed.url).slice(0, 8192), title: browserDisplayTitle(observed.title, observed.url).slice(0, 512), readyState: observed.readyState, observationComplete: true }
+      : { url: browserDisplayUrl(page.url()).slice(0, 8192), title: '', readyState: 'unavailable', observationComplete: false };
   } finally { clearTimeout(timer); }
 }
 

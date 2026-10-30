@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } fro
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { spawn } from 'node:child_process';
 import { buildComputerManifest, manifestSha256 } from '@qubicl/core';
 import { DesktopApplicationManager } from '@qubicl/control/desktop-applications';
 import { ToolExecutor } from '@qubicl/control/executor';
@@ -40,6 +41,31 @@ test('single-instance launch handoffs reuse the canonical app and retain delayed
   assert.equal((await manager.close(late.applicationId, false, 'request')).applicationId, first.applicationId);
 });
 
+test('successful launchers retain borrowed daemon identities without taking over process termination', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-external-app-'));
+  const daemon = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' });
+  const windows = [{ id: 42, pid: daemon.pid! }, { id: 99, pid: process.pid }];
+  const closes: number[] = [];
+  const manager = new DesktopApplicationManager('computer', { root,
+    definitions: { 'file-manager': { executable: process.execPath, fixedArguments: ['-e', 'process.exit(0)'], allowedPathKind: 'directory', reusesExistingProcess: true } },
+    observeWindows: async () => windows.filter((window) => window.id !== 99),
+    requestCloseWindow: async (id) => { closes.push(id); return { windowId: id }; },
+  });
+  context.after(async () => { await manager.shutdown(); daemon.kill(); await rm(root, { recursive: true, force: true }); });
+  const app = await manager.open('file-manager', []);
+  assert.equal(app.disposition, 'reused');
+  assert.equal(app.processOwnership, 'external');
+  assert.equal(app.pid, daemon.pid);
+  assert.deepEqual(app.windowIds, [42]);
+  assert.equal(manager.list()[0]!.applicationId, app.applicationId);
+  await assert.rejects(manager.close(app.applicationId, true, 'terminate'), /shared daemon/);
+  assert.equal((await manager.close(app.applicationId)).state, 'close_requested');
+  assert.deepEqual(closes, [42]);
+  await manager.shutdown();
+  assert.equal(daemon.exitCode, null);
+  process.kill(daemon.pid!, 0);
+});
+
 test('real Mousepad reopens another file with a canonical closable application identity', {
   skip: process.env.QUBICL_TEST_NATIVE_DESKTOP !== '1' && 'Run in a disposable X11/AT-SPI guest.', timeout: 15_000,
 }, async (context) => {
@@ -65,6 +91,30 @@ test('real Mousepad reopens another file with a canonical closable application i
   assert.equal(manager.list().length, 1);
   assert.equal((await manager.close(second.applicationId)).state, 'close_requested');
   await waitForWindow(false);
+});
+
+test('real Thunar handoff to a pre-existing daemon retains a window-close identity', {
+  skip: process.env.QUBICL_TEST_NATIVE_DESKTOP !== '1' && 'Run in a disposable X11/AT-SPI guest.', timeout: 20_000,
+}, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-thunar-daemon-'));
+  const desktop = new NativeDesktopManager({ script: join(process.cwd(), 'packages/control/src/desktop-helper.py') });
+  const daemon = spawn('/usr/bin/thunar', ['--daemon'], { detached: true, stdio: 'ignore' });
+  const windows = async () => (await desktop.windows()).windows as Array<{ id: number; pid: number | null }>;
+  const manager = new DesktopApplicationManager('computer', { root,
+    observeWindows: windows, requestCloseWindow: (id) => desktop.windowAction(id, 'close'),
+  });
+  context.after(async () => { await manager.shutdown(); desktop.shutdown(); daemon.kill(); await rm(root, { recursive: true, force: true }); });
+  // Wait for D-Bus daemon registration, not a document window.
+  await new Promise((done) => setTimeout(done, 300));
+  const app = await manager.open('file-manager', [root]);
+  assert.equal(app.disposition, 'reused');
+  assert.equal(app.processOwnership, 'external');
+  assert.equal(app.pid, daemon.pid);
+  assert.ok(app.windowIds?.length);
+  assert.equal(manager.list()[0]!.applicationId, app.applicationId);
+  assert.equal((await manager.close(app.applicationId)).state, 'close_requested');
+  await waitFor(async () => !(await windows()).some((window) => app.windowIds!.includes(window.id)));
+  process.kill(daemon.pid!, 0);
 });
 
 test('native desktop actions return observations, strip lease secrets and fence queued input at takeover', async (context) => {

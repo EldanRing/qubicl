@@ -9,10 +9,10 @@ export interface DesktopWindow {
   geometryToken: string; transientFor: number | null; modal: boolean; active: boolean;
 }
 export interface DesktopSnapshotInput {
-  windowId: number; cursor?: string; ref?: string; limit?: number; maxBytes?: number; includeHidden?: boolean; textOffset?: number; textCursor?: string;
+  windowId: number; cursor?: string; ref?: string; limit?: number; maxBytes?: number; includeHidden?: boolean; textOffset?: number; textCursor?: string; tableRange?: { row: number; column: number; rows?: number; columns?: number };
 }
 export interface DesktopElementAction {
-  ref: string; action: 'invoke' | 'focus' | 'set_text'; actionName?: string; text?: string;
+  ref: string; action: 'invoke' | 'focus' | 'set_text' | 'set_value'; actionName?: string; text?: string; value?: number;
 }
 export type NativeDesktopMethod = 'windows' | 'snapshot' | 'act' | 'windowAction';
 interface NativeOptions { script?: string; uid?: number; gid?: number; environment?: NodeJS.ProcessEnv }

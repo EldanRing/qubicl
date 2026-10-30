@@ -61,6 +61,7 @@ const handleMcp = toNodeHandler(mcp, { onerror: (error) => console.error(error) 
 
 export const controlServer = createServer(async (request, response) => {
   try {
+    if (executor.previews.handleBrowser(request, response)) return;
     const url = new URL(request.url ?? '/', 'http://control.internal');
     if (url.pathname === '/health') {
       json(response, 200, {
@@ -219,6 +220,7 @@ controlServer.on('upgrade', (request, socket, head) => {
 
 async function handleUpgrade(request: IncomingMessage, socket: import('node:stream').Duplex, head: Buffer): Promise<void> {
   try {
+    if (executor.previews.handleBrowserUpgrade(request, socket, head)) return;
     const url = new URL(request.url ?? '/', 'http://control.internal');
     const gatewayEpoch = request.headers['x-qubicl-gateway-epoch'];
     if (!authenticated(request) || typeof gatewayEpoch !== 'string') {

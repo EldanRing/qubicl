@@ -2,8 +2,8 @@ import { nativeDesktop } from './desktop-native.js';
 import { WORKSTATION_APPLICATION_CAPABILITIES } from './workstation-applications.js';
 import { randomBytes } from 'node:crypto';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
-import { constants } from 'node:fs';
-import { access, chmod, chown, copyFile, lstat, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises';
+import { constants, readFileSync } from 'node:fs';
+import { access, chmod, chown, copyFile, lstat, mkdir, readFile, readdir, readlink, realpath, rm, stat } from 'node:fs/promises';
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { DesktopApplicationName, Preset } from '@qubicl/core';
@@ -80,6 +80,8 @@ interface TrackedDesktopApplication {
   completed: boolean;
   runtimeDirectory?: string;
   reuseCandidateId?: string;
+  reusesExistingProcess?: boolean;
+  external?: { pid: number; startTime: string; windowIds: number[] };
 }
 
 export interface DesktopApplicationManagerOptions {
@@ -91,12 +93,16 @@ export interface DesktopApplicationManagerOptions {
   spawnUid?: number;
   spawnGid?: number;
   requestClose?: (pid: number) => Promise<Record<string, unknown>>;
+  observeWindows?: () => Promise<Array<{ id: number; pid: number | null }>>;
+  requestCloseWindow?: (windowId: number) => Promise<Record<string, unknown>>;
 }
 
 export interface DesktopApplicationRecord {
   pid?: number;
   aliases?: string[];
   disposition?: 'started' | 'reused';
+  processOwnership?: 'managed' | 'external';
+  windowIds?: number[];
   applicationId: string;
   application: DesktopApplicationName;
   executable: string;
@@ -129,9 +135,22 @@ export class DesktopApplicationManager {
   private readonly spawnGid: number | undefined;
   private pendingApplications = 0;
   private readonly requestClose: (pid: number) => Promise<Record<string, unknown>>;
+  private readonly observeWindows: () => Promise<Array<{ id: number; pid: number | null }>>;
+  private readonly requestCloseWindow: (windowId: number) => Promise<Record<string, unknown>>;
 
   constructor(compatibility: Preset, options: DesktopApplicationManagerOptions = {}) {
     this.requestClose = options.requestClose ?? ((pid) => nativeDesktop.closeProcessWindows(pid));
+    this.observeWindows = options.observeWindows ?? (async () => {
+      const windows: Array<{ id: number; pid: number | null }> = [];
+      let cursor: number | undefined = 0;
+      do {
+        const page = await nativeDesktop.windows(cursor);
+        windows.push(...page.windows as Array<{ id: number; pid: number | null }>);
+        cursor = page.nextCursor as number | undefined;
+      } while (typeof cursor === 'number' && windows.length < 4096);
+      return windows;
+    });
+    this.requestCloseWindow = options.requestCloseWindow ?? ((id) => nativeDesktop.windowAction(id, 'close'));
     this.builtinApplications = new Set(BUILTIN_APPLICATIONS_BY_COMPATIBILITY[compatibility]);
     this.supportsApplications = compatibility === 'computer' || compatibility === 'workstation';
     this.definitions = { ...APPLICATION_DEFINITIONS, ...options.definitions };
@@ -151,6 +170,7 @@ export class DesktopApplicationManager {
     if (!this.supportsApplications) {
       throw new QubiclError('desktop_application_unsupported', 'This computer does not provide managed desktop applications.', 404);
     }
+    this.list(); // Drop dead external identities before applying the admission limit.
     this.pendingApplications += 1;
     try {
       const definition = this.builtinApplications.has(application)
@@ -220,33 +240,39 @@ export class DesktopApplicationManager {
         finished,
         completed: false,
         ...(reuseCandidate ? { reuseCandidateId: reuseCandidate.applicationId } : {}),
+        ...(definition.reusesExistingProcess ? { reusesExistingProcess: true } : {}),
         ...(runtimeDirectory ? { runtimeDirectory } : {}),
       };
       this.applications.set(applicationId, tracked);
-      child.once('exit', () => this.complete(tracked, finish));
+      child.once('exit', () => { void this.complete(tracked, finish); });
       const started = new Promise<void>((resolveStarted, reject) => {
         child.once('spawn', resolveStarted);
         child.once('error', (error) => {
-          this.complete(tracked, finish);
+          void this.complete(tracked, finish);
           if (runtimeDirectory) void rm(runtimeDirectory, { recursive: true, force: true });
           reject(new QubiclError('desktop_application_launch_failed', `Could not launch desktop application ${application}: ${error.message}`, 500));
         });
       });
       await started;
       child.unref();
-      if (reuseCandidate) await Promise.race([finished, delay(250)]);
+      if (definition.reusesExistingProcess) await Promise.race([finished, delay(250)]);
+      // A successful launcher may be resolving a borrowed daemon identity.
+      if (tracked.completed && tracked.child.exitCode === 0) await finished;
       const canonical = this.applications.get(this.aliases.get(applicationId) ?? '');
       if (canonical && !canonical.completed) return { ...this.record(canonical), disposition: 'reused' };
       if (tracked.completed) {
         throw new QubiclError('desktop_application_launch_failed', `Desktop application ${application} exited during launch.`, 500);
       }
-      return { ...this.record(tracked), disposition: 'started' };
+      return { ...this.record(tracked), disposition: tracked.external ? 'reused' : 'started' };
     } finally {
       this.pendingApplications -= 1;
     }
   }
 
   list(): DesktopApplicationRecord[] {
+    for (const [id, item] of this.applications) {
+      if (item.external && processStartTimeSync(item.external.pid) !== item.external.startTime) this.applications.delete(id);
+    }
     return [...this.applications.values()].filter(({ completed }) => !completed).map((tracked) => this.record(tracked));
   }
 
@@ -267,6 +293,21 @@ export class DesktopApplicationManager {
     const tracked = this.applications.get(applicationId);
     if (!tracked || tracked.completed) {
       throw new QubiclError('desktop_application_not_found', `Desktop application ${applicationId} was not found.`, 404);
+    }
+    if (tracked.external) {
+      if (await processStartTime(tracked.external.pid) !== tracked.external.startTime) {
+        this.applications.delete(applicationId);
+        throw new QubiclError('desktop_application_not_found', 'The reused application process changed; refresh desktop windows.', 404);
+      }
+      if ((mode ?? (discardUnsavedChanges ? 'terminate' : 'request')) !== 'request') {
+        throw new QubiclError('desktop_application_shared_process', 'This application reused an existing process. Request normal window close; Qubicl will not terminate the shared daemon.', 409);
+      }
+      const windows = await this.observeWindows();
+      const targets = windows.filter((window) => window.pid === tracked.external!.pid && tracked.external!.windowIds.includes(window.id));
+      const results = [];
+      for (const window of targets) results.push(await this.requestCloseWindow(window.id));
+      if (!targets.length) this.applications.delete(applicationId);
+      return { applicationId, application: tracked.application, state: targets.length ? 'close_requested' : 'closed', lifecycle: 'desktop_session', forcedKill: false, closeRequest: { windowIds: targets.map((window) => window.id), results } };
     }
     if ((mode ?? (discardUnsavedChanges ? 'terminate' : 'request')) === 'request') {
       const closeRequest = await this.requestClose(tracked.child.pid!);
@@ -297,7 +338,7 @@ export class DesktopApplicationManager {
 
   async shutdown(): Promise<void> {
     await Promise.all([...this.applications.values()].map(async (tracked) => {
-      if (!tracked.completed) await terminateGroup(tracked, GRACEFUL_CLOSE_MS, FORCED_CLOSE_MS);
+      if (!tracked.completed && !tracked.external) await terminateGroup(tracked, GRACEFUL_CLOSE_MS, FORCED_CLOSE_MS);
       this.applications.delete(tracked.applicationId);
       if (tracked.runtimeDirectory) await rm(tracked.runtimeDirectory, { recursive: true, force: true });
     }));
@@ -337,13 +378,44 @@ export class DesktopApplicationManager {
     return { ...publicRecord(tracked), aliases: [...this.aliases].filter(([, id]) => id === tracked.applicationId).map(([alias]) => alias) };
   }
 
-  private complete(tracked: TrackedDesktopApplication, finish: () => void): void {
+  private async complete(tracked: TrackedDesktopApplication, finish: () => void): Promise<void> {
     if (tracked.completed) return;
     tracked.completed = true;
     const canonical = tracked.reuseCandidateId ? this.applications.get(tracked.reuseCandidateId) : undefined;
     if (tracked.child.exitCode === 0 && canonical && !canonical.completed) {
       this.aliases.set(tracked.applicationId, canonical.applicationId);
       while (this.aliases.size > 256) this.aliases.delete(this.aliases.keys().next().value!);
+      if (canonical.external) {
+        try {
+          const windows = await this.observeWindows();
+          canonical.external.windowIds = windows.filter((window) => window.pid === canonical.external!.pid).map((window) => window.id);
+        } catch { /* Retain the previous observed window set if inspection fails. */ }
+      }
+    }
+    if (tracked.child.exitCode === 0 && !canonical && tracked.reusesExistingProcess) {
+      try {
+        const executable = await realpath(tracked.executable);
+        const windows = await this.observeWindows();
+        const matching = [];
+        for (const window of windows) {
+          if (!window.pid || window.pid === tracked.child.pid) continue;
+          const processOwner = await stat(`/proc/${window.pid}`).catch(() => undefined);
+          if (processOwner?.uid !== (this.spawnUid ?? process.getuid?.())) continue;
+          const actual = await readlink(`/proc/${window.pid}/exe`).catch(() => undefined);
+          if (actual === executable) matching.push(window as { id: number; pid: number });
+        }
+        const pids = new Set(matching.map((window) => window.pid));
+        if (pids.size === 1) {
+          const pid = matching[0]!.pid;
+          const startTime = await processStartTime(pid);
+          if (startTime) {
+            tracked.external = { pid, startTime, windowIds: matching.map((window) => window.id) };
+            tracked.completed = false;
+            finish();
+            return;
+          }
+        }
+      } catch { /* An unverifiable handoff remains a completed launcher. */ }
     }
     if (this.applications.get(tracked.applicationId) === tracked) this.applications.delete(tracked.applicationId);
     if (tracked.runtimeDirectory) void rm(tracked.runtimeDirectory, { recursive: true, force: true });
@@ -513,7 +585,7 @@ export function desktopLaunchArguments(definition: DesktopApplicationDefinition,
 function publicRecord(tracked: TrackedDesktopApplication): DesktopApplicationRecord {
   return {
     applicationId: tracked.applicationId,
-    ...(tracked.child.pid ? { pid: tracked.child.pid } : {}),
+    ...(tracked.external ? { pid: tracked.external.pid, processOwnership: 'external' as const, windowIds: [...tracked.external.windowIds] } : tracked.child.pid ? { pid: tracked.child.pid, processOwnership: 'managed' as const } : {}),
     application: tracked.application,
     executable: tracked.executable,
     state: 'running',
@@ -573,4 +645,16 @@ function processGroupExists(pid: number | undefined): boolean {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+async function processStartTime(pid: number): Promise<string | undefined> {
+  const value = await readFile(`/proc/${pid}/stat`, 'utf8').catch(() => undefined);
+  return value?.slice(value.lastIndexOf(') ') + 2).trim().split(/\s+/u)[19];
+}
+
+function processStartTimeSync(pid: number): string | undefined {
+  try {
+    const value = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return value.slice(value.lastIndexOf(') ') + 2).trim().split(/\s+/u)[19];
+  } catch { return undefined; }
 }

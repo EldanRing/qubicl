@@ -26,14 +26,32 @@ new page is announced. Later script-created popups remain visible in
 `browser_tabs`; an empty list is an observation, not a guarantee against a future
 popup. Opening a popup preserves valid parent-page refs.
 
+Observation URL fields are display values: recognized token, credential,
+password, authorization, session, signature and API-key parameters are redacted
+in queries and key/value fragments; URL userinfo is removed. Matching values
+echoed in titles are redacted too. Ordinary navigation parameters and hash
+anchors remain visible. Use stable tab IDs, frame indexes and read document IDs
+for targeting; a redacted URL is not a reusable authenticated link. Page text and
+screenshots remain application content, so this metadata filtering does not
+promise a secret-free page capture.
+
 `browser_history` dispatches Back, Forward or Reload once and waits up to five
 seconds for navigation to commit, then at most one second for `DOMContentLoaded`.
 It returns the observed URL/title, `navigation.status` (`committed` or
 `not_observed`), `navigation.waitTimedOut`, and a separate `loading` record with
-`waitStatus` and the observed document `readyState`. A missing loading event can
-produce `waitStatus: "timed_out"` even when the document is already complete.
+`waitStatus` and the observed document `readyState`. An observed interactive or
+complete document satisfies the loading check even when its protocol event is
+missing; Qubicl skips that wait when readiness is already visible. A document
+still loading, or unavailable to inspection, can report `waitStatus: timed_out`.
 Same-document history entries can commit without an HTTP response. An absent
 Back/Forward entry still returns `browser_no_history`.
+
+The current Chromium/Playwright combination keeps the back-forward cache
+disabled. Its restored child frames otherwise disappear from fresh tool
+inventories, and cached console events can acquire the next page's attribution.
+Ordinary history restores the tested edited form field and discoverable iframe;
+this does not promise preservation of arbitrary JavaScript heap state. See the
+[decision and review condition](decisions/0006-browser-history-and-preview-origins.md).
 
 The final document observation also has a one-second budget. If it cannot be
 read, `observationComplete` is false, title is empty, and `readyState` is
@@ -62,6 +80,12 @@ and the dialog's tab. This is a waiting state, not proof that the action finishe
 operation from starting; resolving it does not launch that operation later.
 `browser_dialogs` and authorized `browser_respond_dialog` bypass the blocked
 action queue. They do not accept or dismiss dialogs automatically.
+
+Semantic clicks complete bounded actionability and hit testing before dispatching
+one input event, so waiting for a prompt no longer consumes a locator-click
+timeout. Keyboard input likewise avoids a locator navigation wait. Sequential
+dialogs update the same operation with the currently pending dialog ID. The
+isolated runner preserves these IDs and dispatch details in its responses.
 
 The response to a dialog includes its originating operation receipt when known.
 It waits up to one second for that operation to settle; otherwise it reports the
@@ -104,6 +128,8 @@ state, not a guarantee that a control is unobscured or that an app will accept a
 action. Native modal dialogs, visible ARIA modal dialogs and inert ancestors mark
 background controls as blocked, including controls in child frames; semantic
 actions reject blocked targets before input.
+Text controls also report `editable`. A `contenteditable="false"` ARIA textbox
+inside an editable ancestor reports read-only; it may still be focusable/clickable.
 
 Snapshots include `focus` and `selection`; focused refs also carry these states.
 Input/textarea selections expose UTF-16 offsets and direction, with up to 256
@@ -180,3 +206,6 @@ progress may lag the transfer. Completed artifacts include `sizeBytes` and
 `sha256` measured from the saved file. Explicit successful cancellation stays
 `cancelled` even when the save operation rejects concurrently; genuine failures
 stay `failed`, and cancelling a completed download is a no-op.
+Cancellation retains the highest observed `receivedBytes` rather than replacing
+partial progress with a terminal browser event's zero counter. It does not imply
+that cancelled bytes were published as a usable file.

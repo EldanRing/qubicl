@@ -21,6 +21,7 @@ test('live observations and input cover composed text, form state, modalities, s
     <details><summary>More details</summary><button>Previously concealed</button><p>Hidden prose</p></details>
     <span id="name">Canonical name</span><input id="named" aria-labelledby="name" aria-label="Wrong name" value="Initial">
     <input id="locked" aria-label="Locked" readonly value="Keep this">
+    <div contenteditable="true" aria-label="Editable container"><div role="textbox" contenteditable="false" aria-label="Rich readonly">Keep rich text</div></div>
     <form><input id="email" aria-label="Email" type="email" required><button>Submit form</button></form>
     <input id="number" aria-label="Quantity" type="number" min="2" max="8" step="0.5" value="3">
     <textarea id="memo" aria-label="Memo"></textarea>
@@ -52,6 +53,9 @@ test('live observations and input cover composed text, form state, modalities, s
   };
   const read = async (input: Record<string, unknown>): Promise<Record<string, unknown>> => await executor.call('browser_read', input) as Record<string, unknown>;
 
+  assert.equal(control('Rich readonly').readOnly, true);
+  assert.equal(control('Rich readonly').editable, false);
+  await assert.rejects(executor.call('browser_type', { lease, ref: control('Rich readonly').ref, text: 'Must not change' }), { code: 'browser_control_unavailable' });
   const text = await read({});
   assert.match(text.content as string, /Shadow needle/u);
   assert.equal((text.content as string).split('Slotted text once').length - 1, 1);
@@ -134,7 +138,7 @@ test('live observations and input cover composed text, form state, modalities, s
   assert.ok(feedback.observation.feedback.includes('Plain toast'));
   assert.equal(await page.locator('#status').innerText(), '');
 
-  await page.evaluate(() => { const frame = document.createElement('iframe'); frame.srcdoc = '<button>Frame action</button>'; document.body.append(frame); });
+  await page.evaluate(() => { const frame = document.createElement('iframe'); frame.srcdoc = '<button onclick="document.body.dataset.clicked=String(Number(document.body.dataset.clicked||0)+1)">Frame action</button>'; document.body.append(frame); });
   await page.frameLocator('iframe').getByRole('button').waitFor();
   await page.locator('#modal').evaluate((node) => (node as HTMLDialogElement).showModal());
   snapshot = await observe();
@@ -146,4 +150,6 @@ test('live observations and input cover composed text, form state, modalities, s
   assert.equal(childSnapshot.refs[0]!.blockedByModal, true);
   await assert.rejects(executor.call('browser_click', { lease, ref: childSnapshot.refs[0]!.ref }), { code: 'browser_control_unavailable' });
   await page.locator('#modal').evaluate((node) => (node as HTMLDialogElement).close());
+  await executor.call('browser_click', { lease, ref: childSnapshot.refs[0]!.ref });
+  assert.equal(await page.frames()[1]!.locator('body').getAttribute('data-clicked'), '1');
 });

@@ -26,8 +26,11 @@ and named actions. By default only elements with both AT-SPI `visible` and
 `showing` states are returned. Editable/focused elements and dialog controls come
 first, followed by other controls and text, then structural containers. Set
 `includeHidden: true` to also return hidden elements after the visible elements.
-Visibility is the application's accessibility state, not proof that another
-window does not cover it.
+Screen/window geometry also deprioritizes offscreen elements even when a toolkit
+keeps its `showing` flag set. Visibility is not proof that another window does
+not cover the control. Window matching refreshes toolkit caches and compares
+title, role and geometry so a newly opened modal can replace a stale main-window
+match.
 `keyBindings` keeps each action's actual AT-SPI keybinding string separate from
 its name; null means the app did not provide one. The native string may contain
 mnemonic/menu/accelerator components separated by semicolons. Qubicl does not
@@ -66,6 +69,15 @@ that could not be inspected, for example because an app removed them mid-read.
 from very large or unresponsive application trees; adjust them based on concrete
 missed-control evidence rather than treating them as product goals.
 
+Virtual tables such as Calc sheets are sampled through AT-SPI Table rather than
+walking millions of child cells. A table exposes dimensions, the sampled range,
+cell row/column coordinates and `table.read`/`table.nextTableRange` arguments.
+Use its `ref` with `tableRange: {row, column, rows, columns}` to inspect an exact
+zero-based rectangle; defaults are 12 rows by 8 columns and the maximum is 200
+cells per request. `tableRanges` records the sampled areas, and bounded sampling
+reports partial content coverage. Follow the range continuation or select the
+needed coordinates; a small visible sample is not the entire sheet.
+
 An element with text includes `textRead` arguments. Call `desktop_snapshot` with
 its `windowId`, `ref` and `textOffset: 0` (or another Unicode code-point offset)
 to capture the full text. Follow `nextTextCursor` using `windowId`, `textCursor`
@@ -102,6 +114,14 @@ promise every language or every explicitly selected font has full coverage.
 invoked without its name. Disabled or stale elements reject the action. API
 acceptance is reported separately from `verified: false`: it does not establish
 that the user's intended task succeeded.
+Numeric controls expose `value` with their AT-SPI current value, minimum, maximum
+and increment when available. Use `action: "set_value"` and numeric `value` to
+change that model directly; out-of-range values are rejected before mutation.
+The receipt includes `requestedValue`, model readback and `valueReadbackMatches`,
+while retaining `verified: false` for the application outcome. `set_text` only
+replaces text and need not commit a spin control's numeric model.
+If the control disappears after mutation, `valueReadbackStatus: unavailable` and
+null readback fields preserve the dispatch receipt without inventing a value.
 For `set_text`, `undoGrouping: application_defined` and
 `singleUndoGuaranteed: false` describe the AT-SPI limitation:
 [EditableText](https://docs.gtk.org/atspi2/iface.EditableText.html) provides no
@@ -123,6 +143,15 @@ text uses normal xdotool pacing for temporary X11 key mappings. Clipboard text,
 file lists and binary formats are untouched. These are keyboard events: an app
 can handle Return as submit or apply indentation/formatting. Read or save/reopen
 the resulting content when exact text matters; dispatch is not insertion proof.
+Set `action.stopOnFocusChange: true` on typing to recheck the active window before
+each chunk (at most 64 Unicode code points) and each individual Return event.
+If focus changes, dispatch stops with `dispatch: interrupted` and a `typing`
+record containing `nextOffset`, total/remaining input lengths and
+`offsetUnit: utf16`. Offsets refer to the original input, so CRLF consumes two
+units even though it dispatches one Return. Remaining input is never replayed.
+The guard is opt-in and cannot interrupt an already dispatched chunk or detect
+focus moving between controls within one window. Inspect the new state before
+resuming; the offset counts dispatch, not verified insertion.
 For desktop `keypress`, `action.keys` is a sequence: `["ctrl+End", "Return"]`
 sends one chord and then Return. `["ctrl", "End"]` is rejected; combine modifiers
 with `+` within an entry. Browser `browser_press` uses a single chord string such
@@ -201,6 +230,12 @@ short launch window. A later successful handoff retains the returned launcher ID
 as an alias of the running app; inventory exposes aliases and close resolves them.
 New processes report `started`. A reused ID represents the app, not just the newly
 opened document, so a normal close may present save dialogs for its other tabs.
+
+Handoffs to an already running external text-editor/file-manager daemon also
+retain an `applicationId`, observed `windowIds` and PID identity, with
+`processOwnership: external` and `disposition: reused`. Normal close targets only
+those observed windows after rechecking their identity. Explicit termination is
+rejected for an external daemon, and runtime shutdown never kills it.
 
 `take_screenshot` accepts either a `region` (`x`, `y`, `width`, `height` in screen
 pixels), or a `windowId` and its observed `geometryToken`. Window capture rejects

@@ -6,6 +6,28 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Dialog-triggering browser input no longer expires while a person answers a
+  prompt. Sequential dialogs retain their operation identity, including across
+  the isolated runner transport. History retains discoverable child frames and
+  console attribution by disabling Chromium's incompatible back-forward cache.
+- Browser observations mark noneditable rich-text controls read-only, preserve
+  download byte progress after cancellation, and redact sensitive URL parameters
+  from page, frame, tab and read metadata, including values echoed in titles.
+- Owner previews provide isolated in-computer browser URLs for unified runtimes,
+  including applications listening only on loopback, cookies and WebSockets.
+  Legacy split runtimes report the unavailable browser route explicitly.
+- Native snapshots refresh modal-window matching, deprioritize offscreen
+  controls, and inspect virtual table cells through bounded ranges. Numeric
+  controls expose their Value model and support `set_value` with readback.
+- Optional `stopOnFocusChange` typing stops between bounded chunks and Return
+  events when another window gains focus, reporting the dispatched offset.
+  Launches handed to an existing desktop daemon retain an observable application
+  identity without granting Qubicl authority to terminate that daemon.
+- CSV imports reject Excel row, column, text and enabled-formula capacity
+  violations before publishing an output, then reopen staged workbooks to check
+  preservation. Failed conversions preserve an existing destination. Generated
+  Python caches no longer block updates to unchanged bundled skills; actual
+  customizations remain protected.
 - Native typing sends LF/CRLF as explicit Return events and preserves tabs and
   Unicode without replacing clipboard formats. Unicode uses normal X11 typing
   pacing to avoid dropped characters in Qt; literal leading options remain text.

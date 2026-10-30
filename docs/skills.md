@@ -46,6 +46,13 @@ The working copy is ordinary durable computer content. An agent or user with fil
 
 Qubicl reports `unchanged`, `modified`, `missing`, or `corrupt` by comparing a working copy with its recorded baseline. Routine materialization and upgrades preserve modified copies. `qubicl skills COMPUTER reset NAME --yes` is the explicit operation that discards local edits and restores a verified baseline. Core reset uses the image baseline; imported reset uses the snapshot captured at import time.
 
+Core working-copy comparisons ignore ordinary Python-generated
+`__pycache__/*.cpython-*.pyc` and `*.pypy-*.pyc` files. Running a bundled helper
+therefore does not prevent its next baseline update. Source edits, additional
+notes and other files still count as modifications; symlink and hard-link checks
+remain in force. Import validation does not use this exception. Successful
+updates clear the old update-available marker.
+
 Editable packages remain bounded data. Qubicl refuses to follow symlinks or hard links—including substituted skill-store and native-discovery parent directories—and marks a working copy corrupt if it exceeds the package entry, file, path, per-file, or total-size limits. This prevents an agent edit from turning a later host-side inspection into an unbounded traversal or an out-of-home write. The operator can recover a corrupt core package with `qubicl skills COMPUTER reset NAME --yes`; imported packages reset only from their verified stored baseline.
 
 An imported baseline also lives in the computer-owned durable home. Reset verifies

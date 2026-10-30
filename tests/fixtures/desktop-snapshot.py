@@ -12,6 +12,7 @@ states = ('ENABLED', 'SENSITIVE', 'VISIBLE', 'SHOWING', 'FOCUSED', 'EDITABLE',
 atspi = types.SimpleNamespace(init=lambda: None, set_timeout=lambda *_: None,
                               StateType=types.SimpleNamespace(**{s: s for s in states}),
                               Role=types.SimpleNamespace(PASSWORD_TEXT='password text'),
+                              CoordType=types.SimpleNamespace(SCREEN='screen'),
                               Text=types.SimpleNamespace(get_text=lambda obj, start, end: obj.text[start:end]))
 sys.modules['gi'] = types.SimpleNamespace(require_version=lambda *_: None)
 sys.modules['gi.repository'] = types.SimpleNamespace(Atspi=atspi, GLib=None)
@@ -70,6 +71,90 @@ def pages(subject, first):
 
 
 class Snapshots(unittest.TestCase):
+    def test_window_matching_refreshes_cached_modal_roots_and_refuses_ambiguity(self):
+        def candidate(name, role, x, y, width, height):
+            node = Node(name, role)
+            node.get_component_iface = lambda: types.SimpleNamespace(get_extents=lambda _: types.SimpleNamespace(x=x, y=y, width=width, height=height))
+            return node
+        main = candidate('Main', 'frame', 0, 27, 570, 454)
+        dialog = candidate('Modal', 'dialog', 75, 186, 430, 194)
+        app = Node('App', children=[main])
+        app.clear_cache = lambda: setattr(app, 'children', [main, dialog])
+        atspi.get_desktop = lambda _: Node('Desktop', children=[app])
+        subject = helper.Desktop.__new__(helper.Desktop)
+        request = {'id': 42, 'pid': 10, 'title': 'Modal', 'geometry': {'x': 75, 'y': 186, 'width': 430, 'height': 194}, 'modal': True}
+        self.assertIs(subject.accessible_window(request), dialog)
+        self.assertEqual(subject.last_window_match['status'], 'matched')
+        self.assertIs(subject.accessible_window({**request, 'title': 'Main', 'modal': False, 'geometry': {'x': 0, 'y': 27, 'width': 570, 'height': 454}}), main)
+        app.clear_cache = lambda: setattr(app, 'children', [dialog, candidate('Modal', 'dialog', 75, 186, 430, 194)])
+        self.assertIsNone(subject.accessible_window(request))
+        self.assertEqual(subject.last_window_match['status'], 'ambiguous')
+
+    def test_virtual_table_reads_bounded_cells_and_explicit_offscreen_ranges(self):
+        grid = Node('Sheet', 'table')
+        cells = {}
+        def cell(row, column):
+            key = (row, column)
+            if key not in cells:
+                value = Node(f'Cell {row},{column}', 'table cell', text=f'Value {row},{column}', showing=row < 12 and column < 8)
+                value.parent = grid
+                value.get_index_in_parent = lambda: row * 16384 + column
+                cells[key] = value
+            return cells[key]
+        grid.get_child_count = lambda: 2147483647
+        grid.get_child_at_index = lambda _: self.fail('virtual table must not enumerate generic children')
+        grid.get_selection_iface = lambda: None
+        grid.get_table_iface = lambda: types.SimpleNamespace(get_n_rows=lambda: 1048576, get_n_columns=lambda: 16384, get_accessible_at=cell, get_row_at_index=lambda index: index // 16384, get_column_at_index=lambda index: index % 16384)
+        subject = desktop(grid)
+        observed = subject.snapshot({'windowId': 42, 'limit': 200})
+        self.assertEqual(observed['tableRanges'][0]['range'], {'row': 0, 'column': 0, 'rows': 12, 'columns': 8})
+        self.assertEqual(observed['contentCoverage'], 'partial')
+        self.assertFalse(observed['scopeLimitReached'])
+        self.assertEqual(len(cells), 96)
+        table = next(item for item in observed['elements'] if item['role'] == 'table')
+        grid.get_selection_iface = lambda: types.SimpleNamespace(get_n_selected_children=lambda: 1, get_selected_child=lambda _: cell(0, 0))
+        targeted = subject.snapshot({'windowId': 42, 'ref': table['ref'], 'tableRange': {'row': 4999, 'column': 4, 'rows': 1, 'columns': 1}})
+        actual_cells = [item for item in targeted['elements'] if item.get('tableCell')]
+        self.assertEqual(len(actual_cells), 1, 'Selection outside an explicit rectangle must not extend the read')
+        self.assertEqual(targeted['tableRanges'][0]['selection'], [{'row': 0, 'column': 0}])
+        result = actual_cells[0]
+        self.assertEqual(result['text'], 'Value 4999,4')
+        self.assertEqual(result['tableCell']['row'], 4999)
+        self.assertIs(subject.resolve(result['ref'])[0], cells[4999, 4])
+        with self.assertRaises(helper.Failure) as error:
+            subject.snapshot({'windowId': 42, 'ref': table['ref'], 'tableRange': {'row': 0, 'column': 0, 'rows': 200, 'columns': 2}})
+        self.assertEqual(error.exception.code, 'desktop_table_range_invalid')
+
+    def test_value_update_reads_committed_model_and_bounds_before_dispatch(self):
+        spin = Node('Width', 'spin button', text='400', editable=True)
+        model = {'value': 400, 'sets': 0}
+        def set_value(value):
+            model.update(value=value, sets=model['sets'] + 1)
+            return True
+        spin.get_value_iface = lambda: types.SimpleNamespace(get_current_value=lambda: model['value'], get_minimum_value=lambda: 1, get_maximum_value=lambda: 400, get_minimum_increment=lambda: 1, set_current_value=set_value)
+        subject = desktop(Node('Window', 'frame', [spin]))
+        item = subject.snapshot({'windowId': 42})['elements'][0]
+        self.assertEqual(item['value']['current'], 400)
+        result = subject.act({'ref': item['ref'], 'action': 'set_value', 'value': 200})
+        self.assertTrue(result['valueReadbackMatches'])
+        self.assertEqual(model['value'], 200)
+        with self.assertRaises(helper.Failure):
+            subject.act({'ref': item['ref'], 'action': 'set_value', 'value': 500})
+        self.assertEqual(model['sets'], 1)
+        iface = spin.get_value_iface()
+        def remove_control(value):
+            set_value(value)
+            spin.get_value_iface = lambda: None
+            return True
+        iface.set_current_value = remove_control
+        spin.get_value_iface = lambda: iface
+        missing = subject.act({'ref': item['ref'], 'action': 'set_value', 'value': 100})
+        self.assertTrue(missing['acceptedByAccessibilityApi'])
+        self.assertEqual(missing['dispatch'], 'completed')
+        self.assertEqual(missing['valueReadbackStatus'], 'unavailable')
+        self.assertIsNone(missing['valueReadbackMatches'])
+        self.assertIsNone(missing['value'])
+
     def test_targeted_text_is_useful_and_directory_gaps_are_explicit(self):
         text = Node('Document', 'panel', text='A complete editable document of 40 chars.')
         pane = Node('Icon view', 'directory pane', [Node('')])

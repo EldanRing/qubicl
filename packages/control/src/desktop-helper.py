@@ -3,6 +3,7 @@
 import collections
 import hashlib
 import json
+import math
 import secrets
 import sys
 import time
@@ -230,26 +231,141 @@ class Desktop:
         raise Failure('stale_desktop_ref', 'Element changed or left the observed window. Refresh its snapshot.')
 
     def accessible_window(self, window):
+        # AT-SPI caches the application's child list and geometry. A dialog can
+        # change both without the long-lived helper receiving every cache event.
         desktop = Atspi.get_desktop(0)
+        desktop.clear_cache()
         matches = []
+        evidence = []
+        geometry = window['geometry']
+        extents = window.get('frameExtents') or dict.fromkeys(('left', 'right', 'top', 'bottom'), 0)
+        decorated = {'x': geometry['x'] - extents['left'], 'y': geometry['y'] - extents['top'],
+                     'width': geometry['width'] + extents['left'] + extents['right'],
+                     'height': geometry['height'] + extents['top'] + extents['bottom']}
         for ai in range(min(desktop.get_child_count(), 256)):
             app = desktop.get_child_at_index(ai)
+            if app is None:
+                continue
+            app.clear_cache()
             if window['pid'] and app.get_process_id() != window['pid']:
                 continue
             for wi in range(min(app.get_child_count(), 256)):
                 candidate = app.get_child_at_index(wi)
+                if candidate is None:
+                    continue
+                candidate.clear_cache()
                 component = candidate.get_component_iface()
                 if not component:
                     continue
                 rect = component.get_extents(Atspi.CoordType.SCREEN)
-                g = window['geometry']
-                near = abs(rect.x - g['x']) < 40 and abs(rect.y - g['y']) < 80 and abs(rect.width - g['width']) < 80 and abs(rect.height - g['height']) < 120
-                if near and (window['pid'] or candidate.get_name() == window['title']):
-                    matches.append(candidate)
-        if len(matches) == 1:
-            return matches[0]
-        named = [obj for obj in matches if obj.get_name() == window['title']]
-        return named[0] if len(named) == 1 else None
+                bounds = {'x': rect.x, 'y': rect.y, 'width': rect.width, 'height': rect.height}
+                error = min(sum(abs(bounds[k] - target[k]) for k in bounds) for target in (geometry, decorated))
+                named = candidate.get_name() == window['title']
+                role = candidate.get_role_name()
+                near = error <= 240 and rect.width > 0 and rect.height > 0
+                if len(evidence) < 8:
+                    evidence.append({'name': bounded(candidate.get_name(), 128), 'role': bounded(role, 64),
+                                     'geometry': bounds, 'exactTitle': named, 'geometryDistance': error})
+                # A unique title is not enough when it belongs to a different
+                # process or remote/offscreen window. Require matching geometry.
+                if near and (window['pid'] or named):
+                    score = (0 if named else 1, 0 if (role in ('dialog', 'alert')) == bool(window.get('modal') or window.get('transientFor')) else 1, error)
+                    matches.append((score, candidate))
+        matches.sort(key=lambda item: item[0])
+        chosen = matches[0][1] if matches and (len(matches) == 1 or matches[0][0] < matches[1][0]) else None
+        self.last_window_match = {'status': 'matched' if chosen else 'ambiguous' if matches else 'not_exposed',
+                                  'candidates': evidence}
+        return chosen
+
+    @staticmethod
+    def numeric_value(obj):
+        getter = getattr(obj, 'get_value_iface', None)
+        iface = getter() if getter else None
+        if not iface:
+            return None
+        def finite(method):
+            try:
+                value = float(method())
+                return value if math.isfinite(value) else None
+            except Exception:
+                return None
+        return {'current': finite(iface.get_current_value), 'min': finite(iface.get_minimum_value),
+                'max': finite(iface.get_maximum_value), 'increment': finite(iface.get_minimum_increment)}
+
+    @staticmethod
+    def table_iface(obj):
+        getter = getattr(obj, 'get_table_iface', None)
+        return getter() if getter else None
+
+    def table_cells(self, obj, window, requested=None):
+        table = self.table_iface(obj)
+        if not table:
+            raise Failure('desktop_table_unavailable', 'This reference exposes no AT-SPI Table interface.')
+        rows, columns = table.get_n_rows(), table.get_n_columns()
+        selected = []
+        selection = obj.get_selection_iface()
+        if selection:
+            for index in range(min(selection.get_n_selected_children(), 16)):
+                child = selection.get_selected_child(index)
+                if child is not None:
+                    selected.append(child)
+        def coordinates(child):
+            if child is None or child == obj:
+                return None
+            try:
+                index = child.get_index_in_parent()
+                row, column = table.get_row_at_index(index), table.get_column_at_index(index)
+                return (row, column) if 0 <= row < rows and 0 <= column < columns else None
+            except Exception:
+                return None
+        visible = []
+        component = obj.get_component_iface()
+        if component:
+            rect = component.get_extents(Atspi.CoordType.SCREEN)
+            bounds = self.intersection({'x': rect.x, 'y': rect.y, 'width': rect.width, 'height': rect.height}, window['geometry'])
+            bounds = self.intersection(bounds, window.get('desktopBounds', window['geometry']))
+            if bounds['width'] > 0 and bounds['height'] > 0:
+                # Bounded hit testing discovers scrolled virtual coordinates;
+                # scanning child indexes starts at invisible cells in Calc.
+                for xf in (0.02, 0.5, 0.98):
+                    for yf in (0.02, 0.5, 0.98):
+                        try:
+                            cell = component.get_accessible_at_point(int(bounds['x'] + bounds['width'] * xf), int(bounds['y'] + bounds['height'] * yf), Atspi.CoordType.SCREEN)
+                            coordinate = coordinates(cell)
+                            if coordinate:
+                                visible.append(coordinate)
+                        except Exception:
+                            pass
+        chosen = [coordinates(child) for child in selected]
+        chosen = [item for item in chosen if item is not None]
+        anchors = visible or chosen or [(0, 0)]
+        explicit_range = requested is not None
+        requested = requested or {'row': min(item[0] for item in anchors), 'column': min(item[1] for item in anchors), 'rows': 12, 'columns': 8}
+        row, column = requested['row'], requested['column']
+        height, width = requested.get('rows', 12), requested.get('columns', 8)
+        if not all(isinstance(value, int) and not isinstance(value, bool) for value in (row, column, height, width)) or row < 0 or column < 0 or height < 1 or width < 1 or height * width > 200:
+            raise Failure('desktop_table_range_invalid', 'Table range uses zero-based row/column and at most 200 cells.')
+        if row >= rows or column >= columns:
+            raise Failure('desktop_table_range_invalid', 'Table range starts outside the exposed table dimensions.')
+        end_row, end_column = min(rows, row + height), min(columns, column + width)
+        cells = []
+        for ri in range(row, end_row):
+            for ci in range(column, end_column):
+                child = table.get_accessible_at(ri, ci)
+                if child is not None:
+                    cells.append((child, ri, ci))
+        # Keep selected cells reachable even when selection is outside the
+        # bounded visible sample. No selection or scroll is changed here.
+        for child in selected if not explicit_range else []:
+            coordinate = coordinates(child)
+            if coordinate and not any(item[0] == child for item in cells) and len(cells) < 200:
+                cells.append((child, *coordinate))
+        next_range = ({'row': end_row, 'column': column, 'rows': height, 'columns': width} if end_row < rows else
+                      {'row': 0, 'column': end_column, 'rows': height, 'columns': width} if end_column < columns else None)
+        return cells, {'rows': rows, 'columns': columns, 'range': {'row': row, 'column': column, 'rows': end_row - row, 'columns': end_column - column},
+                       'coordinateUnit': 'zero_based', 'selection': [{'row': r, 'column': c} for r, c in chosen],
+                       'discovery': 'viewport_hit_test' if visible else 'selection' if chosen else 'top_left_fallback',
+                       'nextTableRange': next_range, 'complete': row == column == 0 and end_row == rows and end_column == columns}
 
     def describe(self, obj, ref, parent, depth):
         fingerprint = self.fingerprint(obj)
@@ -272,6 +388,9 @@ class Desktop:
         if component:
             rect = component.get_extents(Atspi.CoordType.SCREEN)
             result['geometry'] = {'x': rect.x, 'y': rect.y, 'width': rect.width, 'height': rect.height}
+        numeric = self.numeric_value(obj)
+        if numeric is not None:
+            result['value'] = numeric
         text = obj.get_text_iface()
         if text and obj.get_role() != Atspi.Role.PASSWORD_TEXT:
             count = text.get_character_count()
@@ -335,10 +454,32 @@ class Desktop:
                 directories[directory] += 1
             in_dialog = in_dialog or 'modal' in states or fingerprint[1] in ('dialog', 'alert')
             priority = self.snapshot_priority(states, fingerprint[1], in_dialog)
-            if priority < 4 or capture['includeHidden']:
+            if priority < 4 or capture['includeHidden'] or capture.get('tableRange') and obj in capture['cellCoordinates']:
+                # Toolkit SHOWING can remain true for widgets outside the
+                # visible window. Deprioritize those without treating occlusion
+                # as a known property or hiding useful tree structure.
+                component = obj.get_component_iface()
+                if component and priority < 3:
+                    rect = component.get_extents(Atspi.CoordType.SCREEN)
+                    visible = self.intersection({'x': rect.x, 'y': rect.y, 'width': rect.width, 'height': rect.height}, capture['window'].get('visibleBounds', capture['window'].get('geometry', {'x': rect.x, 'y': rect.y, 'width': rect.width, 'height': rect.height})))
+                    if not visible['width'] or not visible['height']:
+                        priority = 3
                 candidates.append((priority, obj, ref, parent, depth))
             else:
                 capture['hidden'] += 1
+            table = self.table_iface(obj)
+            if table and (children > 2000 or capture.get('tableRange') and depth == 0):
+                try:
+                    cells, metadata = self.table_cells(obj, capture['window'], capture.get('tableRange') if depth == 0 else None)
+                    capture['tables'][ref] = metadata
+                    for child, row, column in cells:
+                        capture['cellCoordinates'][child] = {'tableRef': ref, 'row': row, 'column': column}
+                        pending.append((child, ref, depth + 1, in_dialog, directory))
+                except Exception as error:
+                    if capture.get('tableRange') and depth == 0:
+                        raise
+                    capture['tableGaps'].append({'ref': ref, 'reason': 'virtual_table_unavailable', 'detail': bounded(str(error), 128), 'fallback': 'take_screenshot'})
+                continue
             # Some toolkits omit visibility on structural parents while their
             # children are showing. Never prune a subtree solely on that state.
             for ci in range(min(children, 2000)):
@@ -356,7 +497,7 @@ class Desktop:
         capture['limited'] |= bool(pending)
         capture['coverageGaps'] = [{'ref': ref, 'reason': 'no_directory_items_exposed',
             'contentPresence': 'unknown', 'fallback': 'take_screenshot'}
-            for ref, count in directories.items() if not count][:8]
+            for ref, count in directories.items() if not count][:8] + capture['tableGaps'][:8]
         # Stable sort retains tree order within each priority. Parent refs are
         # retained even when their records appear on a later page or are hidden.
         capture['queue'] = collections.deque(sorted(candidates, key=lambda item: item[0]))
@@ -372,7 +513,7 @@ class Desktop:
             capture = self.captures.get(key)
             if not capture or capture['windowId'] != window['id'] or str(capture['offset']) != offset:
                 raise Failure('stale_desktop_cursor', 'Snapshot cursor expired or was already consumed. Start another snapshot.')
-            if args.get('ref'):
+            if args.get('ref') or args.get('tableRange'):
                 raise Failure('invalid_desktop_cursor', 'Continue with windowId, cursor and budgets only.')
             if 'includeHidden' in args and args['includeHidden'] != capture['includeHidden']:
                 raise Failure('invalid_desktop_cursor', 'Visibility selection cannot change during pagination. Start another snapshot.')
@@ -390,10 +531,13 @@ class Desktop:
                 raise Failure('desktop_ref_window_mismatch', 'Reference belongs to a different window.')
             if root is None:
                 return {'window': window, 'accessibility': 'unavailable', 'elements': [], 'nextCursor': None,
+                        'windowMatch': getattr(self, 'last_window_match', None),
                         'fallback': {'tool': 'take_screenshot', 'reason': inspection_error or 'No unambiguous AT-SPI window was exposed by this application.'}}
+            if args.get('tableRange') and not self.table_iface(root):
+                raise Failure('desktop_table_unavailable', 'Target a table ref before requesting tableRange.')
             # Hex identifiers deliberately exclude e, the ref delimiter.
             key = secrets.token_hex(12).replace('e', 'x')
-            capture = {'windowId': window['id'], 'root': root, 'queue': collections.deque(),
+            capture = {'windowId': window['id'], 'window': window, 'tableRange': args.get('tableRange'), 'tables': {}, 'cellCoordinates': {}, 'tableGaps': [], 'root': root, 'queue': collections.deque(),
                        'refs': {}, 'seen': set(), 'created': time.monotonic(), 'offset': 0, 'limited': False,
                        'unreadable': 0, 'hidden': 0, 'includeHidden': args.get('includeHidden', False), 'useful': False,
                        'scope': 'subtree' if args.get('ref') else 'window'}
@@ -411,13 +555,18 @@ class Desktop:
             priority, obj, ref, parent, depth = capture['queue'][0]
             try:
                 item, fingerprint = self.describe(obj, ref, parent, depth)
+                if ref in capture['tables']:
+                    item['table'] = capture['tables'][ref]
+                    item['table']['read'] = {'windowId': window['id'], 'ref': ref, 'tableRange': item['table']['range']}
+                if obj in capture['cellCoordinates']:
+                    item['tableCell'] = capture['cellCoordinates'][obj]
                 if 'textLength' in item:
                     item['textRead'] = {'windowId': window['id'], 'ref': ref, 'textOffset': 0}
             except Exception:
                 capture['queue'].popleft()
                 capture['unreadable'] += 1
                 continue
-            if not capture['includeHidden'] and not {'visible', 'showing'}.issubset(item['states']):
+            if not capture['includeHidden'] and not capture.get('tableRange') and not {'visible', 'showing'}.issubset(item['states']):
                 capture['queue'].popleft()
                 capture['hidden'] += 1
                 continue
@@ -439,9 +588,10 @@ class Desktop:
         return {'window': window, 'accessibility': 'at-spi', 'elements': elements,
                 'usefulTree': useful,
                 'usefulnessScope': capture['scope'],
-                'contentCoverage': 'partial' if capture['coverageGaps'] or capture['unreadable'] or capture['limited'] else 'exposed_tree',
+                'contentCoverage': 'partial' if capture['coverageGaps'] or capture['unreadable'] or capture['limited'] or any(not table['complete'] for table in capture['tables'].values()) else 'exposed_tree',
                 'coverageGaps': capture['coverageGaps'],
-                **({'fallback': {'tool': 'take_screenshot', 'reason': 'Directory items were not exposed in this inspected scope. The directory may be empty or its toolkit may omit visible content; inspect a screenshot. Scope limits are reported separately.'}}
+                'tableRanges': [{'ref': ref, **metadata} for ref, metadata in list(capture['tables'].items())[:8]],
+                **({'fallback': {'tool': 'take_screenshot', 'reason': 'Some native content is not exposed in this scope; inspect coverageGaps and a screenshot. Scope limits are reported separately.'}}
                    if capture['coverageGaps'] else {} if useful else {'fallback': {'tool': 'take_screenshot', 'reason': 'Application exposes only a sparse native tree. Inspect a screenshot or retry after startup.'}}),
                 'nextCursor': f"{key}:{capture['offset']}" if capture['queue'] else None,
                 'truncated': capture['limited'] or bool(capture['queue']), 'scopeLimitReached': capture['limited'],
@@ -501,6 +651,8 @@ class Desktop:
     def act(self, args):
         if args['action'] == 'set_text' and 'text' not in args:
             raise Failure('desktop_text_required', 'set_text requires an explicit text value, including an empty string when clearing.')
+        if args['action'] == 'set_value' and (not isinstance(args.get('value'), (float, int)) or isinstance(args.get('value'), bool) or not math.isfinite(args['value'])):
+            raise Failure('desktop_value_required', 'set_value requires a finite numeric value.')
         obj, capture = self.resolve(args['ref'])
         state = obj.get_state_set()
         if not state.contains(Atspi.StateType.ENABLED) or not state.contains(Atspi.StateType.SENSITIVE):
@@ -511,6 +663,21 @@ class Desktop:
         elif args['action'] == 'set_text':
             iface = obj.get_editable_text_iface()
             accepted = iface and iface.set_text_contents(args.get('text', ''))
+        elif args['action'] == 'set_value':
+            observed = self.numeric_value(obj)
+            if observed is None:
+                raise Failure('desktop_value_unavailable', 'This element exposes no AT-SPI Value interface; text replacement does not commit a numeric model value.')
+            if (observed['min'] is not None and args['value'] < observed['min']) or (observed['max'] is not None and args['value'] > observed['max']):
+                raise Failure('desktop_value_out_of_range', 'Requested numeric value is outside the observed minimum/maximum; no input was sent.')
+            iface = obj.get_value_iface()
+            accepted = iface.set_current_value(args['value'])
+            try:
+                obj.clear_cache()
+                readback = self.numeric_value(obj)
+            except Exception:
+                # A successful mutation can replace/destroy its control. Keep
+                # dispatch evidence and mark only its observation unavailable.
+                readback = None
         else:
             iface = obj.get_action_iface()
             names = [iface.get_action_name(i) for i in range(iface.get_n_actions())] if iface else []
@@ -522,6 +689,9 @@ class Desktop:
             accepted = iface.do_action(names.index(name))
         return {'ref': args['ref'], 'windowId': capture['windowId'], 'dispatch': 'completed',
                 'acceptedByAccessibilityApi': bool(accepted), 'verified': False,
+                **({'requestedValue': args['value'], 'value': readback,
+                    'valueReadbackStatus': 'observed' if readback is not None and readback['current'] is not None else 'unavailable',
+                    'valueReadbackMatches': readback['current'] == args['value'] if readback is not None and readback['current'] is not None else None} if args['action'] == 'set_value' else {}),
                 **({'undoGrouping': 'application_defined', 'singleUndoGuaranteed': False,
                     'undoNote': 'AT-SPI EditableText does not expose an edit transaction. Replacement may require multiple Undo operations; inspect the result of each.'} if args['action'] == 'set_text' else {}),
                 'note': 'API acceptance does not prove the intended application effect. Observe the resulting state.'}

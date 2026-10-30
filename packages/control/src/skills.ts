@@ -106,7 +106,7 @@ export class SkillManager {
       let currentSha256: string | null = null;
       let drift: 'unchanged' | 'modified' | 'missing' | 'corrupt' = 'missing';
       try {
-        const inspected = await inspectWorkingSkill(join(this.installedRoot, skill.name));
+        const inspected = await inspectWorkingSkill(join(this.installedRoot, skill.name), skill.kind === 'core');
         currentSha256 = inspected.sha256;
         drift = inspected.sha256 === skill.baselineSha256 ? 'unchanged' : 'modified';
       } catch (error) {
@@ -175,7 +175,7 @@ export class SkillManager {
       source = skill.kind;
       baselineSha256 = skill.baselineSha256;
     }
-    const inspected = await inspectWorkingSkill(root);
+    const inspected = await inspectWorkingSkill(root, source === 'core');
     const blocked = inspected.findings.filter(({ blockingForSkills }) => blockingForSkills);
     if (blocked.length) throw new QubiclError('skill_security_rejected', `Editable skill ${id} contains blocked prompt-injection or concealment patterns.`, 403);
     const target = safeChild(root, resourcePath);
@@ -418,7 +418,7 @@ function renderSkill(name: string, description: string, instructions: string): s
 
 function skillInstructions(raw: string): string { return raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim(); }
 
-async function inspectWorkingSkill(root: string): Promise<{ sha256: string; findings: SkillSecurityFinding[] }> {
+async function inspectWorkingSkill(root: string, coreWorkingCopy = false): Promise<{ sha256: string; findings: SkillSecurityFinding[] }> {
   const rootInfo = await lstat(root);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new QubiclError('skill_symlink_rejected', 'Editable skill root must be a regular directory, not a symlink.', 403);
   const files: Record<string, string> = {};
@@ -440,6 +440,7 @@ async function inspectWorkingSkill(root: string): Promise<{ sha256: string; find
       if (info.isSymbolicLink()) throw new QubiclError('skill_symlink_rejected', `Editable skill contains unsupported symlink ${path}.`, 403);
       if (info.isDirectory()) { pending.push({ directory: target, prefix: path }); continue; }
       if (!info.isFile() || info.nlink > 1) throw new QubiclError('skill_symlink_rejected', `Editable skill resource ${path} must be an ordinary, non-hard-linked file.`, 403);
+      if (coreWorkingCopy && /(?:^|\/)__pycache__\/[^/]+\.(?:cpython|pypy)-[0-9]+(?:\.opt-[0-9]+)?\.pyc$/u.test(path)) continue;
       if (entry.name === '.qubicl.json') continue;
       if (info.size > MAX_EDITABLE_SKILL_FILE_BYTES) throw new QubiclError('skill_package_limit', `Editable skill resource ${path} exceeds the ${MAX_EDITABLE_SKILL_FILE_BYTES}-byte limit.`, 413);
       totalBytes += info.size;
@@ -448,7 +449,9 @@ async function inspectWorkingSkill(root: string): Promise<{ sha256: string; find
       if (entries.length > MAX_EDITABLE_SKILL_FILES) throw new QubiclError('skill_package_limit', `Editable skill exceeds the ${MAX_EDITABLE_SKILL_FILES}-file limit.`, 413);
     }
   }
-  entries.sort((left, right) => left.path.localeCompare(right.path));
+  entries.sort((left, right) => coreWorkingCopy
+    ? left.path < right.path ? -1 : left.path > right.path ? 1 : 0
+    : left.path.localeCompare(right.path));
   for (const { path, target } of entries) {
     const bytes = await readFile(target);
     digest.update(`${path}\0`); digest.update(bytes); digest.update('\0');
