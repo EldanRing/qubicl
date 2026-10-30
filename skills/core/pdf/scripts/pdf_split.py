@@ -49,7 +49,8 @@ def main() -> int:
         return 2
 
     try:
-        from pypdf import PdfReader, PdfWriter
+        from pypdf import PdfReader
+        from pdf_assembly import FormAssembler
     except ImportError:
         print("Required Qubicl PDF dependency is unavailable: pypdf", file=sys.stderr)
         return 2
@@ -65,18 +66,28 @@ def main() -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
 
-    writer = PdfWriter()
-    for idx in indices:
-        page = reader.pages[idx]
-        if args.rotate:
+    assembly = FormAssembler()
+    # pypdf's one-call page map cannot represent a page twice. Start a fresh
+    # import for each repeated occurrence, retaining a shared field tree within
+    # every unique-page group and giving later copies independent field names.
+    groups = [[]]
+    for index in indices:
+        if index in groups[-1]:
+            groups.append([])
+        groups[-1].append(index)
+    for group in groups:
+        source = PdfReader(args.pdf)
+        if source.is_encrypted:
+            source.decrypt(args.password)
+        assembly.append(source, group)
+    if args.rotate:
+        for page in assembly.writer.pages:
             page.rotate(args.rotate)
-        writer.add_page(page)
     if args.compress:
-        for page in writer.pages:
+        for page in assembly.writer.pages:
             page.compress_content_streams()
-    with open(args.output, "wb") as fh:
-        writer.write(fh)
-    print(json.dumps({"output": args.output, "page_count": len(indices), "rotated": args.rotate}))
+    details = assembly.save(args.output)
+    print(json.dumps({"output": args.output, "page_count": len(indices), "rotated": args.rotate, **details}))
     return 0
 
 

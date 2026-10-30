@@ -2,7 +2,7 @@
 const sensitiveName = (name: string): boolean => {
   const normalized = name.toLowerCase().replace(/[-_]/gu, '');
   return /token|secret|password|credential/iu.test(normalized)
-    || ['key', 'apikey', 'auth', 'authorization', 'session', 'sessionid', 'sid', 'signature', 'sig', 'code'].includes(normalized);
+    || ['key', 'apikey', 'auth', 'authorization', 'session', 'sessionid', 'sid', 'signature', 'sig', 'code', 'ticket'].includes(normalized);
 };
 
 function decode(value: string): string {
@@ -42,8 +42,9 @@ export function browserDisplayUrl(value: string): string {
 }
 
 export function browserDisplayTitle(title: string, url: string): string {
+  const embedded = [...title.matchAll(/https?:\/\/[^\s<>"']+/gu)].map(match => match[0]);
   let result = title.replace(/https?:\/\/[^\s<>"']+/gu, browserDisplayUrl);
-  for (const value of sensitiveValues(url).sort((a, b) => b.length - a.length)) {
+  for (const value of [...new Set([url, ...embedded].flatMap(sensitiveValues))].sort((a, b) => b.length - a.length)) {
     result = result.replaceAll(value, '[redacted]').replaceAll(encodeURIComponent(value), '[redacted]');
   }
   return result;

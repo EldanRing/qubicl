@@ -59,6 +59,20 @@ When filling with `pdf_fill_form.py`, checkboxes accept `true`/`false`;
 radio values need the leading slash (`"/red"`); dropdown values are the
 plain option string.
 
+## Merging and extracting forms
+
+`pdf_merge.py` and `pdf_split.py` preserve the interactive form tree and appearance
+resources. Splitting keeps widgets from the selected pages, plus nonvisual fields;
+calculation-order references to omitted page fields are removed. Repeating a page
+creates an independent field copy rather than linking both copies to one widget.
+
+By default, when a later input's full field names collide, that input is grouped
+under `source_N` (`N` is its 1-based import position). For example, merging two
+forms with `name` gives `name` and `source_2.name`. The JSON `renamed_fields` maps
+original names to output names; use those names with `pdf_fill_form.py`.
+`pdf_merge.py --duplicate-fields error` rejects a collision before replacing the
+destination. Successful merge/split receipts include the discovered field count.
+
 ## Layout lint rules (pdf_form_layout.py)
 
 Per field, on its declared page:

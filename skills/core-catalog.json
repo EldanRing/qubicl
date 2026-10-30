@@ -70,6 +70,7 @@
         "SKILL.md",
         "references/forms.md",
         "scripts/_raster.py",
+        "scripts/pdf_assembly.py",
         "scripts/pdf_create.py",
         "scripts/pdf_fill_form.py",
         "scripts/pdf_form_layout.py",
@@ -83,7 +84,7 @@
         "scripts/pdf_stamp.py",
         "scripts/pdf_watermark.py"
       ],
-      "sha256": "82bc490e545d28e8e6c8bdec1eae7058b19ce662b47024393af89b01d2ea347f",
+      "sha256": "4914507b1e3008a240e9f2d539bb79ea9fb48f2911dc6fddd751dc1c6755b66c",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",
@@ -124,7 +125,7 @@
         "scripts/docx_template.py",
         "scripts/docx_validate.py"
       ],
-      "sha256": "5bee4469bad2f540aa52e409c4097e37be4755d007af84c99663543a524f7651",
+      "sha256": "de3d8740a8b63599c5c1be0765ee4d632d538ec1cbbf5ab1557b67d80e379a79",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",
@@ -165,7 +166,7 @@
         "scripts/xlsx_restructure_dependents.py",
         "scripts/xlsx_to_csv.py"
       ],
-      "sha256": "df0adda6c4097117c1d76c8a912271a6a2d2c0353d090da0042c868e255be044",
+      "sha256": "3d6f6ba795d0d2ce53639da2deba212df39e52221eb8b860dbed31c84f8587d1",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",
@@ -202,7 +203,7 @@
         "scripts/pptx_read.py",
         "scripts/pptx_render.py"
       ],
-      "sha256": "f553da85c5afff4ee71629d8f29ff95f906c96f9cbf476852a23ccd8604396d3",
+      "sha256": "e75bf4be256b486b937be27775dcd8f540bf351ae65a1dbb8d8e67998b929daf",
       "security": {
         "scannerVersion": "qubicl-content-security-v1",
         "verdict": "no-blocking-findings",

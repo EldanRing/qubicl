@@ -378,6 +378,20 @@ export class DesktopApplicationManager {
     return { ...publicRecord(tracked), aliases: [...this.aliases].filter(([, id]) => id === tracked.applicationId).map(([alias]) => alias) };
   }
 
+  private async processExecutable(pid: number): Promise<string | undefined> {
+    const path = `/proc/${pid}/exe`;
+    try { return await readlink(path); }
+    catch (error) {
+      // Root inside an ordinary container lacks ptrace permission over another
+      // user's /proc/exe. Inspect as that already-configured workload user;
+      // never request extra container capabilities or trust argv/process names.
+      if (this.spawnUid === undefined || !['EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) return undefined;
+      return new Promise((resolveExecutable) => execFile('/usr/bin/readlink', ['--', path], {
+        uid: this.spawnUid, gid: this.spawnGid, env: { PATH: '/usr/bin:/bin' }, timeout: 1000, maxBuffer: 4096,
+      }, (failure, stdout) => resolveExecutable(failure ? undefined : stdout.trimEnd())));
+    }
+  }
+
   private async complete(tracked: TrackedDesktopApplication, finish: () => void): Promise<void> {
     if (tracked.completed) return;
     tracked.completed = true;
@@ -401,7 +415,7 @@ export class DesktopApplicationManager {
           if (!window.pid || window.pid === tracked.child.pid) continue;
           const processOwner = await stat(`/proc/${window.pid}`).catch(() => undefined);
           if (processOwner?.uid !== (this.spawnUid ?? process.getuid?.())) continue;
-          const actual = await readlink(`/proc/${window.pid}/exe`).catch(() => undefined);
+          const actual = await this.processExecutable(window.pid);
           if (actual === executable) matching.push(window as { id: number; pid: number });
         }
         const pids = new Set(matching.map((window) => window.pid));

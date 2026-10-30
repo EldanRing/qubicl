@@ -4,6 +4,7 @@
 Modes (pick one):
   --sheets     JSON inventory: sheet names, dimensions, row/col counts
   --json       dump one sheet's rows as a JSON array of arrays
+  --cells      typed cell records with stored values, formats and cache status
   --csv        dump one sheet as CSV to stdout or --out
   --formulas   JSON list of formula cells {"cell", "formula", "cached"};
                array/data-table entries also include formula_type, ref and
@@ -35,10 +36,14 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import posixpath
 import sys
+from zipfile import ZipFile
 from datetime import date, datetime, time, timedelta
 
 from openpyxl import load_workbook
+from openpyxl.utils import coordinate_to_tuple, get_column_letter
+from openpyxl.xml.functions import fromstring
 from xlsx_formula_values import formula_payload, is_typed_formula
 
 
@@ -105,25 +110,125 @@ def cmd_names(wb):
     print(json.dumps({"defined_names": names}, ensure_ascii=False, indent=2))
 
 
+def stored_cells(path):
+    """Read original XML values without recalculation or guessing missing caches.
+
+    In particular, an empty cached string is available, whereas the empty numeric
+    <v/> written by openpyxl for an uncalculated formula is not a result.
+    """
+    main = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+    relation = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id'
+    result = {}
+    with ZipFile(path) as archive:
+        root_relations = fromstring(archive.read('_rels/.rels'))
+        workbook_path = next(item.get('Target').lstrip('/') for item in root_relations
+                             if item.get('Type', '').endswith('/officeDocument') and item.get('TargetMode') != 'External')
+        workbook = fromstring(archive.read(workbook_path))
+        directory, filename = posixpath.split(workbook_path)
+        relationships = fromstring(archive.read(posixpath.join(directory, '_rels', filename + '.rels')))
+        targets = {item.get('Id'): item.get('Target') for item in relationships
+                   if item.get('TargetMode') != 'External'}
+        for sheet in workbook.findall(f'{main}sheets/{main}sheet'):
+            target = targets.get(sheet.get(relation))
+            if not target:
+                continue
+            part = target.lstrip('/') if target.startswith('/') else posixpath.normpath(posixpath.join(directory, target))
+            cells = {}
+            row_index = 0
+            for row in fromstring(archive.read(part)).iter(f'{main}row'):
+                row_index = int(row.get('r', row_index + 1))
+                column = 0
+                for cell in row.findall(f'{main}c'):
+                    column = coordinate_to_tuple(cell.get('r'))[1] if cell.get('r') else column + 1
+                    coordinate = cell.get('r', f'{get_column_letter(column)}{row_index}')
+                    value = cell.find(f'{main}v')
+                    kind = cell.get('t', 'n')
+                    cells[coordinate] = {
+                        'rawValue': value.text if value is not None else None,
+                        'storageType': kind,
+                        'valuePresent': value is not None and (kind == 'str' or value.text not in (None, '')),
+                    }
+            result[sheet.get('name')] = cells
+    return result
+
+
+def formula_details(cell):
+    typed = formula_payload(cell.value)
+    if typed:
+        return typed
+    if cell.data_type == 'f':
+        return {'type': 'formula', 'formula_type': 'normal', 'text': cell.value, 'ref': cell.coordinate}
+    return None
+
+
+def cache_details(cell, cached, stored):
+    available = bool(stored.get('valuePresent'))
+    value = cached.value
+    if available and value is None and stored.get('storageType') == 'str':
+        value = ''
+    return {'cached': jsonable(value) if available else None,
+            'cachedValueAvailable': available,
+            'cacheStatus': 'available' if available else 'missing',
+            'warnings': [] if available else [{'code': 'missing_formula_cache', 'cell': cell.coordinate}]}
+
+
+def cmd_cells(path, sheet):
+    wb = load_workbook(path, data_only=False)
+    values = load_workbook(path, data_only=True)
+    stored = stored_cells(path)
+    out = []
+    try:
+        for name in [sheet] if sheet else [wb.active.title]:
+            ws = wb[name]
+            # Keep sparse worksheets sparse: formatting a distant cell must not
+            # cause inspection to enumerate a huge empty bounding rectangle.
+            for cell in sorted(ws._cells.values(), key=lambda item: (item.row, item.column)):
+                if cell.value is None and not cell.has_style:
+                    continue
+                formula = formula_details(cell)
+                value = cell.value
+                kind = ('formula' if formula else 'duration' if isinstance(value, timedelta)
+                        else 'datetime' if isinstance(value, datetime) else 'date' if isinstance(value, date)
+                        else 'time' if isinstance(value, time) else 'boolean' if isinstance(value, bool)
+                        else 'error' if cell.data_type == 'e' else 'number' if isinstance(value, (int, float))
+                        else 'blank' if value is None else 'text')
+                original = stored.get(name, {}).get(cell.coordinate, {})
+                record = {'sheet': name, 'cell': cell.coordinate, 'type': kind,
+                          'value': jsonable(value), 'numberFormat': cell.number_format,
+                          'rawValue': original.get('rawValue'), 'storageType': original.get('storageType')}
+                if formula:
+                    record.update(formula=formula, **cache_details(cell, values[name][cell.coordinate], original))
+                out.append(record)
+        print(json.dumps({'cells': out, 'recalculated': False, 'displayValues': 'not_rendered',
+                          'note': 'value is typed data; rawValue is original OOXML storage (shared strings use indexes). numberFormat is not rendered display text. Render a copy when appearance matters.'}, ensure_ascii=False))
+    finally:
+        wb.close()
+        values.close()
+
+
 def cmd_formulas(path, sheet):
     wb_f = load_workbook(path, data_only=False)
     wb_v = load_workbook(path, data_only=True)
+    stored = stored_cells(path)
     out = []
     sheets = [sheet] if sheet else wb_f.sheetnames
     for name in sheets:
         ws_f, ws_v = wb_f[name], wb_v[name]
         for row in ws_f.iter_rows():
             for cell in row:
-                typed = formula_payload(cell.value)
-                if typed or (isinstance(cell.value, str) and cell.value.startswith("=")):
+                typed = formula_details(cell)
+                if typed:
                     out.append({
                         "sheet": name,
                         "cell": cell.coordinate,
                         "formula": typed.get("text") if typed else cell.value,
                         **({key: value for key, value in typed.items() if key not in {"type", "text"}} if typed else {}),
-                        "cached": jsonable(ws_v[cell.coordinate].value),
+                        "numberFormat": cell.number_format,
+                        **cache_details(cell, ws_v[cell.coordinate], stored.get(name, {}).get(cell.coordinate, {})),
                     })
     print(json.dumps({"formulas": out}, ensure_ascii=False, indent=2))
+    wb_f.close()
+    wb_v.close()
 
 
 def main(argv=None):
@@ -132,6 +237,7 @@ def main(argv=None):
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--sheets", action="store_true")
     mode.add_argument("--json", action="store_true")
+    mode.add_argument("--cells", action="store_true")
     mode.add_argument("--csv", action="store_true")
     mode.add_argument("--formulas", action="store_true")
     mode.add_argument("--notes", action="store_true")
@@ -143,6 +249,9 @@ def main(argv=None):
     ap.add_argument("--out", help="output file for --csv")
     args = ap.parse_args(argv)
 
+    if args.cells:
+        cmd_cells(args.file, args.sheet)
+        return 0
     if args.formulas:
         cmd_formulas(args.file, args.sheet)
         return 0

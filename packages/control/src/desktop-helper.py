@@ -11,7 +11,8 @@ import time
 import gi
 gi.require_version('Atspi', '2.0')
 from gi.repository import Atspi, GLib
-from Xlib import X, display, protocol
+from Xlib import X, XK, Xutil, display, protocol
+from Xlib.ext import xtest
 
 Atspi.init()
 Atspi.set_timeout(800, 1500)
@@ -89,6 +90,13 @@ class Desktop:
                     'windowTypes': [bounded(self.x.get_atom_name(int(atom)).removeprefix('_NET_WM_WINDOW_TYPE_').lower(), 80)
                                     for atom in list(kinds if kinds is not None else [])[:8]],
                 }
+                hints = w.get_wm_normal_hints()
+                flags = hints['flags'] if hints is not None else 0
+                record['sizeConstraints'] = {
+                    'minimum': {'width': int(hints['min_width']), 'height': int(hints['min_height'])} if flags & Xutil.PMinSize else None,
+                    'maximum': {'width': int(hints['max_width']), 'height': int(hints['max_height'])} if flags & Xutil.PMaxSize else None,
+                    'source': 'WM_NORMAL_HINTS',
+                }
                 record.update(bounds)
                 extents = self.prop(w, '_NET_FRAME_EXTENTS')
                 record['frameExtents'] = dict(zip(('left', 'right', 'top', 'bottom'), map(int, extents[:4]))) if extents is not None and len(extents) >= 4 else None
@@ -160,7 +168,10 @@ class Desktop:
             self.x.sync()
             return {'windowId': window['id'], 'action': 'fit', 'dispatch': 'completed', 'verified': False,
                     'requestedClientSize': {'width': width, 'height': height}, 'workArea': area,
-                    'note': 'Explicit fit request sent to the window manager. Observe new geometry before coordinate input.'}
+                    'sizeConstraints': window['sizeConstraints'],
+                    'minimumExceedsWorkArea': bool(window['sizeConstraints']['minimum'] and (
+                        window['sizeConstraints']['minimum']['width'] > width or window['sizeConstraints']['minimum']['height'] > height)),
+                    'note': 'Explicit fit request sent to the window manager. Application size constraints may prevent fitting; observe new geometry before coordinate input.'}
         name = '_NET_CLOSE_WINDOW' if args['action'] == 'close' else '_NET_ACTIVE_WINDOW'
         values = [X.CurrentTime, 2, 0, 0, 0] if args['action'] == 'close' else [2, X.CurrentTime, 0, 0, 0]
         self.root.send_event(protocol.event.ClientMessage(window=window['id'], client_type=self.x.intern_atom(name),
@@ -410,6 +421,32 @@ class Desktop:
             return 3
         return 2 if role in ('label', 'static', 'text', 'paragraph', 'heading', 'section') else 1
 
+    @staticmethod
+    def closed_popup(obj):
+        # Qt can leave selected list items SHOWING/FOCUSED after the owning
+        # combo popup closes. Its list itself is hidden and has zero bounds.
+        # Do not apply this to generic structural parents that omit states.
+        if obj.get_role_name() not in ('list', 'menu', 'popup menu'):
+            return False
+        state = obj.get_state_set()
+        if state.contains(Atspi.StateType.VISIBLE) or state.contains(Atspi.StateType.SHOWING):
+            return False
+        component = obj.get_component_iface()
+        if not component:
+            return False
+        rect = component.get_extents(Atspi.CoordType.SCREEN)
+        return rect.width <= 0 or rect.height <= 0
+
+    def hidden_popup_ancestor(self, obj):
+        for _ in range(64):
+            obj = obj.get_parent()
+            if obj is None:
+                return False
+            obj.clear_cache()
+            if self.closed_popup(obj):
+                return True
+        return False
+
     def collect_snapshot(self, capture, key):
         # Inspect bounded, lightweight metadata before paging. Output budgets
         # must not let earlier hidden widgets/containers bury the editor. Read
@@ -429,10 +466,10 @@ class Desktop:
                 capture['unreadable'] += 1
                 break
         directories = {}
-        pending = collections.deque([(capture['root'], None, 0, False, None)])
+        pending = collections.deque([(capture['root'], None, 0, False, None, self.hidden_popup_ancestor(capture['root']))])
         candidates = []
         while pending and len(capture['seen']) < 2000:
-            obj, parent, depth, in_dialog, directory = pending.popleft()
+            obj, parent, depth, in_dialog, directory, hidden_popup = pending.popleft()
             if obj in capture['seen']:
                 continue
             capture['seen'].add(obj)
@@ -453,7 +490,10 @@ class Desktop:
             if directory and fingerprint[1] in ('icon', 'table cell', 'tree item', 'list item') and fingerprint[2]:
                 directories[directory] += 1
             in_dialog = in_dialog or 'modal' in states or fingerprint[1] in ('dialog', 'alert')
-            priority = self.snapshot_priority(states, fingerprint[1], in_dialog)
+            priority = 4 if hidden_popup else self.snapshot_priority(states, fingerprint[1], in_dialog)
+            if hidden_popup:
+                capture['hiddenPopups'].add(obj)
+            hidden_children = hidden_popup or self.closed_popup(obj)
             if priority < 4 or capture['includeHidden'] or capture.get('tableRange') and obj in capture['cellCoordinates']:
                 # Toolkit SHOWING can remain true for widgets outside the
                 # visible window. Deprioritize those without treating occlusion
@@ -474,7 +514,7 @@ class Desktop:
                     capture['tables'][ref] = metadata
                     for child, row, column in cells:
                         capture['cellCoordinates'][child] = {'tableRef': ref, 'row': row, 'column': column}
-                        pending.append((child, ref, depth + 1, in_dialog, directory))
+                        pending.append((child, ref, depth + 1, in_dialog, directory, hidden_children))
                 except Exception as error:
                     if capture.get('tableRange') and depth == 0:
                         raise
@@ -489,7 +529,7 @@ class Desktop:
                 try:
                     child = obj.get_child_at_index(ci)
                     if child is not None:
-                        pending.append((child, ref, depth + 1, in_dialog, directory))
+                        pending.append((child, ref, depth + 1, in_dialog, directory, hidden_children))
                 except Exception:
                     capture['unreadable'] += 1
             if children > 2000:
@@ -538,7 +578,7 @@ class Desktop:
             # Hex identifiers deliberately exclude e, the ref delimiter.
             key = secrets.token_hex(12).replace('e', 'x')
             capture = {'windowId': window['id'], 'window': window, 'tableRange': args.get('tableRange'), 'tables': {}, 'cellCoordinates': {}, 'tableGaps': [], 'root': root, 'queue': collections.deque(),
-                       'refs': {}, 'seen': set(), 'created': time.monotonic(), 'offset': 0, 'limited': False,
+                       'refs': {}, 'seen': set(), 'hiddenPopups': set(), 'created': time.monotonic(), 'offset': 0, 'limited': False,
                        'unreadable': 0, 'hidden': 0, 'includeHidden': args.get('includeHidden', False), 'useful': False,
                        'scope': 'subtree' if args.get('ref') else 'window'}
             self.collect_snapshot(capture, key)
@@ -555,6 +595,8 @@ class Desktop:
             priority, obj, ref, parent, depth = capture['queue'][0]
             try:
                 item, fingerprint = self.describe(obj, ref, parent, depth)
+                if obj in capture['hiddenPopups']:
+                    item['visibility'] = {'effectiveShowing': False, 'reason': 'hidden_popup_ancestor'}
                 if ref in capture['tables']:
                     item['table'] = capture['tables'][ref]
                     item['table']['read'] = {'windowId': window['id'], 'ref': ref, 'tableRange': item['table']['range']}
@@ -648,12 +690,49 @@ class Desktop:
                 'offset': offset, 'nextOffset': end, 'totalCharacters': len(text), 'totalBytes': capture['bytes'],
                 'textTruncated': end < len(text), 'nextTextCursor': f'{key}:{end}' if end < len(text) else None}
 
+    def gtk_button_activate(self, obj, capture):
+        # GTK3 invokes button callbacks synchronously inside the AT-SPI D-Bus
+        # handler. A callback running Dialog.run() then blocks that same bridge.
+        # Space on a verified focused GtkButton runs through GTK's input loop,
+        # so the newly opened modal remains accessible. Never replay DoAction.
+        window = self.validate({'windowId': capture['windowId']})['window']
+        if any(item['modal'] and item['transientFor'] == window['id'] for item in self.inventory()):
+            raise Failure('desktop_window_blocked', 'A modal blocks the requested window; inspect that dialog before input.')
+        self.window_action({'windowId': window['id'], 'action': 'focus'})
+        component = obj.get_component_iface()
+        if not component or not component.grab_focus():
+            raise Failure('desktop_focus_unavailable', 'The GTK button could not receive focus; no activation was sent.')
+        deadline = time.monotonic() + .5
+        while True:
+            obj.clear_cache()
+            focused = obj.get_state_set().contains(Atspi.StateType.FOCUSED)
+            active = self.window(window['id'])['active']
+            if focused and active:
+                break
+            if time.monotonic() >= deadline:
+                raise Failure('desktop_focus_changed', 'The GTK button is not focused in the active window; no activation was sent.')
+            time.sleep(.01)
+        modifiers = self.root.query_pointer().mask
+        if modifiers & (X.ShiftMask | X.ControlMask | X.Mod1Mask | X.Mod4Mask | X.Mod5Mask):
+            raise Failure('desktop_modifier_active', 'A keyboard modifier is held; no activation was sent.')
+        keycode = self.x.keysym_to_keycode(XK.string_to_keysym('space'))
+        if not keycode:
+            raise Failure('desktop_key_unavailable', 'The display has no Space key mapping; no activation was sent.')
+        if self.x.query_keymap()[keycode // 8] & (1 << (keycode % 8)):
+            raise Failure('desktop_key_held', 'Space is already held; no activation was sent.')
+        xtest.fake_input(self.x, X.KeyPress, keycode)
+        xtest.fake_input(self.x, X.KeyRelease, keycode)
+        self.x.sync()
+
     def act(self, args):
         if args['action'] == 'set_text' and 'text' not in args:
             raise Failure('desktop_text_required', 'set_text requires an explicit text value, including an empty string when clearing.')
         if args['action'] == 'set_value' and (not isinstance(args.get('value'), (float, int)) or isinstance(args.get('value'), bool) or not math.isfinite(args['value'])):
             raise Failure('desktop_value_required', 'set_value requires a finite numeric value.')
         obj, capture = self.resolve(args['ref'])
+        dispatch_method = 'at_spi'
+        if self.hidden_popup_ancestor(obj):
+            raise Failure('desktop_element_hidden', 'Element belongs to a closed popup; open its parent control and refresh before input.')
         state = obj.get_state_set()
         if not state.contains(Atspi.StateType.ENABLED) or not state.contains(Atspi.StateType.SENSITIVE):
             raise Failure('desktop_element_disabled', 'Element is disabled; no action was sent.')
@@ -686,15 +765,23 @@ class Desktop:
                 name = names[0]
             if name not in names:
                 raise Failure('desktop_action_unavailable', 'Choose an actionName exposed in the element snapshot.')
-            accepted = iface.do_action(names.index(name))
+            application = obj.get_application()
+            toolkit = (application.get_toolkit_name() or '').lower() if application else ''
+            if toolkit == 'gtk' and obj.get_role_name() in ('button', 'push button') and name == 'click':
+                self.gtk_button_activate(obj, capture)
+                accepted = None
+                dispatch_method = 'focused_keyboard'
+            else:
+                accepted = iface.do_action(names.index(name))
         return {'ref': args['ref'], 'windowId': capture['windowId'], 'dispatch': 'completed',
-                'acceptedByAccessibilityApi': bool(accepted), 'verified': False,
+                'acceptedByAccessibilityApi': None if dispatch_method == 'focused_keyboard' else bool(accepted), 'verified': False,
+                'dispatchMethod': dispatch_method,
                 **({'requestedValue': args['value'], 'value': readback,
                     'valueReadbackStatus': 'observed' if readback is not None and readback['current'] is not None else 'unavailable',
                     'valueReadbackMatches': readback['current'] == args['value'] if readback is not None and readback['current'] is not None else None} if args['action'] == 'set_value' else {}),
                 **({'undoGrouping': 'application_defined', 'singleUndoGuaranteed': False,
                     'undoNote': 'AT-SPI EditableText does not expose an edit transaction. Replacement may require multiple Undo operations; inspect the result of each.'} if args['action'] == 'set_text' else {}),
-                'note': 'API acceptance does not prove the intended application effect. Observe the resulting state.'}
+                'note': 'Dispatch does not prove the intended application effect. Observe the resulting state.'}
 
     def call(self, method, args):
         context = GLib.MainContext.default()

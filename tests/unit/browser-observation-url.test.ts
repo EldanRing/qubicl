@@ -16,3 +16,13 @@ test('browser display URLs preserve ordinary navigation parameters and redact be
   assert.ok(!title.includes('QUERY-SECRET'));
   assert.ok(!title.includes('FRAGMENT-SECRET'));
 });
+
+
+test('browser error text redacts repeated URL credentials and preview management tickets', () => {
+  const url = 'http://preview.localhost/entry?ticket=PREVIEW-TICKET&access_token=SECRET%2FVALUE#token=FRAGMENT';
+  const message = `page.goto: failed at ${url}\nCall log: navigating to "${url}"; SECRET/VALUE; SECRET%2FVALUE`;
+  const redacted = browserDisplayTitle(message, '');
+  assert.match(redacted, /page.goto: failed/u);
+  for (const value of ['PREVIEW-TICKET', 'SECRET/VALUE', 'SECRET%2FVALUE', 'FRAGMENT']) assert.ok(!redacted.includes(value));
+  assert.equal(new URL(browserDisplayUrl(url)).searchParams.get('ticket'), '[redacted]');
+});

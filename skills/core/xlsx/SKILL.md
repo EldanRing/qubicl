@@ -9,7 +9,7 @@ Keep workbook artifacts under `/home/qubicl`. Obtain this skill's `resourceRoot`
 
 Useful helpers beneath `<resourceRoot>/scripts/`:
 
-- `xlsx_read.py FILE --sheets|--json|--csv|--formulas|--notes|--names`
+- `xlsx_read.py FILE --sheets|--json|--cells|--csv|--formulas|--notes|--names`
 - `xlsx_create.py SPEC.json OUTPUT.xlsx`
 - `xlsx_edit.py FILE` for values, rows, sheets, tables, names, links, notes, and protection
 - `xlsx_restructure.py FILE` for reference-aware row or column changes
@@ -29,6 +29,18 @@ objects rather than Python object names; standalone `xlsx_to_csv.py` uses the
 same typed-formula and duration serialization. Elapsed-time values such as `[h]:mm`
 use signed ISO 8601 durations (`P1DT3H15M` for 27 hours 15 minutes), preserving
 days and fractional seconds. Dates and times retain their ISO date/time format.
+
+For a typed client-facing read, use `--cells` (active sheet by default, or
+`--sheet NAME`). Each stored cell includes its coordinate, normalized `value`,
+type, original OOXML `rawValue`/`storageType`, `numberFormat`, and formula metadata
+with its result range. `rawValue` is storage data, including shared-string indexes,
+not display text. Both `--cells` and `--formulas` explicitly report
+`cachedValueAvailable`, `cacheStatus` and per-cell missing-cache warnings; a
+present empty-string, zero or error result remains distinct from a missing cache.
+The reader never recalculates or invents display values. Use the existing render
+workflow on a copy when appearance matters; recalculated render results do not
+establish that the original file contained those caches. Literal strings starting
+with `=` remain text and are not listed as formulas.
 
 Use the common rendering receipt for PDF, DOCX, XLSX and PPTX:
 `/opt/qubicl/skills-venv/bin/python /opt/qubicl/artifact-render.py FILE --outdir DIR`.

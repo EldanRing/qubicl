@@ -13,6 +13,9 @@ the gateway and add the new native tools to the saved policy.
 geometry, stacking order, visibility, window types, modal/transient relationships
 and a `geometryToken`. Follow `nextCursor` to read more windows. This is a live
 inventory, so refresh after applications open, close or reorder windows.
+`sizeConstraints` reports minimum/maximum client sizes from `WM_NORMAL_HINTS`
+when supplied, with null for absent bounds. Application limits can exceed the
+display; they are reported rather than overridden.
 Inventory includes `desktopBounds`, `workArea` and its source (window-manager
 data or screen fallback), frame extents when provided, and client `visibleBounds`
 clipped to the workarea. This clipping is not an occlusion test. `clientToScreen`
@@ -42,6 +45,11 @@ continuation or repeat its initial value. The bounded candidate order is capture
 on the first call; element content is read live as pages are returned. Take a new
 snapshot to discover newly added or newly visible controls. Hidden parents are
 still traversed because some toolkits expose visible children beneath them.
+Closed popup lists and menus are an exception: when the container has neither
+visible/showing state nor usable bounds, its stale children are omitted even if
+the toolkit calls them focused/showing. `includeHidden` retains them with
+`visibility.effectiveShowing: false` and `reason: hidden_popup_ancestor`; actions
+on those refs are rejected until the popup is opened and observed again.
 Parent refs can refer to records returned later or omitted by the visibility
 filter, and remain usable for subtree inspection. Native refs retain
 actual accessibility objects across pages and snapshots.
@@ -114,6 +122,14 @@ promise every language or every explicitly selected font has full coverage.
 invoked without its name. Disabled or stale elements reject the action. API
 acceptance is reported separately from `verified: false`: it does not establish
 that the user's intended task succeeded.
+GTK push-button `click` actions use one focus-verified Space activation to avoid
+blocking GTK's accessibility bridge when the callback runs a synchronous modal
+dialog. Qubicl checks window/control focus, modal blocking and held keys before
+activation; it never retries a dispatched accessibility action as keyboard input.
+The receipt reports `dispatchMethod: focused_keyboard`,
+`acceptedByAccessibilityApi: null` and `verified: false`. Other semantic actions
+use `dispatchMethod: at_spi`. This path changes keyboard focus as part of the
+requested activation; observe the resulting dialog before dependent input.
 Numeric controls expose `value` with their AT-SPI current value, minimum, maximum
 and increment when available. Use `action: "set_value"` and numeric `value` to
 change that model directly; out-of-range values are rejected before mutation.
@@ -171,7 +187,11 @@ ownership before dispatch, including after human takeover.
 through the window manager. Fit exits maximized/fullscreen state and requests a
 size/position within the current workarea, accounting for known frame extents.
 It does not run automatically; `verified: false` means observe the resulting
-geometry before coordinate input. `close_desktop_application` defaults to normal close of a tracked
+geometry before coordinate input. Fit also returns `sizeConstraints` and
+`minimumExceedsWorkArea`; a window whose minimum width exceeds the screen cannot
+be made to fit merely by repeating the same request. Use the reported clipped
+capture and the app's layout controls, or a larger display, as appropriate.
+`close_desktop_application` defaults to normal close of a tracked
 app's windows and returns `close_requested`. Handle Save/Discard/Cancel dialogs
 using fresh observations. Termination requires `mode: terminate` and
 `discardUnsavedChanges: true`; this retains the process-group TERM/KILL path.
@@ -236,6 +256,9 @@ retain an `applicationId`, observed `windowIds` and PID identity, with
 `processOwnership: external` and `disposition: reused`. Normal close targets only
 those observed windows after rechecking their identity. Explicit termination is
 rejected for an external daemon, and runtime shutdown never kills it.
+When controller and daemon users differ, executable identity is inspected as the
+configured workload user if container `/proc` permissions require it. Qubicl
+does not add ptrace capabilities or rely on process names/arguments for identity.
 
 `take_screenshot` accepts either a `region` (`x`, `y`, `width`, `height` in screen
 pixels), or a `windowId` and its observed `geometryToken`. Window capture rejects

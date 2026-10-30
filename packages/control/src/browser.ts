@@ -594,7 +594,9 @@ export class BrowserManager {
         }
         const controlLines = candidatesWithDetails.map(({ details }) => {
           const validation = details.validation as { message?: string } | undefined;
-          return `- ${details.role} ${JSON.stringify(details.name)}${details.readOnly ? ' [readonly]' : ''}${!details.actionable ? ' [blocked]' : ''}${validation?.message ? `: ${JSON.stringify(validation.message)}` : ''}`;
+          const states = ['pressed', 'checked', 'expanded', 'valueNow', 'valueText'].filter(key => details[key] !== undefined)
+            .map(key => ` [${key}=${JSON.stringify(details[key])}]`).join('');
+          return `- ${details.role} ${JSON.stringify(details.name)}${states}${details.readOnly ? ' [readonly]' : ''}${!details.actionable ? ' [blocked]' : ''}${validation?.message ? `: ${JSON.stringify(validation.message)}` : ''}`;
         });
         const aria = [...controlLines, observation.text].filter(Boolean).join('\n');
         const scroll = await page.evaluate(() => ({ x: Math.round(window.scrollX), y: Math.round(window.scrollY) }))
@@ -1232,9 +1234,10 @@ export class BrowserManager {
         return result;
       } catch (error) {
         receipt.status = error instanceof QubiclError && error.code === 'browser_batch_interrupted' ? 'interrupted' : 'failed';
-        receipt.error = { code: error instanceof QubiclError ? error.code : 'browser_operation_failed', message: (error instanceof Error ? error.message : String(error)).slice(0, 512) };
-        if (error instanceof QubiclError) throw error;
-        throw new QubiclError('browser_operation_failed', error instanceof Error ? error.message : String(error), 502);
+        const message = browserDisplayTitle(error instanceof Error ? error.message : String(error), '');
+        receipt.error = { code: error instanceof QubiclError ? error.code : 'browser_operation_failed', message: message.slice(0, 512) };
+        if (error instanceof QubiclError) throw new QubiclError(error.code, message, error.status, error.details);
+        throw new QubiclError('browser_operation_failed', message, 502);
       } finally { if (this.runningOperation === receipt) this.runningOperation = undefined; }
     };
     const next = this.operationQueue.then(execute, execute).finally(() => { this.queuedOperations -= 1; });
@@ -1337,7 +1340,7 @@ export class BrowserManager {
         // A popup must not silently redirect later agent input. Explicit newTab
         // and useTab still select their targets; other pages are discoverable.
         return this.enforceTabLimit(context, page);
-      }).catch((error) => console.error(`Qubicl browser page setup failed: ${error instanceof Error ? error.message : String(error)}`));
+      }).catch((error) => console.error(`Qubicl browser page setup failed: ${browserDisplayTitle(error instanceof Error ? error.message : String(error), '')}`));
     });
     for (const page of context.pages()) await this.preparePage(context, page);
     const initial = context.pages().at(-1) ?? await context.newPage();
@@ -1462,7 +1465,7 @@ export class BrowserManager {
       if (record.status === 'cancelled') return;
       if (failure) {
         record.status = 'failed';
-        record.error = failure.slice(0, 500);
+        record.error = browserDisplayTitle(failure, rawUrl).slice(0, 500);
       } else {
         const hash = createHash('sha256');
         for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
@@ -1475,7 +1478,7 @@ export class BrowserManager {
       if (cancellation && await cancellation.then(() => true, () => false)) record.status = 'cancelled';
       if (record.status !== 'cancelled') {
         record.status = 'failed';
-        record.error = (error instanceof Error ? error.message : String(error)).slice(0, 500);
+        record.error = browserDisplayTitle(error instanceof Error ? error.message : String(error), rawUrl).slice(0, 500);
       }
     } finally {
       record.completedAt ??= new Date().toISOString();

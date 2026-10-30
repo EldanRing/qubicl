@@ -16,7 +16,8 @@ atspi = types.SimpleNamespace(init=lambda: None, set_timeout=lambda *_: None,
                               Text=types.SimpleNamespace(get_text=lambda obj, start, end: obj.text[start:end]))
 sys.modules['gi'] = types.SimpleNamespace(require_version=lambda *_: None)
 sys.modules['gi.repository'] = types.SimpleNamespace(Atspi=atspi, GLib=None)
-sys.modules['Xlib'] = types.SimpleNamespace(X=None, display=None, protocol=None)
+sys.modules['Xlib'] = types.SimpleNamespace(X=None, XK=None, Xutil=None, display=None, protocol=None)
+sys.modules['Xlib.ext'] = types.SimpleNamespace(xtest=None)
 root_path = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('desktop_helper', root_path / 'packages/control/src/desktop-helper.py')
 helper = importlib.util.module_from_spec(spec)
@@ -71,6 +72,27 @@ def pages(subject, first):
 
 
 class Snapshots(unittest.TestCase):
+    def test_closed_popup_children_are_hidden_without_pruning_generic_structural_parents(self):
+        ghost = Node('Autodetect', 'list item')
+        ghost.states.add('FOCUSED')
+        popup = Node('Popup', 'list', [ghost], visible=False, showing=False)
+        popup.get_component_iface = lambda: types.SimpleNamespace(get_extents=lambda _: types.SimpleNamespace(x=0, y=0, width=0, height=0))
+        editor = Node('Document', 'text', editable=True)
+        wrapper = Node('Structural wrapper', 'panel', [editor], visible=False, showing=False)
+        subject = desktop(Node('Window', 'frame', [popup, wrapper]))
+        normal = subject.snapshot({'windowId': 42})
+        self.assertNotIn('Autodetect', [item['name'] for item in normal['elements']])
+        self.assertIn('Document', [item['name'] for item in normal['elements']])
+        hidden = subject.snapshot({'windowId': 42, 'includeHidden': True})
+        item = next(item for item in hidden['elements'] if item['name'] == 'Autodetect')
+        self.assertEqual(item['visibility'], {'effectiveShowing': False, 'reason': 'hidden_popup_ancestor'})
+        with self.assertRaises(helper.Failure) as error:
+            subject.act({'ref': item['ref'], 'action': 'focus'})
+        self.assertEqual(error.exception.code, 'desktop_element_hidden')
+        # An opened popup's visible child becomes discoverable again.
+        popup.states.update(('VISIBLE', 'SHOWING'))
+        self.assertIn('Autodetect', [item['name'] for item in subject.snapshot({'windowId': 42})['elements']])
+
     def test_window_matching_refreshes_cached_modal_roots_and_refuses_ambiguity(self):
         def candidate(name, role, x, y, width, height):
             node = Node(name, role)

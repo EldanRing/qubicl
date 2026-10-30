@@ -29,7 +29,9 @@ popup. Opening a popup preserves valid parent-page refs.
 Observation URL fields are display values: recognized token, credential,
 password, authorization, session, signature and API-key parameters are redacted
 in queries and key/value fragments; URL userinfo is removed. Matching values
-echoed in titles are redacted too. Ordinary navigation parameters and hash
+echoed in titles are redacted too. The same filtering applies to navigation
+errors, retained operation/download errors and browser setup logs, including
+preview `ticket` credentials. Ordinary navigation parameters and hash
 anchors remain visible. Use stable tab IDs, frame indexes and read document IDs
 for targeting; a redacted URL is not a reusable authenticated link. Page text and
 screenshots remain application content, so this metadata filtering does not
@@ -130,6 +132,18 @@ background controls as blocked, including controls in child frames; semantic
 actions reject blocked targets before input.
 Text controls also report `editable`. A `contenteditable="false"` ARIA textbox
 inside an editable ancestor reports read-only; it may still be focusable/clickable.
+
+Custom controls expose `pressed` and `checked` as booleans or `mixed` when the
+ARIA state is valid; absence is distinct from false. Numeric ARIA controls expose
+finite `valueNow` and their `valueText`, separately from field text. Password
+controls omit both value fields. Switches and explicit `tabindex` targets receive
+refs, including programmatically focusable `tabindex=-1` elements. `tabIndex`
+reports keyboard focus metadata rather than promising tab-order navigation.
+`relationships` carries ID references for labels, descriptions, controlled/owned
+elements, active descendants, details, errors and flow targets. Snapshot lists
+are bounded and report `relationshipsTruncated`; a targeted control read retains
+the full lists through its existing pagination. These are document IDs, not
+Qubicl element refs. Immediate focus observations expose the same widget states.
 
 Snapshots include `focus` and `selection`; focused refs also carry these states.
 Input/textarea selections expose UTF-16 offsets and direction, with up to 256

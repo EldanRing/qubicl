@@ -6,6 +6,7 @@ import { QubiclError } from './errors.js';
 export interface DesktopWindow {
   id: number; pid: number | null; title: string; className: string;
   geometry: { x: number; y: number; width: number; height: number };
+  sizeConstraints?: { minimum: { width: number; height: number } | null; maximum: { width: number; height: number } | null; source: 'WM_NORMAL_HINTS' };
   geometryToken: string; transientFor: number | null; modal: boolean; active: boolean;
 }
 export interface DesktopSnapshotInput {

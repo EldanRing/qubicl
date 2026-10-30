@@ -29,8 +29,9 @@ if len(sys.argv) > 1 and sys.argv[1] == '--gtk':
         dialog.set_default_size(430, 180)
         dialog.add_button('Close fixture', Gtk.ResponseType.CLOSE)
         dialog.get_content_area().pack_start(Gtk.Entry(), True, True, 0)
-        dialog.connect('response', lambda widget, _: widget.destroy())
         dialog.show_all()
+        dialog.run()
+        dialog.destroy()
     button.connect('clicked', modal)
     box.pack_start(button, False, False, 0)
     window.connect('destroy', Gtk.main_quit)
@@ -86,14 +87,20 @@ try:
         assert error.code == 'desktop_value_out_of_range'
     nodes = snapshot(main['id'])
     button = next(item for item in nodes if item['name'] == 'Open modal')
-    desktop.act({'ref': button['ref'], 'action': 'invoke'})
+    invocation = desktop.act({'ref': button['ref'], 'action': 'invoke'})
+    assert invocation['dispatchMethod'] == 'focused_keyboard', invocation
     modal = until(lambda: window('Qubicl local modal'), 'GTK modal window')
     main_nodes = until(lambda: snapshot(main['id']), 'main remains matched with modal')
     modal_nodes = until(lambda: snapshot(modal['id']), 'modal is independently matched')
     assert any(item['name'] == 'Committed number' for item in main_nodes)
-    assert any(item['name'] == 'Close fixture' for item in modal_nodes)
+    close = next(item for item in modal_nodes if item['name'] == 'Close fixture')
+    assert invocation['acceptedByAccessibilityApi'] is None
+    desktop.act({'ref': close['ref'], 'action': 'invoke'})
+    until(lambda: not window('Qubicl local modal'), 'nested GTK modal closes through its semantic ref')
+    assert snapshot(main['id'])
     print('PASS: cached GTK root refreshed across modal; numeric Value updates model and rejects out-of-range input')
-    desktop.window_action({'windowId': modal['id'], 'action': 'close'})
+    if '--gtk-only' in sys.argv:
+        sys.exit(0)
     with tempfile.TemporaryDirectory(prefix='qubicl-calc-retest-') as directory:
         fixture = Path(directory) / 'virtual-cells.xlsx'
         subprocess.run(['/opt/qubicl/skills-venv/bin/python', '-c', 'from openpyxl import Workbook;import sys;w=Workbook();s=w.active;s["A1"]="Visible ID";s["B1"]="Value";s["A2"]="00123";s["B2"]=42;s["A5000"]="Distant cell";w.save(sys.argv[1])', str(fixture)], check=True)

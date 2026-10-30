@@ -4,14 +4,15 @@
 
 Tokens are replaced everywhere: body paragraphs, tables (including nested
 tables), headers and footers. Run formatting is preserved; tokens split
-across runs are handled.
+across runs are handled. Replacement values are literal and substituted once
+into original token spans; inserted {{tokens}} are not expanded recursively.
 
 Usage:
   docx_template.py template.docx values.json output.docx
   docx_template.py template.docx values.json output.docx --strict
 
 values.json: {"name": "Ada", "date": "2026-01-01"}  fills {{name}}, {{date}}.
-With --strict, exits 1 if any {{token}} remains unfilled after processing.
+With --strict, exits 1 if any original {{token}} has no supplied value.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ import sys
 
 from docx import Document
 
-from docx_common import iter_all_paragraphs, replace_in_paragraph
+from docx_common import iter_all_paragraphs, replace_matches_in_paragraph
 
 TOKEN_RE = re.compile(r"\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}")
 
@@ -34,34 +35,36 @@ def main() -> int:
     ap.add_argument("values", help="JSON file of token -> value")
     ap.add_argument("output", help="output .docx path")
     ap.add_argument("--strict", action="store_true",
-                    help="fail if any token remains unfilled")
+                    help="fail if an original template token has no supplied value")
     args = ap.parse_args()
 
     with open(args.values, encoding="utf-8") as f:
         values = json.load(f)
+    if not isinstance(values, dict):
+        raise ValueError("Template values must be a JSON object")
 
     doc = Document(args.template)
     filled = {}
+    remaining = set()
+    def replacement(match):
+        name = match.group(1)
+        if name not in values:
+            remaining.add(name)
+            return match.group(0)
+        filled[name] = filled.get(name, 0) + 1
+        return str(values[name])
     for para in iter_all_paragraphs(doc):
-        # Normalize whitespace variants like {{ name }} first.
-        for m in set(TOKEN_RE.findall(para.text)):
-            if m in values:
-                # Replace any spacing variant with canonical token, then fill.
-                for variant in set(
-                        t.group(0) for t in TOKEN_RE.finditer(para.text)
-                        if t.group(1) == m):
-                    n = replace_in_paragraph(para, variant, str(values[m]))
-                    filled[m] = filled.get(m, 0) + n
-
-    remaining = sorted({m for para in iter_all_paragraphs(doc)
-                        for m in TOKEN_RE.findall(para.text)})
-    doc.save(args.output)
+        replace_matches_in_paragraph(para, TOKEN_RE, replacement)
+    remaining = sorted(remaining)
     result = {"ok": True, "output": args.output, "filled": filled,
-              "unfilled_tokens": remaining}
+              "unfilled_tokens": remaining, "replacement_mode": "literal_single_pass"}
     if args.strict and remaining:
         result["ok"] = False
+        result["output_written"] = False
         print(json.dumps(result, ensure_ascii=False))
         return 1
+    doc.save(args.output)
+    result["output_written"] = True
     print(json.dumps(result, ensure_ascii=False))
     return 0
 

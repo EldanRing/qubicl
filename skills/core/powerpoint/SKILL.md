@@ -27,6 +27,12 @@ the tool renders; the agent performs visual review. Office rendering needs works
 
 Replacement visits grouped shapes and all original matches across runs, preserving unaffected formatting. Slide duplication copies chart XML, embedded workbooks, styles/colors, notes and media into independent parts, including nested grouped charts. Editing the duplicate leaves the source data and styles unchanged. Layout/master definitions and links to other slides remain shared presentation references; self-links target the duplicate. The chart-data command indexes charts recursively through groups. Explicit replacement of a linked chart's data creates a private embedded workbook without accessing its external source. Footer placeholders receive unique shape IDs.
 
+Slide deletion removes incoming click/hover actions, custom-show references and
+section membership for that slide. Its unreachable notes, charts, embedded
+workbooks and media are omitted from the saved package; resources still used by
+surviving slides remain. `removed_slide_links` reports cleared incoming actions
+and custom-show entries. Text on surviving link shapes is retained.
+
 Chart outlines retain `type`, `categories` and flattened series `values`, and add
 `plots` with each plot's index, type, kind, categories and series. Scatter series
 include `xValues` and `yValues`; bubble series also include `bubbleSizes`. Sparse

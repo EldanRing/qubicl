@@ -30,7 +30,8 @@ Operations (repeatable / combinable):
                            independently; unspecified dimensions are retained.
   --swap-image SLIDE SHAPE_NAME NEW_IMAGE
                            Replace a picture's bits, keeping position/size.
-  --remove-slide N         Delete slide at index N (0-based).
+  --remove-slide N         Delete slide at index N (0-based), remove incoming
+                           links/actions, and omit its unshared package parts.
   --move-slide FROM TO     Reorder: move slide FROM to position TO.
   --duplicate-slide N      Append an independent deep copy of slide N
                            (text, images, tables, grouped shapes, charts,
@@ -315,8 +316,52 @@ def remove_slide(prs, index):
     sldIdLst = prs.slides._sldIdLst
     slide_id = list(sldIdLst)[int(index)]
     rid = slide_id.get(R_EMBED + "id")
-    prs.part.drop_rel(rid)
+    target = prs.part.rels[rid].target_part
     sldIdLst.remove(slide_id)
+    removed_links = 0
+    # A slide may still be reachable through another slide's click/hover action,
+    # a notes backlink, or a custom show. Removing only presentation.xml's link
+    # leaves the entire target subtree in the saved OPC package.
+    for part in list(prs.part.package.iter_parts()):
+        incoming = {rel.rId for rel in part.rels.values()
+                    if not rel.is_external and rel.target_part is target}
+        if not incoming:
+            continue
+        root = getattr(part, '_element', None)
+        generic = root is None and part.content_type.endswith('xml')
+        if generic:
+            root = etree.fromstring(part.blob)
+        if root is not None:
+            for element in list(root.iter()):
+                references = [key for key, value in element.attrib.items()
+                              if key.startswith(R_EMBED) and value in incoming]
+                if not references:
+                    continue
+                if etree.QName(element).localname in {'hlinkClick', 'hlinkMouseOver', 'sld'}:
+                    element.getparent().remove(element)
+                    removed_links += 1
+                else:
+                    for key in references:
+                        del element.attrib[key]
+                    if element.get('action') == 'ppaction://hlinksldjump':
+                        del element.attrib['action']
+            if generic:
+                part._blob = etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True)
+        for incoming_rid in incoming:
+            part.rels.pop(incoming_rid)
+    # Section lists refer to numeric slide IDs rather than relationships.
+    for element in list(prs.part._element.iter()):
+        if (etree.QName(element).localname == 'sldId'
+                and element.get('id') == str(slide_id.id)):
+            element.getparent().remove(element)
+    surviving = {slide.part for slide in prs.slides}
+    for part in prs.part.package.iter_parts():
+        for relation in part.rels.values():
+            if not relation.is_external and relation.reltype == RT.SLIDE and relation.target_part not in surviving:
+                raise ValueError('A presentation relationship targets a slide outside the surviving slide list')
+    # Package serialization follows surviving relationships: shared media,
+    # layouts and masters remain; unreachable slide-owned content is omitted.
+    return removed_links
 
 
 def move_slide(prs, src, dst):
@@ -518,7 +563,7 @@ def main(argv=None):
                   args.append_notes[1], append=True)
         report["notes_appended"] = True
     if args.remove_slide is not None:
-        remove_slide(prs, args.remove_slide)
+        report["removed_slide_links"] = remove_slide(prs, args.remove_slide)
         report["slide_removed"] = args.remove_slide
     if args.move_slide:
         move_slide(prs, *args.move_slide)

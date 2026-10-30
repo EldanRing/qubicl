@@ -56,10 +56,20 @@ def iter_part_roots(doc):
 def replace_in_paragraph(para, old: str, new: str) -> int:
     """Edit original matches once; never join text across structural boundaries."""
     import re
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
     if not old:
         return 0
+    return replace_matches_in_paragraph(para, re.compile(re.escape(old)), lambda match: new)
+
+
+def replace_matches_in_paragraph(para, pattern, replacement) -> int:
+    """Replace original regex spans once, retaining the first matched run's style.
+
+    ``replacement`` receives an original match. Its returned text is literal:
+    inserted token-like text is never searched or interpreted as a backreference.
+    """
+    import re
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
     segments, current = [], []
     def boundary():
         if current:
@@ -80,11 +90,11 @@ def replace_in_paragraph(para, old: str, new: str) -> int:
     plans = []
     for nodes in segments:
         text = "".join(node.text or "" for node in nodes)
-        matches = list(re.finditer(re.escape(old), text))
+        matches = list(pattern.finditer(text))
         plans.append((nodes, matches))
     count = sum(len(matches) for _, matches in plans)
     # An unsupported visible match must not be silently skipped alongside safe ones.
-    if count != len(list(re.finditer(re.escape(old), para.text))):
+    if count != len(list(pattern.finditer(para.text))):
         raise ValueError("Replacement crosses a tab, break, field, drawing or unsupported paragraph structure; edit a plain-text span instead")
     for nodes, matches in plans:
         offsets, pos = [], 0
@@ -92,6 +102,7 @@ def replace_in_paragraph(para, old: str, new: str) -> int:
             offsets.append((node, pos, pos + len(node.text or "")))
             pos = offsets[-1][2]
         for match in reversed(matches):
+            new = replacement(match)
             first = True
             for node, start, end in offsets:
                 if end <= match.start() or start >= match.end():

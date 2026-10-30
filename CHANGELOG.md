@@ -6,6 +6,28 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- PDF merge and split preserve interactive form fields and resources, verify the
+  saved field/widget structure, and report deterministic field-name collisions.
+  Deleted PowerPoint slides lose incoming links and unreachable package content
+  while shared presentation resources remain.
+- DOCX templates replace original placeholders once with literal values,
+  preserving formatting and producing deterministic results across processes.
+  Strict missing-value failures leave an existing destination untouched.
+- Browser snapshots and targeted reads expose custom toggle/switch states,
+  numeric ARIA values and relationships, and discover keyboard-focusable widgets.
+  Navigation failures and retained error messages redact recognized credential
+  URLs, including preview tickets, just like successful observations.
+- GTK button activation avoids blocking the accessibility bridge when a callback
+  opens a synchronous modal. Native snapshots omit stale children of closed
+  popups by default. Window inventory and fit receipts expose application size
+  limits instead of implying an oversized minimum can fit on the display.
+- Existing desktop-daemon handoffs work when the controller and workload have
+  different user identities, without adding container capabilities or treating
+  an already opened window as a failed launch.
+- Spreadsheet inspection provides typed cell records, original storage values,
+  formats, formula ranges and explicit cache availability. Empty-string, zero
+  and error caches remain distinguishable from missing results; literal text
+  beginning with `=` is no longer misidentified as a formula.
 - Dialog-triggering browser input no longer expires while a person answers a
   prompt. Sequential dialogs retain their operation identity, including across
   the isolated runner transport. History retains discoverable child frames and

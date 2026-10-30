@@ -164,3 +164,40 @@ test('live popup, editor, selection, diagnostics and dialog workflows return act
   await manager.useTab(popup.openedTabs[0]!.tabId);
   assert.equal((await manager.tabs()).tabs.find((tab) => tab.active)?.tabId, popup.openedTabs[0]!.tabId);
 });
+
+
+test('new-tab success and navigation errors redact URL credentials while preserving exact navigation', {
+  skip: !executablePath && 'Set QUBICL_TEST_BROWSER_EXECUTABLE to a local Chromium or Chrome executable.', timeout: 15_000,
+}, async (context) => {
+  const requestedUrls: string[] = [];
+  const server = createServer((request, response) => {
+    requestedUrls.push(request.url ?? '');
+    response.setHeader('content-type', 'text/html');
+    response.end('<title>Open NEWTAB-TOKEN NEWTAB-FRAGMENT ENTRY-TICKET</title><p>Opened</p>');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  context.after(() => { server.closeAllConnections(); server.close(); });
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const browser = await chromium.launch({ executablePath: executablePath!, headless: true, chromiumSandbox: true });
+  context.after(() => browser.close());
+  const browserContext = await browser.newContext();
+  await browserContext.newPage();
+  const manager = new BrowserManager(true, { browserType: { connectOverCDP: async () => browser } as unknown as BrowserType });
+  const executor = new ToolExecutor(undefined, { browser: manager });
+  context.after(() => executor.shutdown());
+  const lease = executor.leases.acquire(30);
+  const rawUrl = `${origin}/entry?access_token=NEWTAB-TOKEN&ticket=ENTRY-TICKET#token=NEWTAB-FRAGMENT`;
+  const result = await executor.call('browser_new_tab', { lease, url: rawUrl });
+  assert.ok(requestedUrls.includes('/entry?access_token=NEWTAB-TOKEN&ticket=ENTRY-TICKET'));
+  assert.equal(browserContext.pages().at(-1)!.url(), rawUrl);
+  for (const marker of ['NEWTAB-TOKEN', 'NEWTAB-FRAGMENT', 'ENTRY-TICKET']) assert.ok(!JSON.stringify(result).includes(marker));
+  server.closeAllConnections();
+  await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  await assert.rejects(executor.call('browser_new_tab', { lease, url: rawUrl }), error => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /ERR_CONNECTION_REFUSED/u);
+    for (const marker of ['NEWTAB-TOKEN', 'NEWTAB-FRAGMENT', 'ENTRY-TICKET']) assert.ok(!error.message.includes(marker));
+    assert.match(error.message, /\[redacted\]|%5Bredacted%5D/u);
+    return true;
+  });
+});

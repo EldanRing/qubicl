@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, chown, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -97,10 +97,13 @@ test('real Thunar handoff to a pre-existing daemon retains a window-close identi
   skip: process.env.QUBICL_TEST_NATIVE_DESKTOP !== '1' && 'Run in a disposable X11/AT-SPI guest.', timeout: 20_000,
 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'qubicl-thunar-daemon-'));
-  const desktop = new NativeDesktopManager({ script: join(process.cwd(), 'packages/control/src/desktop-helper.py') });
-  const daemon = spawn('/usr/bin/thunar', ['--daemon'], { detached: true, stdio: 'ignore' });
+  const identity = process.getuid?.() === 0 ? { uid: 1000, gid: 1000 } : {};
+  if ('uid' in identity) await chown(root, identity.uid!, identity.gid!);
+  const desktop = new NativeDesktopManager({ script: join(process.cwd(), 'packages/control/src/desktop-helper.py'), ...identity });
+  const daemon = spawn('/usr/bin/thunar', ['--daemon'], { detached: true, stdio: 'ignore', ...identity, env: { ...process.env, HOME: root } });
   const windows = async () => (await desktop.windows()).windows as Array<{ id: number; pid: number | null }>;
   const manager = new DesktopApplicationManager('computer', { root,
+    ...('uid' in identity ? { spawnUid: identity.uid, spawnGid: identity.gid } : {}),
     observeWindows: windows, requestCloseWindow: (id) => desktop.windowAction(id, 'close'),
   });
   context.after(async () => { await manager.shutdown(); desktop.shutdown(); daemon.kill(); await rm(root, { recursive: true, force: true }); });

@@ -26,6 +26,12 @@ export interface BrowserControl extends Record<string, unknown> {
   value?: string;
   valueLength?: number;
   valueTruncated?: boolean;
+  pressed?: boolean | 'mixed';
+  valueNow?: number;
+  valueText?: string;
+  tabIndex?: number;
+  relationships?: Record<string, string[]>;
+  relationshipsTruncated?: boolean;
   options?: Array<{ index: number; label: string; value: string; selected: boolean; disabled: boolean }>;
 }
 
@@ -166,6 +172,10 @@ export function browserDOM(request: BrowserDOMRequest): unknown {
     return { start, end, direction: element.selectionDirection, text: clip(element.value.slice(start, end), 256),
       textTruncated: end - start > 256, offsetUnit: 'utf16' };
   };
+  const ariaState = (element: Element, attribute: string): boolean | 'mixed' | undefined => {
+    const value = element.getAttribute(attribute);
+    return value === 'true' ? true : value === 'false' ? false : value === 'mixed' ? 'mixed' : undefined;
+  };
   const describe = (element: Element, full = false): BrowserControl => {
     const field = element as HTMLInputElement;
     const isField = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement;
@@ -188,6 +198,29 @@ export function browserDOM(request: BrowserDOMRequest): unknown {
     const value = password || field.type === 'file' ? undefined : isField ? field.value
       : (element as HTMLElement).isContentEditable ? (element as HTMLElement).innerText : undefined;
     if (value !== undefined) Object.assign(result, { value: full ? value : clip(value, 1500), valueLength: value.length, valueTruncated: !full && value.length > 1500 });
+    const relationships: Record<string, string[]> = {};
+    let relationshipCount = 0;
+    let relationshipsTruncated = false;
+    for (const [name, attribute] of Object.entries({ labelledBy: 'aria-labelledby', describedBy: 'aria-describedby', controls: 'aria-controls',
+      owns: 'aria-owns', activeDescendant: 'aria-activedescendant', details: 'aria-details', errorMessage: 'aria-errormessage', flowTo: 'aria-flowto' })) {
+      if (!element.hasAttribute(attribute)) continue;
+      const ids = [...new Set((element.getAttribute(attribute) ?? '').split(/\s+/u).filter(Boolean))];
+      const selected = full ? ids : ids.slice(0, Math.min(8, Math.max(0, 16 - relationshipCount)));
+      relationships[name] = selected.map(id => full ? id : clip(id, 160));
+      relationshipsTruncated ||= selected.length < ids.length || selected.some(id => !full && id.length > 160);
+      relationshipCount += selected.length;
+    }
+    if (Object.keys(relationships).length) Object.assign(result, { relationships, relationshipsTruncated });
+    if (element.hasAttribute('tabindex') || (element as HTMLElement).tabIndex >= 0) result.tabIndex = (element as HTMLElement).tabIndex;
+    const pressed = ariaState(element, 'aria-pressed');
+    if (pressed !== undefined) result.pressed = pressed;
+    const numericValue = element.getAttribute('aria-valuenow');
+    if (!password && numericValue !== null && numericValue.trim() && Number.isFinite(Number(numericValue))) result.valueNow = Number(numericValue);
+    const valueText = element.getAttribute('aria-valuetext');
+    if (!password && valueText !== null) {
+      result.valueText = full ? valueText : clip(valueText, 512);
+      result.valueTextTruncated = !full && valueText.length > 512;
+    }
     const description = idText(element, 'aria-describedby');
     if (description) result.description = clip(description, full ? description.length : 512);
     if (field.validity && field.willValidate) result.validation = { valid: field.validity.valid, message: clip(field.validationMessage, 512),
@@ -200,7 +233,10 @@ export function browserDOM(request: BrowserDOMRequest): unknown {
     }
     if (element instanceof HTMLInputElement && ['checkbox', 'radio'].includes(element.type)) {
       result.checked = element.checked; result.indeterminate = element.indeterminate;
-    } else if (element.hasAttribute('aria-checked')) result.checked = element.getAttribute('aria-checked') === 'mixed' ? 'mixed' : element.getAttribute('aria-checked') === 'true';
+    } else {
+      const checked = ariaState(element, 'aria-checked');
+      if (checked !== undefined) result.checked = checked;
+    }
     if (element.tagName === 'SUMMARY' && element.parentElement instanceof HTMLDetailsElement) result.expanded = element.parentElement.open;
     else if (element.hasAttribute('aria-expanded')) result.expanded = element.getAttribute('aria-expanded') === 'true';
     if (element instanceof HTMLSelectElement) {
@@ -239,13 +275,15 @@ export function browserDOM(request: BrowserDOMRequest): unknown {
     const control = current ? describe(current) : undefined;
     return { text: text.text, textTruncated: text.truncated,
       focus: current ? { tag: current.tagName.toLowerCase(), role: roleOf(current), name: nameOf(current), id: clip(current.id, 160), ...(fieldSelection ? { selection: fieldSelection } : {}),
-        ...(control ? { readOnly: control.readOnly, blockedByModal: control.blockedByModal, validation: control.validation, checked: control.checked, expanded: control.expanded, value: control.value, valueTruncated: control.valueTruncated } : {}) } : null,
+        ...(control ? { readOnly: control.readOnly, blockedByModal: control.blockedByModal, validation: control.validation, checked: control.checked, pressed: control.pressed, expanded: control.expanded, value: control.value, valueTruncated: control.valueTruncated,
+          valueNow: control.valueNow, valueText: control.valueText, valueTextTruncated: control.valueTextTruncated, tabIndex: control.tabIndex,
+          relationships: control.relationships, relationshipsTruncated: control.relationshipsTruncated } : {}) } : null,
       selection: fieldSelection ?? (selection ? { text: clip(selection.toString(), 256), textTruncated: selection.toString().length > 256,
         collapsed: selection.isCollapsed, anchorOffset: selection.anchorOffset, focusOffset: selection.focusOffset, offsetUnit: 'utf16' } : null),
     };
   };
   switch (request.mode) {
-    case 'candidates': return all().filter((element) => element.matches('a[href],button,input:not([type=hidden]),textarea,select,summary,[contenteditable=true],[contenteditable=""],[contenteditable=plaintext-only],[aria-expanded],[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],[role=menuitem],[role=option],[role=textbox],[role=slider],[role=spinbutton]') || Boolean(scrollState(element)));
+    case 'candidates': return all().filter((element) => element.matches('a[href],button,input:not([type=hidden]),textarea,select,summary,[contenteditable=true],[contenteditable=""],[contenteditable=plaintext-only],[aria-expanded],[tabindex],[role~=button],[role~=link],[role~=checkbox],[role~=radio],[role~=switch],[role~=tab],[role~=menuitem],[role~=menuitemcheckbox],[role~=menuitemradio],[role~=option],[role~=textbox],[role~=searchbox],[role~=combobox],[role~=listbox],[role~=slider],[role~=spinbutton],[role~=scrollbar],[role~=treeitem]') || Boolean(scrollState(element)));
     case 'describe': return describe(root);
     case 'describe-many': return (request.elements ?? []).map((element) => describe(element));
     case 'control': {

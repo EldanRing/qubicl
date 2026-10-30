@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from zipfile import ZipFile, ZIP_DEFLATED
+from xml.etree import ElementTree as ET
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
@@ -68,6 +70,51 @@ class ValueTypes(unittest.TestCase):
         self.assertEqual(json.loads(standalone[0][3]), result['rows'][0][3])
         self.assertEqual([row[6] for row in standalone], [row[6] for row in rows])
         self.assertEqual(standalone[0][7], '2026-10-29', 'standalone export retains its date-only convention')
+
+    def test_typed_cell_reads_distinguish_missing_empty_zero_and_error_formula_caches(self):
+        wb = Workbook(); ws = wb.active
+        ws['A1'] = '=1+2'
+        ws['A2'] = ArrayFormula(ref='A2:A3', text='=B2:B3*2')
+        ws['B1'] = timedelta(hours=27, minutes=15); ws['B1'].number_format = '[h]:mm'
+        ws['B2'] = '00123'
+        ws['C1'] = '=""'; ws['C2'] = '=0'; ws['C3'] = '=1/0'
+        ws['D1'] = '=literal'; ws['D1'].data_type = 's'
+        source = self.root / 'typed.xlsx'; wb.save(source)
+        with ZipFile(source) as archive:
+            parts = {name: archive.read(name) for name in archive.namelist()}
+        ns = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+        xml = ET.fromstring(parts['xl/worksheets/sheet1.xml'])
+        cache_values = {'C1': ('str', ''), 'C2': ('n', '0'), 'C3': ('e', '#DIV/0!')}
+        for cell in xml.iter(ns + 'c'):
+            if cell.get('r') in cache_values:
+                kind, value = cache_values[cell.get('r')]
+                cell.set('t', kind); cell.find(ns + 'v').text = value
+        parts['xl/worksheets/sheet1.xml'] = ET.tostring(xml)
+        with ZipFile(source, 'w', ZIP_DEFLATED) as archive:
+            for name, content in parts.items(): archive.writestr(name, content)
+        original = source.read_bytes()
+        result = json.loads(self.run_cli('xlsx_read.py', source, '--cells'))
+        cells = {cell['cell']: cell for cell in result['cells']}
+        self.assertEqual(cells['B1']['type'], 'duration')
+        self.assertEqual(cells['B1']['value'], 'P1DT3H15M')
+        self.assertAlmostEqual(float(cells['B1']['rawValue']), 1.135416666666667)
+        self.assertEqual(cells['B1']['numberFormat'], '[h]:mm')
+        self.assertEqual(cells['B2']['value'], '00123')
+        self.assertEqual(cells['A2']['formula']['formula_type'], 'array')
+        self.assertEqual(cells['A2']['formula']['ref'], 'A2:A3')
+        for address in ('A1', 'A2'):
+            self.assertFalse(cells[address]['cachedValueAvailable'])
+            self.assertEqual(cells[address]['cacheStatus'], 'missing')
+            self.assertEqual(cells[address]['warnings'][0]['cell'], address)
+        for address, value in [('C1', ''), ('C2', 0), ('C3', '#DIV/0!')]:
+            self.assertTrue(cells[address]['cachedValueAvailable'])
+            self.assertEqual(cells[address]['cached'], value)
+        formulas = json.loads(self.run_cli('xlsx_read.py', source, '--formulas'))['formulas']
+        self.assertNotIn('D1', {item['cell'] for item in formulas}, 'literal equals-prefixed text is not a formula')
+        self.assertFalse(next(item for item in formulas if item['cell'] == 'A2')['cachedValueAvailable'])
+        self.assertFalse(result['recalculated'])
+        self.assertEqual(result['displayValues'], 'not_rendered')
+        self.assertEqual(source.read_bytes(), original)
 
     def test_row_and_column_insertions_move_typed_anchors_ranges_and_cross_sheet_formulas(self):
         for axis, script, flag, anchor, ref, formula, table_anchor, table_ref, r1, r2 in (

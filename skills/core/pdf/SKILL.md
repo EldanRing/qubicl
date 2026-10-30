@@ -22,6 +22,14 @@ Common helpers beneath `<resourceRoot>/scripts/`:
 
 Read `references/forms.md` only for AcroForm work.
 
+Merge and split retain interactive AcroForm field trees, selected-page widgets,
+values and appearance resources. Later inputs with colliding field names receive
+a deterministic `source_N.` namespace; the JSON receipt lists each rename.
+Use `pdf_merge.py --duplicate-fields error` to require unchanged unique names.
+Repeated extracted pages receive independent field copies under that same policy.
+Outputs are staged and reopened to verify field/widget preservation before an
+existing destination is replaced. Inspect or fill using the resulting full names.
+
 For inspection, extract text first and render representative pages when layout matters. Use `take_screenshot` only for the live desktop; use generated page images for document QA. Verify important outputs by reopening them with a read helper and, when visual fidelity matters, by rendering pages. Never overwrite the only input copy unless the user explicitly requests in-place editing.
 
 Use the common rendering receipt for PDF, DOCX, XLSX and PPTX:

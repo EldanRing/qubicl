@@ -25,7 +25,15 @@ test('live observations and input cover composed text, form state, modalities, s
     <form><input id="email" aria-label="Email" type="email" required><button>Submit form</button></form>
     <input id="number" aria-label="Quantity" type="number" min="2" max="8" step="0.5" value="3">
     <textarea id="memo" aria-label="Memo"></textarea>
-    <input id="secret" aria-label="Password" type="password" value="NEVER-EXPOSE">
+    <button id="bold" aria-pressed="true" onclick="this.setAttribute('aria-pressed',this.getAttribute('aria-pressed')!=='true')">Bold toggle</button>
+    <button aria-pressed="mixed">Mixed toggle</button><button aria-pressed="undefined">Ordinary action</button>
+    <div role="switch" aria-checked="false" tabindex="0" onclick="this.setAttribute('aria-checked','true')">Notifications switch</div>
+    <div role="checkbox" aria-checked="mixed" tabindex="0">Mixed tasks</div>
+    <div role="slider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="35" aria-valuetext="35 percent" tabindex="0">Custom volume</div>
+    <div id="custom-combo" role="combobox" aria-controls="custom-choices" aria-activedescendant="choice-a" tabindex="0">Custom choice</div>
+    <div id="custom-choices" hidden><div id="choice-a">Alpha</div></div>
+    <div tabindex="-1" aria-label="Programmatic focus">Focusable content</div>
+    <input id="secret" aria-label="Password" type="password" value="NEVER-EXPOSE" aria-valuetext="NEVER-EXPOSE" aria-valuenow="8675309">
     <select id="choices" aria-label="Ambiguous choices" multiple>
       <option value="first">Same</option><option value="second">Same</option><option value="third">second</option>
     </select>
@@ -53,6 +61,34 @@ test('live observations and input cover composed text, form state, modalities, s
   };
   const read = async (input: Record<string, unknown>): Promise<Record<string, unknown>> => await executor.call('browser_read', input) as Record<string, unknown>;
 
+  const fullControl = async (name: string): Promise<BrowserControl> => JSON.parse((await read({ ref: control(name).ref, mode: 'control' })).content as string) as BrowserControl;
+  assert.equal(control('Bold toggle').pressed, true);
+  assert.equal(control('Mixed toggle').pressed, 'mixed');
+  assert.ok(!('pressed' in control('Ordinary action')));
+  assert.equal(control('Notifications switch').checked, false);
+  assert.equal(control('Notifications switch').tabIndex, 0);
+  assert.equal(control('Mixed tasks').checked, 'mixed');
+  assert.equal(control('Programmatic focus').tabIndex, -1);
+  assert.equal(control('Custom volume').valueNow, 35);
+  assert.equal(control('Custom volume').valueText, '35 percent');
+  assert.equal((await fullControl('Custom volume')).valueNow, 35);
+  assert.deepEqual(control('Custom choice').relationships, { controls: ['custom-choices'], activeDescendant: ['choice-a'] });
+  assert.deepEqual(control('Canonical name').relationships, { labelledBy: ['name'] });
+  await executor.call('browser_click', { lease, ref: control('Bold toggle').ref });
+  assert.equal((await fullControl('Bold toggle')).pressed, false);
+  snapshot = await observe();
+  assert.equal(control('Bold toggle').pressed, false);
+  assert.equal(snapshot.focus.pressed, false);
+  assert.ok(snapshot.snapshot.includes('[pressed=false]'));
+  await executor.call('browser_click', { lease, ref: control('Notifications switch').ref });
+  assert.equal((await fullControl('Notifications switch')).checked, true);
+  const relatedIds = Array.from({ length: 12 }, (_, index) => `panel-${index}`);
+  await page.locator('#custom-combo').evaluate((node, ids) => node.setAttribute('aria-controls', ids.join(' ')), relatedIds);
+  snapshot = await observe();
+  assert.equal(control('Custom choice').relationshipsTruncated, true);
+  assert.deepEqual((await fullControl('Custom choice')).relationships?.controls, relatedIds);
+  assert.ok(Buffer.byteLength(JSON.stringify(snapshot)) <= 24_000);
+
   assert.equal(control('Rich readonly').readOnly, true);
   assert.equal(control('Rich readonly').editable, false);
   await assert.rejects(executor.call('browser_type', { lease, ref: control('Rich readonly').ref, text: 'Must not change' }), { code: 'browser_control_unavailable' });
@@ -77,6 +113,9 @@ test('live observations and input cover composed text, form state, modalities, s
   assert.deepEqual(control('Quantity').constraints, { min: '2', max: '8', step: '0.5' });
   assert.equal((await read({ mode: 'value', ref: control('Memo').ref })).content, '  first\nsecond\n\nlast  ');
   assert.ok(!JSON.stringify(snapshot).includes('NEVER-EXPOSE'));
+  assert.ok(!('valueNow' in control('Password')));
+  assert.ok(!('valueText' in control('Password')));
+  assert.ok(!('valueText' in await fullControl('Password')));
   await assert.rejects(read({ mode: 'value', ref: control('Password').ref }), { code: 'browser_read_value_unavailable' });
 
   for (const [id, name] of [['named', 'Canonical name'], ['icon', 'Icon name']]) {
