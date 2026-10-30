@@ -644,8 +644,8 @@ export const toolDefinitions = {
     lease: true,
   },
   read_clipboard: {
-    description: 'Read bounded UTF-8 text from the desktop clipboard.',
-    input: observationOnly,
+    description: 'Read clipboard text or explicit unavailable-format/owner status. Captures support Unicode-safe continuation via nextCursor, with UTF-16 offsets and total sizes. Continue with cursor and optional maxBytes; clipboard changes do not alter the captured text.',
+    input: observationOnly.extend({ cursor: z.string().regex(/^[a-f0-9]{24}:\d{1,8}$/).optional(), maxBytes: z.number().int().min(512).max(16000).default(16000) }),
     lease: false,
   },
   write_clipboard: {

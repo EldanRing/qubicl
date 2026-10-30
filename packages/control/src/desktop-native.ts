@@ -47,6 +47,7 @@ export class NativeDesktopManager {
     return this.interact(() => this.request('window_action', { windowId, action, geometryToken }));
   }
   validate(input: Record<string, unknown>): Promise<Record<string, unknown>> { return this.request('validate', input); }
+  clipboardStatus(): Promise<Record<string, unknown>> { return this.request('clipboard_status', {}); }
   async closeProcessWindows(pid: number): Promise<Record<string, unknown>> { return this.interact(() => this.request('close_process', { pid })); }
   shutdown(): void {
     const child = this.child;

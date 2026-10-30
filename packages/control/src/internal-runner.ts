@@ -260,6 +260,9 @@ async function handleSession(
     case 'POST /v1/desktop/control':
       send(response, 200, await controlDesktop(object(body.action, 'action') as unknown as ControlAction));
       return;
+    case 'POST /v1/clipboard/read':
+      send(response, 200, await readClipboard({ ...(typeof body.cursor === 'string' ? { cursor: body.cursor } : {}), ...(typeof body.maxBytes === 'number' ? { maxBytes: body.maxBytes } : {}) }));
+      return;
     case 'GET /v1/clipboard':
       send(response, 200, await readClipboard());
       return;

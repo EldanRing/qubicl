@@ -1,3 +1,4 @@
+import type { ClipboardReadInput, ClipboardReadResult } from './clipboard.js';
 import { constants as osConstants } from 'node:os';
 import type { DesktopScreenshotOptions } from './executor.js';
 import type { WebSearchInput } from './web.js';
@@ -183,8 +184,8 @@ export class RemoteDesktopManager {
   control(action: Record<string, unknown>): Promise<Record<string, unknown>> {
     return runnerRequest(this.baseUrl, this.key, '/v1/desktop/control', { action });
   }
-  readClipboard(): Promise<{ text: string; truncated?: boolean }> {
-    return runnerRequest(this.baseUrl, this.key, '/v1/clipboard', undefined, 'GET');
+  readClipboard(input: ClipboardReadInput = {}): Promise<ClipboardReadResult> {
+    return runnerRequest(this.baseUrl, this.key, '/v1/clipboard/read', input);
   }
   writeClipboard(text: string): Promise<{ written: true }> {
     return runnerRequest(this.baseUrl, this.key, '/v1/clipboard', { text });

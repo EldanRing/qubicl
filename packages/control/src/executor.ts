@@ -1,3 +1,4 @@
+import { clipboardReader, type ClipboardReadInput } from './clipboard.js';
 import type { WebSearchInput } from './web.js';
 import { nativeDesktop, type NativeDesktopMethod } from './desktop-native.js';
 import { OfficePreviewManager } from './office-preview.js';
@@ -121,7 +122,7 @@ interface DesktopController {
   shutdown?(): void;
   screenshot(options?: DesktopScreenshotOptions): Promise<unknown>;
   control(action: ControlAction): Promise<unknown>;
-  readClipboard(): Promise<{ text: string; truncated?: boolean }>;
+  readClipboard(input?: ClipboardReadInput): Promise<{ text: string; truncated?: boolean }>;
   writeClipboard(text: string): Promise<{ written: true }>;
 }
 interface WebController {
@@ -653,7 +654,7 @@ export class ToolExecutor {
       case 'browser_computer':
         return respond(respondBrowser(await runBrowser(() => this.browser.computerWithViewerPointers(input.actions as BrowserComputerAction[], owner!.generation, input.geometry_generation as number | undefined, input))));
       case 'read_clipboard': {
-        return respond(await this.desktop.readClipboard());
+        return respond(await this.desktop.readClipboard(input));
       }
       case 'write_clipboard': {
         return respond(await this.desktop.writeClipboard(input.text as string));
@@ -1083,7 +1084,7 @@ function configuredDesktopController(): DesktopController {
       native: (method, input) => remote.native(method, input),
       screenshot: (options) => remote.screenshot(options),
       control: (action) => remote.control(action as unknown as Record<string, unknown>),
-      readClipboard: () => remote.readClipboard(),
+      readClipboard: (input) => remote.readClipboard(input),
       writeClipboard: (text) => remote.writeClipboard(text),
     };
   }
@@ -1624,10 +1625,8 @@ async function run(command: string, args: string[], stdin?: string): Promise<{ s
   });
 }
 
-export async function readClipboard(): Promise<{ text: string; truncated?: boolean }> {
-  const result = await run('xclip', ['-selection', 'clipboard', '-o']);
-  const bounded = truncateUtf8(result.stdout, MODEL_TEXT_BUDGET_BYTES);
-  return { text: bounded.text, ...(bounded.truncated ? { truncated: true } : {}) };
+export async function readClipboard(input: ClipboardReadInput = {}): Promise<Awaited<ReturnType<typeof clipboardReader.read>>> {
+  return clipboardReader.read(input);
 }
 
 export async function writeClipboard(text: string): Promise<void> {

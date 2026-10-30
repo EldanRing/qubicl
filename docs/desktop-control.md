@@ -119,6 +119,20 @@ the guest's own D-Bus session. It receives neither host desktop access nor
 controller credentials. A timeout invalidates its refs and reports that an
 action's effect may be unknown. Observe before retrying timed-out input.
 
+`read_clipboard` negotiates text targets and returns `status: text` or
+`unavailable`. `ownerAvailable` is true/false when X11 ownership is detectable,
+otherwise null. An image-only selection reports `text_format_unavailable`; it
+does not claim the clipboard is empty. A known empty text selection has `status:
+text` and zero sizes. X server, permission, timeout and invalid-encoding failures
+remain errors. Available formats are bounded and carry `formatsTruncated`.
+
+Text reads return `captureId`, `capturedAt`, `totalBytes`, `totalCharacters`,
+UTF-16 `offset`/`nextOffset`, and `nextCursor`. Continue with `cursor` and optional
+`maxBytes` (512–16,000). Pages reconstruct the same captured string even if another
+application replaces the clipboard; Unicode pairs and leading U+FEFF characters
+are preserved. Captures expire after five minutes; four captures share 16 MB,
+with an explicit 8 MB per-capture bound. A new read captures the current owner.
+
 Workstation additionally bundles GIMP, Inkscape, Blender, FreeCAD and Kdenlive,
 with corresponding editable skills. Their packages are absent from the other
 presets. Projects and source media belong under `/home/qubicl`; GPU acceleration

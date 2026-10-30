@@ -168,6 +168,10 @@ class Desktop:
         return {'windowId': window['id'], 'action': args['action'], 'dispatch': 'completed', 'verified': False,
                 'note': 'Window-manager request sent. Inspect the resulting window or save dialog before continuing.'}
 
+    def clipboard_status(self, _args):
+        owner = self.x.get_selection_owner(self.x.intern_atom('CLIPBOARD'))
+        return {'ownerAvailable': bool(getattr(owner, 'id', owner))}
+
     def close_process(self, args):
         # A launcher may hand off to a descendant (e.g. soffice.bin).
         def belongs(pid):
@@ -457,7 +461,7 @@ class Desktop:
         text = capture['text']
         if offset < 0 or offset > len(text):
             raise Failure('desktop_text_offset_invalid', 'Offset is outside the captured text.')
-        budget = min(args.get('maxBytes', 16000), 18000)
+        budget = max(512, min(args.get('maxBytes', 16000), 18000))
         end = min(len(text), offset + budget)
         while len(json.dumps(text[offset:end], ensure_ascii=False).encode()) > budget:
             end = offset + max(1, (end - offset) * 3 // 4)
@@ -499,7 +503,7 @@ class Desktop:
                 break
             context.iteration(False)
         handlers = {'windows': self.windows, 'validate': self.validate, 'window_action': self.window_action,
-                    'snapshot': self.snapshot, 'act': self.act, 'close_process': self.close_process}
+                    'snapshot': self.snapshot, 'act': self.act, 'close_process': self.close_process, 'clipboard_status': self.clipboard_status}
         if method not in handlers:
             raise Failure('invalid_desktop_method', 'Unsupported native desktop operation.')
         return handlers[method](args)

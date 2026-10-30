@@ -6,6 +6,10 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Clipboard reads negotiate available text formats and distinguish unavailable
+  text from known empty text, with selection-owner status when detectable.
+  Immutable Unicode-safe captures now provide sizes, offsets and continuation
+  instead of leaving a truncated tail inaccessible; real X11 errors still fail.
 - Reopening a managed single-instance text editor or file manager returns its
   reused identity; delayed launcher exits retain resolvable aliases for close.
 - Native snapshots expose supplied action keybindings and offer immutable,
