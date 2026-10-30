@@ -161,3 +161,22 @@ becoming a false cancelled receipt. Active transfers remain tracked; the bounded
 history retains the latest 200 completed transfers. History eviction does not
 delete downloaded files. Tab reset reports `resetComplete` and `failedToClose`
 when a previous tab could not be closed.
+
+Action receipts include `operationId` and `downloadStartedIds` observed during
+that operation's result window. A timer or delayed page event can begin a later
+download; these are correlation receipts, not proof of causal ownership. Never
+repeat a click solely because its download has not appeared. `browser_downloads`
+filters by `downloadId`, `tabId`, or `operationId`. Optional `waitMs` (up to 10
+seconds) waits once for a specified ID to finish, or for a matching download to
+start when no match exists. It reports `waitTimedOut`, does not hold the input
+queue, and does not impose a polling loop. Results honor `limit` and the shared
+byte budget with `truncated`; an ID filter retrieves a particular retained entry.
+
+Download records retain tab/action provenance and source/page URLs with
+credentials, query parameters and fragments removed. Available MIME and transfer
+counts come from browser responses/events. `receivedBytes`, `totalBytes` and
+`lastProgressAt` are null when unavailable; no transfer rate is invented. Event
+progress may lag the transfer. Completed artifacts include `sizeBytes` and
+`sha256` measured from the saved file. Explicit successful cancellation stays
+`cancelled` even when the save operation rejects concurrently; genuine failures
+stay `failed`, and cancelling a completed download is a no-op.

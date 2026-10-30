@@ -6,6 +6,11 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Browser actions correlate newly started downloads with operation/tab IDs.
+  Download observations support bounded waits and filters, available event-based
+  byte progress, redacted source provenance, MIME type, and completed size/SHA-256.
+  Explicit cancellation no longer races into a failed-transfer receipt; waiting
+  for a download does not block its cancellation or other browser input.
 - CSV imports reject overflowing/nonfinite explicit numbers with cell context
   before saving, accept an initial UTF-8 BOM by default, and preserve blanks in
   explicitly typed columns with an optional strict nonempty policy.

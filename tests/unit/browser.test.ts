@@ -30,7 +30,7 @@ test('browser manager provides the Terminal1 semantic, tab, and screenshot-groun
   assert.equal(manager.count(), 0);
   const navigation = await manager.navigate('https://example.test/start');
   assert.deepEqual(navigation, { url: 'https://example.test/start', title: 'Fake page', actedOnTabId: navigation.actedOnTabId,
-    activeTabId: navigation.actedOnTabId, openedTabs: [], openedTabsTruncated: false });
+    activeTabId: navigation.actedOnTabId, openedTabs: [], openedTabsTruncated: false, operationId: navigation.operationId, downloadStartedIds: [] });
   assert.equal(manager.count(), 1);
   assert.deepEqual(await manager.health(), {
     state: 'attached',
@@ -61,7 +61,7 @@ test('browser manager provides the Terminal1 semantic, tab, and screenshot-groun
   assert.ok(Buffer.byteLength(JSON.stringify(snapshot)) <= 24_000);
 
   const semanticClick = await manager.clickWithViewerPointer('g1e1', 'left');
-  assert.deepEqual(semanticClick.result, navigation);
+  assert.deepEqual(semanticClick.result, { ...navigation, operationId: semanticClick.result.operationId });
   assert.deepEqual(semanticClick.pointerActions, [{ type: 'click', x: 74, y: 111, button: 1 }]);
   await manager.type('g1e1', 'typed', true, true);
   await manager.select('g1e2', 'Selected');

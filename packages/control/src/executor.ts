@@ -604,7 +604,7 @@ export class ToolExecutor {
       case 'browser_upload':
         return respond(await runBrowser(() => this.browser.upload(input.ref as string, input.paths as string[])));
       case 'browser_downloads':
-        return respond(await runBrowser(() => this.browser.listDownloads()));
+        return respond(await runBrowser(() => this.browser.listDownloads(input)));
       case 'browser_cancel_download':
         return respond(await runBrowser(() => this.browser.cancelDownload(input.downloadId as string)));
       case 'browser_dialogs':

@@ -547,8 +547,8 @@ export const toolDefinitions = {
     lease: true,
   },
   browser_downloads: {
-    description: 'List tracked browser downloads and their durable final paths.',
-    input: observationOnly,
+    description: 'Observe download status, tab/action provenance, available byte progress and completed path/size/SHA-256. Unknown progress/MIME is null. Filter by downloadId, tabId or operationId. waitMs waits once for that ID to finish, or a matching start when none exists; it never repeats input.',
+    input: observationOnly.extend({ downloadId: z.string().regex(/^[A-Za-z0-9_-]{16}$/).optional(), tabId: z.string().regex(/^[A-Za-z0-9_-]{16}$/).optional(), operationId: z.string().regex(/^[A-Za-z0-9_-]{16}$/).optional(), waitMs: z.number().int().min(0).max(10000).default(0), limit: z.number().int().min(1).max(200).default(50) }),
     lease: false,
   },
   browser_cancel_download: {

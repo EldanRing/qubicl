@@ -1,5 +1,6 @@
-import { lstat, mkdir, realpath, rm } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { lstat, mkdir, realpath, rm, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { basename, join, relative, resolve, sep } from 'node:path';
 import { lookup } from 'node:dns/promises';
@@ -7,6 +8,7 @@ import type {
   Browser,
   BrowserContext,
   BrowserType,
+  CDPSession,
   Dialog,
   Download,
   ElementHandle,
@@ -91,6 +93,8 @@ export interface BrowserScrollOptions extends BrowserActionOptions { ref?: strin
 
 interface PageActionState extends PageState {
   observation?: Record<string, unknown>;
+  operationId?: string | undefined;
+  downloadStartedIds?: string[];
   checked?: boolean;
   changed?: boolean;
   scroll?: unknown;
@@ -120,7 +124,18 @@ interface BrowserImage extends PageState {
   geometryGeneration: number;
 }
 
+export interface BrowserDownloadsInput { downloadId?: string; tabId?: string | undefined; operationId?: string | undefined; waitMs?: number; limit?: number; }
 interface BrowserDownloadRecord {
+  tabId?: string | undefined;
+  operationId?: string | undefined;
+  sourceUrl?: string;
+  pageUrl?: string | undefined;
+  mimeType?: string | null;
+  receivedBytes?: number | null;
+  totalBytes?: number | null;
+  lastProgressAt?: string | null;
+  sizeBytes?: number;
+  sha256?: string;
   id: string;
   status: 'in-progress' | 'completed' | 'failed' | 'cancelled';
   suggestedFilename: string;
@@ -137,20 +152,20 @@ interface BrowserDialogRecord {
   defaultValue: string;
   openedAt: string;
   tabId: string;
-  operationId?: string;
+  operationId?: string | undefined;
 }
 
 interface BrowserOperationReceipt {
   operationId: string;
   status: 'running' | 'awaiting_dialog' | 'completed' | 'interrupted' | 'failed';
   dispatch: 'started' | 'not-started';
-  tabId?: string;
+  tabId?: string | undefined;
   dialogId?: string;
   error?: { code: string; message: string };
 }
 
 export interface BrowserDiagnosticsInput {
-  tabId?: string;
+  tabId?: string | undefined;
   since?: string;
   until?: string;
   type?: 'console' | 'request-failed';
@@ -252,6 +267,12 @@ export class BrowserManager {
   private runningOperation: BrowserOperationReceipt | undefined;
   private readonly dialogOperations = new Map<string, { receipt: BrowserOperationReceipt; settled: Promise<void> }>();
   private readonly downloads = new Map<string, BrowserDownloadRecord>();
+  private readonly downloadWaiters = new Set<() => void>();
+  private readonly cancellingDownloads = new Map<string, Promise<void>>();
+  private readonly downloadSessions = new Set<CDPSession>();
+  private readonly downloadProgress = new Map<string, { url: string; filename: string; page?: Page | undefined; recordId?: string; receivedBytes: number; totalBytes: number | null; lastProgressAt: string }>();
+  private readonly pendingDownloadRecords = new Map<string, { url: string; page?: Page | undefined }>();
+  private readonly downloadResponses = new WeakMap<Page, Map<string, { mimeType: string | null; totalBytes: number | null }>>();
   private readonly activeDownloads = new Map<string, Download>();
   private readonly dialogs = new Map<string, { record: BrowserDialogRecord; dialog: Dialog; page: Page }>();
   private readonly diagnostics: BrowserDiagnostic[] = [];
@@ -315,8 +336,25 @@ export class BrowserManager {
     };
   }
 
-  listDownloads(): Promise<{ downloads: BrowserDownloadRecord[]; directory: string }> {
-    return this.enqueue(async () => ({ downloads: [...this.downloads.values()].toReversed(), directory: this.downloadDirectory }));
+  async listDownloads(input: BrowserDownloadsInput = {}): Promise<{ downloads: BrowserDownloadRecord[]; directory: string; waitTimedOut: boolean; truncated: boolean }> {
+    const matching = (): BrowserDownloadRecord[] => [...this.downloads.values()].toReversed().filter((record) =>
+      (!input.downloadId || record.id === input.downloadId) && (!input.tabId || record.tabId === input.tabId) && (!input.operationId || record.operationId === input.operationId));
+    if (input.downloadId && !this.downloads.has(input.downloadId)) throw new QubiclError('browser_download_not_found', 'The download is not retained.', 404);
+    const ready = (): boolean => input.downloadId ? matching().some((record) => record.status !== 'in-progress') : matching().length > 0;
+    const waitMs = Math.max(0, Math.min(10_000, input.waitMs ?? 0));
+    if (waitMs && !ready()) await new Promise<void>((resolve) => {
+      const finish = (): void => { clearTimeout(timer); this.downloadWaiters.delete(check); resolve(); };
+      const check = (): void => { if (ready()) finish(); };
+      const timer = setTimeout(finish, waitMs);
+      this.downloadWaiters.add(check);
+      check();
+    });
+    const found = matching(), downloads: BrowserDownloadRecord[] = [];
+    for (const record of found.slice(0, input.limit ?? 50)) {
+      if (Buffer.byteLength(JSON.stringify([...downloads, record])) > MODEL_TEXT_BUDGET_BYTES - 1024) break;
+      downloads.push({ ...record });
+    }
+    return { downloads, directory: this.downloadDirectory, waitTimedOut: Boolean(waitMs && !ready()), truncated: downloads.length < found.length };
   }
 
   cancelDownload(id: string): Promise<{ id: string; status: BrowserDownloadRecord['status'] }> {
@@ -324,12 +362,15 @@ export class BrowserManager {
       const record = this.downloads.get(id);
       if (!record) throw new QubiclError('browser_download_not_found', `Browser download ${id} was not found.`, 404);
       const download = this.activeDownloads.get(id);
+      if (record.status !== 'in-progress' || !download) return { id, status: record.status };
       await this.dispatchInput(async () => {
-        if (download) await download.cancel();
-        if (record.status === 'in-progress') {
-          record.status = 'cancelled';
-          record.completedAt = new Date().toISOString();
-        }
+        const cancellation = download.cancel();
+        this.cancellingDownloads.set(id, cancellation);
+        try {
+          await cancellation;
+          if (record.status !== 'completed') { record.status = 'cancelled'; delete record.error; record.completedAt = new Date().toISOString(); }
+          for (const notify of this.downloadWaiters) notify();
+        } finally { this.cancellingDownloads.delete(id); }
       });
       return { id, status: record.status };
     });
@@ -1003,6 +1044,8 @@ export class BrowserManager {
     if (context) await context.close().catch(() => undefined);
     if (this.connectedBrowser) await this.connectedBrowser.close().catch(() => undefined);
     this.connectedBrowser = undefined;
+    await Promise.all([...this.downloadSessions].map((session) => session.detach().catch(() => undefined)));
+    this.downloadSessions.clear(); this.downloadProgress.clear();
   }
 
   private async beginViewerPointer(action: ViewerPointerAction, generation: number | undefined): Promise<string | undefined> {
@@ -1270,7 +1313,16 @@ export class BrowserManager {
     this.trackedPages.add(page);
     this.tabId(page);
     this.touchPage(page);
-    page.on('download', (download) => { void this.retainDownload(download); });
+    page.on('download', (download) => { void this.retainDownload(download, page); });
+    page.on('response', (response) => {
+      const headers = response.headers();
+      const records = this.downloadResponses.get(page) ?? new Map();
+      const length = Number(headers['content-length']);
+      records.set(response.url(), { mimeType: headers['content-type']?.split(';')[0] ?? null, totalBytes: Number.isSafeInteger(length) && length >= 0 ? length : null });
+      while (records.size > 100) records.delete(records.keys().next().value!);
+      this.downloadResponses.set(page, records);
+    });
+    await this.observeDownloadProgress(context, page);
     page.on('dialog', (dialog) => {
       const id = randomBytes(12).toString('base64url');
       this.dialogs.set(id, {
@@ -1321,12 +1373,21 @@ export class BrowserManager {
     if (this.diagnostics.length > MAX_BROWSER_DIAGNOSTICS) this.diagnostics.splice(0, this.diagnostics.length - MAX_BROWSER_DIAGNOSTICS);
   }
 
-  private async retainDownload(download: Download): Promise<void> {
+  private async retainDownload(download: Download, page?: Page): Promise<void> {
     const id = randomBytes(12).toString('base64url');
     const suggestedFilename = safeDownloadFilename(download.suggestedFilename());
-    const record: BrowserDownloadRecord = { id, status: 'in-progress', suggestedFilename, startedAt: new Date().toISOString() };
+    const rawUrl = download.url?.() ?? '';
+    const metadata = page ? this.downloadResponses.get(page)?.get(rawUrl) : undefined;
+    const tabId = page ? this.tabId(page) : undefined;
+    const operationId = this.runningOperation?.dispatch === 'started' && this.runningOperation.tabId === tabId ? this.runningOperation.operationId : undefined;
+    const record: BrowserDownloadRecord = { id, status: 'in-progress', suggestedFilename, startedAt: new Date().toISOString(),
+      tabId, operationId, sourceUrl: diagnosticUrl(rawUrl), pageUrl: page ? diagnosticUrl(page.url()) : undefined,
+      mimeType: metadata?.mimeType ?? null, receivedBytes: null, totalBytes: metadata?.totalBytes ?? null, lastProgressAt: null };
+    this.pendingDownloadRecords.set(id, { url: rawUrl, page });
     this.downloads.set(id, record);
     this.activeDownloads.set(id, download);
+    this.matchDownloadProgress();
+    for (const notify of this.downloadWaiters) notify();
     this.trimDownloadHistory();
     try {
       await mkdir(this.downloadDirectory, { recursive: true, mode: 0o700 });
@@ -1340,10 +1401,15 @@ export class BrowserManager {
         record.status = 'failed';
         record.error = failure.slice(0, 500);
       } else {
-        record.status = 'completed';
-        record.path = path;
+        const hash = createHash('sha256');
+        for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+        const size = (await stat(path)).size;
+        Object.assign(record, { status: 'completed', path, sizeBytes: size, sha256: hash.digest('hex'), receivedBytes: size,
+          totalBytes: size, lastProgressAt: new Date().toISOString() });
       }
     } catch (error) {
+      const cancellation = this.cancellingDownloads.get(id);
+      if (cancellation && await cancellation.then(() => true, () => false)) record.status = 'cancelled';
       if (record.status !== 'cancelled') {
         record.status = 'failed';
         record.error = (error instanceof Error ? error.message : String(error)).slice(0, 500);
@@ -1353,7 +1419,53 @@ export class BrowserManager {
       this.activeDownloads.delete(id);
       this.downloads.delete(id);
       this.downloads.set(id, record);
+      this.pendingDownloadRecords.delete(id);
+      for (const notify of this.downloadWaiters) notify();
       this.trimDownloadHistory();
+    }
+  }
+
+  private async observeDownloadProgress(context: BrowserContext, page: Page): Promise<void> {
+    let session: CDPSession | undefined;
+    try {
+      session = await context.newCDPSession(page);
+      this.downloadSessions.add(session);
+      // Page-domain events are delivered to this observing session, whereas
+      // Browser-domain events may be scoped to Playwright's own connection.
+      session.on('Page.downloadWillBegin', (event) => {
+        const previous = this.downloadProgress.get(event.guid);
+        this.downloadProgress.set(event.guid, { url: event.url, filename: event.suggestedFilename, page,
+          receivedBytes: previous?.receivedBytes ?? 0, totalBytes: previous?.totalBytes ?? null,
+          lastProgressAt: previous?.lastProgressAt ?? new Date().toISOString(), ...(previous?.recordId ? { recordId: previous.recordId } : {}) });
+        while (this.downloadProgress.size > 256) this.downloadProgress.delete(this.downloadProgress.keys().next().value!);
+        this.matchDownloadProgress();
+      });
+      session.on('Page.downloadProgress', (event) => {
+        const progress = this.downloadProgress.get(event.guid);
+        if (!progress) return;
+        Object.assign(progress, { receivedBytes: event.receivedBytes, totalBytes: event.totalBytes > 0 ? event.totalBytes : null, lastProgressAt: new Date().toISOString() });
+        const record = progress.recordId ? this.downloads.get(progress.recordId) : undefined;
+        if (record?.status === 'in-progress') Object.assign(record, { receivedBytes: progress.receivedBytes, totalBytes: progress.totalBytes, lastProgressAt: progress.lastProgressAt });
+      });
+      await session.send('Page.enable');
+      const retained = session;
+      page.once('close', () => { this.downloadSessions.delete(retained); void retained.detach().catch(() => undefined); });
+    } catch {
+      if (session) { this.downloadSessions.delete(session); await session.detach().catch(() => undefined); }
+      // Unsupported progress stays unknown; never change the browser's download
+      // behavior/path merely to obtain it.
+    }
+  }
+
+  private matchDownloadProgress(): void {
+    for (const [id, pending] of this.pendingDownloadRecords) {
+      if ([...this.downloadProgress.values()].some((progress) => progress.recordId === id)) continue;
+      const match = [...this.downloadProgress.values()].find((progress) => !progress.recordId && progress.page && progress.page === pending.page && progress.url === pending.url);
+      if (match) {
+        match.recordId = id;
+        const record = this.downloads.get(id)!;
+        Object.assign(record, { receivedBytes: match.receivedBytes, totalBytes: match.totalBytes ?? record.totalBytes, lastProgressAt: match.lastProgressAt });
+      }
     }
   }
 
@@ -1415,6 +1527,8 @@ export class BrowserManager {
       activeTabId: this.activePage && !this.activePage.isClosed() ? this.tabId(this.activePage) : null,
       openedTabs: opened.slice(0, 20).map((candidate) => ({ tabId: this.tabId(candidate), url: candidate.url().slice(0, 512) })),
       openedTabsTruncated: opened.length > 20,
+      operationId: this.runningOperation?.operationId,
+      downloadStartedIds: [...this.downloads.values()].filter((download) => download.operationId === this.runningOperation?.operationId && download.operationId !== undefined).map(({ id }) => id).slice(0, 20),
     };
   }
 
@@ -1447,6 +1561,8 @@ export class BrowserManager {
   }
 
   private clearContext(context: BrowserContext): void {
+    for (const session of this.downloadSessions) void session.detach().catch(() => undefined);
+    this.downloadSessions.clear(); this.downloadProgress.clear();
     void this.reader.clear();
     void this.contextPromise?.then((current) => {
       if (current === context) this.contextPromise = undefined;

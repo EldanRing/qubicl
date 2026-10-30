@@ -216,7 +216,7 @@ export class RemoteBrowserManager extends BrowserManager {
   override closeTab(target: number | string): ReturnType<BrowserManager['closeTab']> { return this.invoke('closeTab', [target]); }
   override reset(): ReturnType<BrowserManager['reset']> { return this.invoke('reset', []); }
   override upload(ref: string, paths: string[]): ReturnType<BrowserManager['upload']> { return this.invoke('upload', [ref, paths]); }
-  override listDownloads(): ReturnType<BrowserManager['listDownloads']> { return this.invoke('listDownloads', []); }
+  override listDownloads(input: Parameters<BrowserManager['listDownloads']>[0] = {}): ReturnType<BrowserManager['listDownloads']> { return this.invoke('listDownloads', [input]); }
   override cancelDownload(id: string): ReturnType<BrowserManager['cancelDownload']> { return this.invoke('cancelDownload', [id]); }
   override listDialogs(): ReturnType<BrowserManager['listDialogs']> { return this.invoke('listDialogs', []); }
   override respondDialog(id: string, action: 'accept' | 'dismiss', promptText?: string): ReturnType<BrowserManager['respondDialog']> { return this.invoke('respondDialog', [id, action, promptText]); }

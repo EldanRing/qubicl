@@ -50,15 +50,16 @@ test('concurrent downloads retain unique bytes; cancellation failure and active 
   const make = (contents:string, slow=false) => ({suggestedFilename:()=> 'report.csv',saveAs:async (path:string)=> {if(slow) await blocked; await writeFile(path,contents);},failure:async()=>null,cancel:async()=> {throw new Error('cancel failed');}} as unknown as Download);
   const pending = internal.retainDownload(make('long-running',true));
   await Promise.all(Array.from({length:201},(_,i)=>internal.retainDownload(make(String(i)))));
-  const tracked = (await manager.listDownloads()).downloads;
-  const active=tracked.find(item=>item.status==='in-progress')!; assert.ok(active);
+  const tracked = (await manager.listDownloads({ limit: 200 })).downloads;
+  const active=[...(manager as unknown as { downloads: Map<string, { id: string; status: string }> }).downloads.values()].find(item=>item.status==='in-progress')!; assert.ok(active);
   await assert.rejects(manager.cancelDownload(active.id),/cancel failed/);
-  assert.equal((await manager.listDownloads()).downloads.find(item=>item.id===active.id)!.status,'in-progress');
-  const complete=tracked.filter(item=>item.status==='completed'); assert.equal(complete.length,200);
-  assert.equal(new Set(complete.map(item=>item.path)).size,200);
-  const contents=await Promise.all(complete.map(item=>readFile(item.path!,'utf8'))); assert.equal(new Set(contents).size,200);
+  assert.equal((await manager.listDownloads({ downloadId: active.id })).downloads[0]!.status,'in-progress');
+  assert.equal((manager as unknown as { downloads: Map<string, unknown> }).downloads.size,201);
+  const complete=tracked.filter(item=>item.status==='completed'); assert.ok(complete.length > 0 && complete.length <= 200);
+  assert.equal(new Set(complete.map(item=>item.path)).size,complete.length);
+  const contents=await Promise.all(complete.map(item=>readFile(item.path!,'utf8'))); assert.equal(new Set(contents).size,complete.length);
   finish(); await pending;
-  assert.equal((await manager.listDownloads()).downloads.find(item=>item.id===active.id)?.status,'completed');
+  assert.equal((await manager.listDownloads({ downloadId: active.id })).downloads[0]?.status,'completed');
 });
 
 test('a dialog cancels queued operations that have not started instead of dispatching them later', async () => {
