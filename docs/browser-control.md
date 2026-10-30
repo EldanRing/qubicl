@@ -13,6 +13,21 @@ page before deciding what to do next. Older servers without dispatch receipts
 are handled conservatively: their errors are returned without an automatic retry.
 A receipt is evidence about dispatch, not proof that the application accepted it.
 
+`browser_history` dispatches Back, Forward or Reload once and waits up to five
+seconds for navigation to commit, then at most one second for `DOMContentLoaded`.
+It returns the observed URL/title, `navigation.status` (`committed` or
+`not_observed`), `navigation.waitTimedOut`, and a separate `loading` record with
+`waitStatus` and the observed document `readyState`. A missing loading event can
+produce `waitStatus: "timed_out"` even when the document is already complete.
+Same-document history entries can commit without an HTTP response. An absent
+Back/Forward entry still returns `browser_no_history`.
+
+The final document observation also has a one-second budget. If it cannot be
+read, `observationComplete` is false, title is empty, and `readyState` is
+`unavailable`; the browser's current URL is still reported. An expired wait does
+not establish that navigation failed or was cancelled. Inspect the page before
+issuing another history action; the tool never retries that action itself.
+
 The session runner checks current interactive ownership with the controller
 before each input, including individual batch actions and compound-action steps.
 Human takeover stops remaining input; cleanup releases modifiers and mouse

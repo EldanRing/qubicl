@@ -498,7 +498,7 @@ export const toolDefinitions = {
     lease: true,
   },
   browser_history: {
-    description: 'Go back, go forward, or reload the active browser tab.',
+    description: 'Go back, forward, or reload once. Reports observed page state and navigation separately from the bounded loading wait. If a wait expires, inspect the page before deciding whether to navigate again.',
     input: leaseOnly.extend({ action: z.enum(['back', 'forward', 'reload']) }),
     lease: true,
   },

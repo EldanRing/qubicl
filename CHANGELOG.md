@@ -4,6 +4,13 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
+### Fixed
+
+- Browser Back, Forward and Reload report observed navigation separately from a
+  short loading wait, avoiding 30-second stalls when loading events never arrive.
+  Same-document history entries no longer fail merely because they have no HTTP
+  response; timed-out actions are never automatically repeated.
+
 ## 0.8.0 - 2026-10-29
 
 ### Added

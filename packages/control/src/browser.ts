@@ -43,6 +43,8 @@ const MAX_BROWSER_QUEUE_DEPTH = 32;
 const MAX_BROWSER_DIAGNOSTICS = 200;
 const MAX_UPLOAD_FILES = 16;
 const MAX_UPLOAD_FILE_BYTES = 1024 * 1024 * 1024;
+const HISTORY_COMMIT_TIMEOUT_MS = 5_000;
+const HISTORY_LOAD_TIMEOUT_MS = 1_000;
 
 export const INTERACTIVE_BROWSER_IGNORED_DEFAULT_ARGS = [
   '--disable-background-timer-throttling',
@@ -78,6 +80,13 @@ export type BrowserComputerAction =
 interface PageState {
   url: string;
   title: string;
+}
+
+interface HistoryState extends PageState {
+  navigation: { action: 'back' | 'forward' | 'reload'; status: 'committed' | 'not_observed'; waitTimedOut: boolean };
+  loading: { waitUntil: 'domcontentloaded'; waitStatus: 'completed' | 'timed_out' | 'not_waited'; readyState: DocumentReadyState | 'unavailable' };
+  observationComplete: boolean;
+  note?: string;
 }
 
 interface TabState extends PageState {
@@ -682,22 +691,53 @@ export class BrowserManager {
     });
   }
 
-  history(action: 'back' | 'forward' | 'reload'): Promise<PageState> {
-    return this.act(async (page) => {
-      if (action === 'back') {
-        const response = await this.dispatchInput(() => page.goBack({ waitUntil: 'domcontentloaded', timeout: 30_000 }));
-        if (!response) throw new QubiclError('browser_no_history', 'This tab has no earlier history entry.', 409);
+  history(action: 'back' | 'forward' | 'reload'): Promise<HistoryState> {
+    return this.enqueue(async () => {
+      const page = await this.getPage();
+      let navigated = false;
+      let waitTimedOut = false;
+      const onNavigation = (frame: Frame): void => { if (frame === page.mainFrame()) navigated = true; };
+      page.on('framenavigated', onNavigation);
+      try {
+        try {
+          const options = { waitUntil: 'commit' as const, timeout: HISTORY_COMMIT_TIMEOUT_MS };
+          const response = await this.dispatchInput(() => action === 'back' ? page.goBack(options)
+            : action === 'forward' ? page.goForward(options) : page.reload(options));
+          // Same-document and cached history transitions need not have an HTTP
+          // response. The main-frame event also covers same-URL pushState entries.
+          navigated ||= response !== null;
+          if (!navigated && action !== 'reload') {
+            throw new QubiclError('browser_no_history', `This tab has no ${action === 'back' ? 'earlier' : 'later'} history entry.`, 409);
+          }
+        } catch (error) {
+          if (!(error instanceof Error) || error.name !== 'TimeoutError') throw error;
+          waitTimedOut = true;
+          await this.inputOwnership.getStore()?.verify();
+        }
+        let waitStatus: HistoryState['loading']['waitStatus'] = 'not_waited';
+        if (navigated) {
+          try {
+            await page.waitForLoadState('domcontentloaded', { timeout: HISTORY_LOAD_TIMEOUT_MS });
+            waitStatus = 'completed';
+          } catch (error) {
+            if (!(error instanceof Error) || error.name !== 'TimeoutError') throw error;
+            waitStatus = 'timed_out';
+          }
+        }
+        const { readyState, ...observed } = await observeHistoryPage(page);
+        await this.enforceTabLimit(await this.getContext(), this.activePage);
+        return {
+          ...observed,
+          navigation: { action, status: navigated ? 'committed' : 'not_observed', waitTimedOut },
+          loading: { waitUntil: 'domcontentloaded', waitStatus, readyState },
+          ...(waitTimedOut || waitStatus === 'timed_out' ? {
+            note: 'A navigation or loading wait expired. The observed page may already have changed; inspect it before deciding whether another history action is needed.',
+          } : {}),
+        };
+      } finally {
+        page.off('framenavigated', onNavigation);
+        if (navigated || waitTimedOut) this.clearReferences();
       }
-      if (action === 'forward') {
-        const response = await this.dispatchInput(() => page.goForward({ waitUntil: 'domcontentloaded', timeout: 30_000 }));
-        if (!response) throw new QubiclError('browser_no_history', 'This tab has no later history entry.', 409);
-      }
-      if (action === 'reload') {
-        const response = await this.dispatchInput(() => page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 }));
-        if (!response) throw new QubiclError('browser_navigation_failed', 'The reload completed without a main-document response.', 502);
-      }
-      this.clearReferences();
-      return page;
     });
   }
 
@@ -1561,6 +1601,19 @@ function requirePageIndex(pages: Page[], index: number): Page {
 
 async function pageState(page: Page): Promise<PageState> {
   return { url: page.url().slice(0, 8192), title: (await page.title().catch(() => '')).slice(0, 512) };
+}
+
+async function observeHistoryPage(page: Page): Promise<PageState & { readyState: DocumentReadyState | 'unavailable'; observationComplete: boolean }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const observed = await Promise.race([
+      page.evaluate(() => ({ url: location.href, title: document.title, readyState: document.readyState })).catch(() => undefined),
+      new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 1_000); }),
+    ]);
+    return observed
+      ? { url: observed.url.slice(0, 8192), title: observed.title.slice(0, 512), readyState: observed.readyState, observationComplete: true }
+      : { url: page.url().slice(0, 8192), title: '', readyState: 'unavailable', observationComplete: false };
+  } finally { clearTimeout(timer); }
 }
 
 function truncateJsonText(value: string, maximumBytes: number): { text: string; truncated: boolean } {

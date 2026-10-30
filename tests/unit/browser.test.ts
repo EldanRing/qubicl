@@ -476,6 +476,74 @@ test('browser extraction waits for rendered content and returns only bounded san
 
 type EventListener = (...values: unknown[]) => void;
 
+test('history separates navigation from load timeouts and accepts response-less same-URL transitions', async (context) => {
+  const fake = new FakeBrowserRuntime();
+  const connection = await fake.browserType.connectOverCDP('http://fake');
+  const page = connection.contexts()[0]!.pages()[0]! as unknown as FakePage;
+  const manager = new BrowserManager(true, { browserType: fake.browserType });
+  context.after(() => manager.shutdown());
+  let calls = 0;
+  context.mock.method(page, 'goBack', async (options: { waitUntil: string; timeout: number }) => {
+    calls++;
+    assert.equal(options.waitUntil, 'commit');
+    assert.ok(options.timeout <= 5_000);
+    page.emit('framenavigated', page);
+    return null;
+  });
+  context.mock.method(page, 'waitForLoadState', async (_state: string, options: { timeout: number }) => {
+    assert.ok(options.timeout <= 1_000);
+    throw Object.assign(new Error('No load event'), { name: 'TimeoutError' });
+  });
+  const result = await manager.history('back');
+  assert.deepEqual(result.navigation, { action: 'back', status: 'committed', waitTimedOut: false });
+  assert.deepEqual(result.loading, { waitUntil: 'domcontentloaded', waitStatus: 'timed_out', readyState: 'complete' });
+  assert.equal(result.url, 'about:blank');
+  assert.equal(result.title, 'Fake page');
+  assert.equal(result.observationComplete, true);
+  assert.equal(calls, 1, 'an incomplete wait must not repeat a history action');
+});
+
+test('history distinguishes missing entries, uncertain commit waits and non-timeout failures', async (context) => {
+  const fake = new FakeBrowserRuntime();
+  const connection = await fake.browserType.connectOverCDP('http://fake');
+  const page = connection.contexts()[0]!.pages()[0]! as unknown as FakePage;
+  const manager = new BrowserManager(true, { browserType: fake.browserType });
+  context.after(() => manager.shutdown());
+  context.mock.method(page, 'goBack', async () => null);
+  await assert.rejects(manager.history('back'), { code: 'browser_no_history' });
+  const load = context.mock.method(page, 'waitForLoadState', async () => {});
+  const forward = context.mock.method(page, 'goForward', async () => {
+    throw Object.assign(new Error('Commit timeout'), { name: 'TimeoutError' });
+  });
+  const result = await manager.history('forward');
+  assert.deepEqual(result.navigation, { action: 'forward', status: 'not_observed', waitTimedOut: true });
+  assert.equal(result.loading.waitStatus, 'not_waited');
+  assert.equal(load.mock.callCount(), 0);
+  assert.equal(forward.mock.callCount(), 1);
+  context.mock.method(page, 'reload', async () => { throw new Error('Target closed'); });
+  await assert.rejects(manager.history('reload'), /Target closed/);
+});
+
+test('history retains navigation evidence when its commit wait times out and observation fails', async (context) => {
+  const fake = new FakeBrowserRuntime();
+  const connection = await fake.browserType.connectOverCDP('http://fake');
+  const page = connection.contexts()[0]!.pages()[0]! as unknown as FakePage;
+  const manager = new BrowserManager(true, { browserType: fake.browserType });
+  context.after(() => manager.shutdown());
+  context.mock.method(page, 'goBack', async () => {
+    page.urlValue = 'https://example.test/observed';
+    page.emit('framenavigated', page);
+    throw Object.assign(new Error('Commit timeout'), { name: 'TimeoutError' });
+  });
+  context.mock.method(page, 'evaluate', async () => { throw new Error('Execution context destroyed'); });
+  const result = await manager.history('back');
+  assert.equal(result.navigation.status, 'committed');
+  assert.equal(result.navigation.waitTimedOut, true);
+  assert.equal(result.url, 'https://example.test/observed');
+  assert.equal(result.observationComplete, false);
+  assert.equal(result.loading.readyState, 'unavailable');
+});
+
 class FakeLocator {
   readonly fills: string[] = [];
   readonly presses: string[] = [];
@@ -553,6 +621,8 @@ class FakePage {
   mainFrame(): object { return this; }
   on(event: string, listener: EventListener): void { this.listeners.set(event, [...this.listeners.get(event) ?? [], listener]); }
   once(event: string, listener: EventListener): void { this.on(event, listener); }
+  off(event: string, listener: EventListener): void { this.listeners.set(event, (this.listeners.get(event) ?? []).filter((entry) => entry !== listener)); }
+  emit(event: string, ...values: unknown[]): void { for (const listener of this.listeners.get(event) ?? []) listener(...values); }
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -581,6 +651,7 @@ class FakePage {
     } as unknown as Locator;
   }
   async evaluate(_callback: unknown, argument?: { pointX?: number; pointY?: number; minimumMs?: number; maximumCharacters?: number; qubiclViewerMetrics?: boolean; qubiclScreenshotDimensions?: boolean; observed?: FakeLocator[]; retained?: Array<{ ref: string; node: FakeLocator }> }): Promise<unknown> {
+    if (String(_callback).includes('document.readyState')) return { url: this.urlValue, title: 'Fake page', readyState: 'complete' };
     if (argument?.observed && argument.retained) {
       const byNode = new Map(argument.retained.map(({ ref, node }) => [node, ref]));
       return argument.observed.map((node) => byNode.get(node) ?? null);
