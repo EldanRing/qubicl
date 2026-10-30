@@ -6,6 +6,22 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Browser reading and search traverse visible open shadow DOM and assigned slots
+  without duplicating slotted text. Snapshot text, refs and point inspection use
+  shared control names; disclosure controls and nested scroll areas receive refs.
+- Browser observations expose native validation messages, read-only and
+  modal/inert blocking, numeric constraints, option values, file-selection
+  metadata, keyboard focus and text selection. Background controls inside child
+  frames also report parent-modal blocking. Password values and selections stay
+  redacted.
+- Targeted `browser_read` supports exact input/editor values with preserved
+  whitespace and pagination, and full option/file inventories through control
+  metadata reads. `browser_select.by` can explicitly select underlying values
+  when labels are duplicated or collide with other values.
+- Browser scrolling can target a referenced nested region and reports its
+  resulting position. `browser_click.checked` sets checkbox state safely across
+  repeated calls. Optional `observe` on semantic and visual input captures
+  immediate text/focus and bounded transient feedback before settling delays.
 - Browser Back, Forward and Reload report observed navigation separately from a
   short loading wait, avoiding 30-second stalls when loading events never arrive.
   Same-document history entries no longer fail merely because they have no HTTP

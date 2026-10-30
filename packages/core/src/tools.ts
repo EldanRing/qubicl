@@ -446,7 +446,7 @@ export const toolDefinitions = {
     lease: true,
   },
   browser_snapshot: {
-    description: 'Return bounded accessibility text and paginated exact interactive refs. Use browser_read for text continuation.',
+    description: 'Observe visible page text and paginated refs, including shadow DOM, disclosures and scroll areas. Control metadata includes values, validation, read-only/blocked state, options, focus and selection. Use browser_read for continuation or exact values.',
     input: observationOnly.extend({
       cursor: z.number().int().min(0).max(100_000).default(0),
       limit: z.number().int().min(1).max(200).default(200),
@@ -456,7 +456,7 @@ export const toolDefinitions = {
     lease: false,
   },
   browser_read: {
-    description: 'Read or search captured text from the logged-in browser. Continue with cursor and maxBytes only; navigation invalidates cursors. Optional selector or ref targets a subtree.',
+    description: 'Read or search captured text from the logged-in browser. Continue with cursor and maxBytes only; navigation invalidates cursors. Optional selector or ref targets a subtree; mode=value returns its exact current input/editor value, mode=control returns complete control metadata as paginated JSON. Password values are never returned.',
     input: observationOnly.extend({
       cursor: z.string().regex(/^[a-f0-9]{24}:\d{1,8}$/).optional(),
       maxBytes: z.number().int().min(512).max(16_000).default(12_000),
@@ -465,6 +465,7 @@ export const toolDefinitions = {
       ref: browserRef.optional(),
       query: z.string().min(1).max(1000).optional(),
       caseSensitive: z.boolean().optional(),
+      mode: z.enum(['text', 'value', 'control']).optional(),
     }),
     lease: false,
   },
@@ -474,28 +475,28 @@ export const toolDefinitions = {
     lease: false,
   },
   browser_click: {
-    description: 'Click an observed element ref. The receipt identifies the acted-on, opened and active tabs. Popups do not select themselves; use browser_use_tab explicitly.',
-    input: leaseOnly.extend({ ref: browserRef, button: z.enum(['left', 'right']).default('left') }),
+    description: 'Click an observed element ref. The receipt identifies the acted-on, opened and active tabs. Popups do not select themselves; use browser_use_tab explicitly. Optional checked sets checkbox state without toggling on repeated calls. observe captures immediate text/focus and brief feedback.',
+    input: leaseOnly.extend({ ref: browserRef, button: z.enum(['left', 'right']).default('left'), checked: z.boolean().optional(), observe: z.boolean().optional() }),
     lease: true,
   },
   browser_type: {
     description: 'Enter text into an editable element ref from the latest browser_snapshot.',
-    input: leaseOnly.extend({ ref: browserRef, text: z.string().max(50_000), submit: z.boolean().default(false), clear: z.boolean().default(true) }),
+    input: leaseOnly.extend({ ref: browserRef, text: z.string().max(50_000), submit: z.boolean().default(false), clear: z.boolean().default(true), observe: z.boolean().optional() }),
     lease: true,
   },
   browser_select: {
-    description: 'Select option labels or values in one operation. Pass a string for one option, an array for a multi-select, or [] to clear its selection. Arrays replace the entire selection.',
-    input: leaseOnly.extend({ ref: browserRef, value: z.union([z.string().max(10_000), z.array(z.string().max(10_000)).max(200)]) }),
+    description: 'Select option labels or values in one operation. Pass a string for one option, an array for a multi-select, or [] to clear its selection. Arrays replace the entire selection. by=value disambiguates duplicate labels; auto prefers labels. observe captures immediate feedback.',
+    input: leaseOnly.extend({ ref: browserRef, value: z.union([z.string().max(10_000), z.array(z.string().max(10_000)).max(200)]), by: z.enum(['auto', 'label', 'value']).optional(), observe: z.boolean().optional() }),
     lease: true,
   },
   browser_press: {
     description: 'Press a Playwright key or chord, optionally on an element ref from the latest browser_snapshot.',
-    input: leaseOnly.extend({ key: browserKey, ref: browserRef.optional() }),
+    input: leaseOnly.extend({ key: browserKey, ref: browserRef.optional(), observe: z.boolean().optional() }),
     lease: true,
   },
   browser_scroll: {
-    description: 'Scroll the active browser page vertically.',
-    input: leaseOnly.extend({ direction: z.enum(['up', 'down']).default('down'), amount: z.number().int().min(1).max(5000).default(600) }),
+    description: 'Scroll the page or a referenced nested scroll area. Targeted scrolling returns the resulting scroll position. observe captures immediate text and focus.',
+    input: leaseOnly.extend({ direction: z.enum(['up', 'down', 'left', 'right']).default('down'), amount: z.number().int().min(1).max(5000).default(600), ref: browserRef.optional(), observe: z.boolean().optional() }),
     lease: true,
   },
   browser_history: {
@@ -592,17 +593,17 @@ export const toolDefinitions = {
   },
   browser_click_at: {
     description: 'Click viewport coordinates and return updated PNG.',
-    input: leaseOnly.extend({ ...browserPoint.shape, button: browserButton, geometry_generation: browserGeometryGeneration }),
+    input: leaseOnly.extend({ ...browserPoint.shape, button: browserButton, geometry_generation: browserGeometryGeneration, observe: z.boolean().optional() }),
     lease: true,
   },
   browser_double_click_at: {
     description: 'Double-click a visible browser viewport point and return the updated PNG.',
-    input: leaseOnly.extend({ ...browserPoint.shape, button: browserButton, geometry_generation: browserGeometryGeneration }),
+    input: leaseOnly.extend({ ...browserPoint.shape, button: browserButton, geometry_generation: browserGeometryGeneration, observe: z.boolean().optional() }),
     lease: true,
   },
   browser_hover_at: {
     description: 'Move the browser pointer to a visible viewport point and return the updated PNG.',
-    input: leaseOnly.extend({ ...browserPoint.shape, geometry_generation: browserGeometryGeneration }),
+    input: leaseOnly.extend({ ...browserPoint.shape, geometry_generation: browserGeometryGeneration, observe: z.boolean().optional() }),
     lease: true,
   },
   browser_drag: {
@@ -612,7 +613,7 @@ export const toolDefinitions = {
       start_y: browserPoint.shape.y,
       end_x: browserPoint.shape.x,
       end_y: browserPoint.shape.y,
-      geometry_generation: browserGeometryGeneration,
+      geometry_generation: browserGeometryGeneration, observe: z.boolean().optional(),
     }),
     lease: true,
   },
@@ -622,13 +623,13 @@ export const toolDefinitions = {
       ...browserPoint.shape,
       scroll_y: z.number().int().min(-10_000).max(10_000).default(600),
       scroll_x: z.number().int().min(-10_000).max(10_000).default(0),
-      geometry_generation: browserGeometryGeneration,
+      geometry_generation: browserGeometryGeneration, observe: z.boolean().optional(),
     }),
     lease: true,
   },
   browser_type_focused: {
     description: 'Type into the focused browser control and return updated PNG.',
-    input: leaseOnly.extend({ text: z.string().max(50_000) }),
+    input: leaseOnly.extend({ text: z.string().max(50_000), observe: z.boolean().optional() }),
     lease: true,
   },
   browser_inspect_at: {
@@ -638,7 +639,7 @@ export const toolDefinitions = {
   },
   browser_computer: {
     description: 'Run 1-20 visual browser actions and return one updated PNG.',
-    input: leaseOnly.extend({ actions: z.array(browserComputerAction).min(1).max(20), geometry_generation: browserGeometryGeneration }),
+    input: leaseOnly.extend({ actions: z.array(browserComputerAction).min(1).max(20), geometry_generation: browserGeometryGeneration, observe: z.boolean().optional() }),
     lease: true,
   },
   read_clipboard: {

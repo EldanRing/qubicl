@@ -80,10 +80,57 @@ attributes), inputs and textareas include a current `value`, `valueLength` and
 `valueTruncated`, separately from their accessible name. Values preserve
 whitespace and line breaks, are bounded to 1,500 UTF-16 code units without splitting
 a surrogate pair, and can be shortened further to respect the response budget.
-Use `browser_read` for longer document prose. Password values remain omitted.
+Use targeted `browser_read` with `mode: "value"` for the exact current value,
+including leading/trailing spaces and newlines, or its normal text mode for
+document prose. Password values remain omitted.
 
-`browser_select.value` accepts a string or an array of labels/values. Labels retain
-precedence when both could match. An array selects all requested options together
+Snapshots, refs and point inspection share the same control-name resolver:
+`aria-labelledby`, `aria-label`, native labels, then native/content alternatives.
+Names are bounded to 160 UTF-16 units; values are separate. Snapshot text combines
+those names and validation messages with visible document prose, rather than the
+browser library's raw accessibility serialization. Open shadow roots and assigned
+slots are traversed; closed shadow roots are not DOM-readable. Closed disclosures
+omit their concealed content but expose the summary ref and `expanded` state.
+
+Control metadata includes `readOnly`, `disabled`, `inert`, `blockedByModal` and
+`actionable`; native form `validation`; numeric `constraints` (`min`, `max`,
+`step`); checkbox state; and select `options` with distinct labels and values.
+File controls include `accept`, `multiple`, and selected files' name, size, MIME
+type and last-modified time, without a local path or file contents. Option/file
+inventories are bounded (at most 20 items and the shared response budget), with
+totals and truncation flags. Target `browser_read` with `mode: "control"` for a
+paginated JSON capture of full inventories and values. This is structured DOM
+state, not a guarantee that a control is unobscured or that an app will accept an
+action. Native modal dialogs, visible ARIA modal dialogs and inert ancestors mark
+background controls as blocked, including controls in child frames; semantic
+actions reject blocked targets before input.
+
+Snapshots include `focus` and `selection`; focused refs also carry these states.
+Input/textarea selections expose UTF-16 offsets and direction, with up to 256
+units of selected text. Document/editor selections expose text and anchor/focus
+offsets relative to their nodes. Password selections return only `redacted`.
+
+Scrollable regions receive refs and `scroll` metadata with position, client and
+content dimensions, and scrollable axes. Use `browser_scroll` with `ref`,
+`direction: "up" | "down" | "left" | "right"`, and `amount` to scroll that region
+directly and receive its resulting position. Omitting `ref` retains page-wheel
+scrolling. `browser_click` with `checked: true` or `false` sets a checkbox's state;
+repeating the same request does not toggle it again. Omit `checked` for an ordinary
+click. Read-only fields can still receive focus, but text entry is rejected.
+
+Semantic click/type/select/press/scroll and visual input tools accept optional
+`observe: true`. The result includes immediate text and focus from the acted-on
+frame before tab/pointer settling, plus up to eight brief DOM/live-region feedback
+strings (256 units each) recorded during the action. This can retain a toast
+removed before the next call. Observation is bounded and best-effort, not a
+transaction or proof of application success; navigation or closure may make it
+unavailable, and lost feedback capture reports `feedbackComplete: false`.
+Input is never repeated to obtain an observation. Existing calls remain valid and
+do not collect this extra observation unless requested.
+
+`browser_select.value` accepts a string or an array of labels/values. With the
+default `by: "auto"`, labels retain precedence when both could match. Use
+`by: "value"` for exact underlying values or `by: "label"` for labels. An array selects all requested options together
 and replaces the previous selection; `[]` clears it. Multiple values on a
 single-select are rejected before changing its selection.
 
@@ -96,11 +143,10 @@ dialogs. URL credentials, query strings and fragments are removed from metadata
 and absolute HTTP(S) URLs in messages; arbitrary secrets printed as ordinary
 console text cannot be inferred or automatically redacted.
 
-Browser snapshots never use password values as element names. The pinned browser
-library also includes password values in its raw accessibility text, so that text
-is omitted when password fields are present. Safe element refs remain available;
-`browser_read` reads page prose without extracting input values. This fallback
-should be revisited when the browser library provides a verified safe snapshot.
+Browser snapshots never use password values as element names and do not consume
+the browser library's raw accessibility text, which can contain passwords.
+Normal `browser_read` reads visible prose without extracting form values;
+explicit value/control modes still omit passwords and raw file-input paths.
 Viewport resizing advances geometry when dimensions change; old coordinate
 observations must be refreshed.
 

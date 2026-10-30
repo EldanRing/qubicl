@@ -11,11 +11,13 @@ import type {
   Download,
   ElementHandle,
   Frame,
+  JSHandle,
   Page,
 } from 'playwright-core';
 import { MODEL_TEXT_BUDGET_BYTES } from '@qubicl/core';
 import { QubiclError } from './errors.js';
 import { BrowserReader, type BrowserReadInput } from './browser-reading.js';
+import { browserDOM, frameBarriers, type BrowserControl, type BrowserDOMPage } from './browser-dom.js';
 import { isGloballyRoutableIp } from './network-address.js';
 import type { ViewerPointerAction, ViewerPointerUpdate } from './viewer-actions.js';
 import type { LeaseProof } from './lease.js';
@@ -82,7 +84,16 @@ interface PageState {
   title: string;
 }
 
+export interface BrowserActionOptions { observe?: boolean; }
+export interface BrowserClickOptions extends BrowserActionOptions { checked?: boolean; }
+export interface BrowserSelectOptions extends BrowserActionOptions { by?: 'auto' | 'label' | 'value'; }
+export interface BrowserScrollOptions extends BrowserActionOptions { ref?: string; }
+
 interface PageActionState extends PageState {
+  observation?: Record<string, unknown>;
+  checked?: boolean;
+  changed?: boolean;
+  scroll?: unknown;
   actedOnTabId: string;
   activeTabId: string | null;
   openedTabs: Array<{ tabId: string; url: string }>;
@@ -339,6 +350,7 @@ export class BrowserManager {
       const page = await this.getPage();
       const before = new Set(this.tabIds.keys());
       const locator = await this.referencedElement(ref);
+      await this.assertControl(ref, locator, true);
       await this.dispatchInput(() => locator.setInputFiles(selected));
       return { ...await this.actionState(page, before), uploaded: selected.map((path) => relative(this.home, path)) };
     });
@@ -506,88 +518,42 @@ export class BrowserManager {
       const frames = browserFrames(page);
       const frame = frames[frameIndex];
       if (!frame) throw new QubiclError('browser_frame_not_found', `Browser frame index ${frameIndex} was not found. Refresh browser_snapshot and retry.`, 404);
-      const selector = [
-        'a[href]',
-        'button',
-        'input:not([type=hidden])',
-        'textarea',
-        'select',
-        '[contenteditable=true], [contenteditable=""], [contenteditable=plaintext-only]',
-        '[role=button]',
-        '[role=link]',
-        '[role=checkbox]',
-        '[role=radio]',
-        '[role=tab]',
-        '[role=menuitem]',
-        '[role=option]',
-      ].join(',');
       const epoch = this.referenceEpoch;
-      const candidates = frame.locator(selector);
-      const totalCandidates = await candidates.count();
+      const barriers = await frameBarriers(frame);
+      const candidates = await frame.evaluateHandle(browserDOM, { mode: 'candidates' as const });
+      const totalCandidates = await candidates.evaluate((value) => (value as Element[]).length);
       const count = Math.min(Math.max(0, totalCandidates - cursor), MAX_SCANNED_INTERACTIVE_ELEMENTS);
       const generation = ++this.referenceGeneration;
       const handles = new Set<ElementHandle<SVGElement | HTMLElement>>();
       try {
-        const candidatesWithDetails: Array<{ index: number; locator: ElementHandle<SVGElement | HTMLElement>; details: { tag: string; role: string; name: string; type: string; disabled: boolean; value?: string; valueLength?: number; valueTruncated?: boolean } }> = [];
+        const candidatesWithDetails: Array<{ index: number; locator: ElementHandle<SVGElement | HTMLElement>; details: BrowserControl }> = [];
         let scannedCandidates = 0;
-        // Look ahead one visible candidate; hidden entries retain their DOM positions.
         for (let start = 0; start < count && candidatesWithDetails.length <= limit; start += 16) {
           scannedCandidates = Math.min(count, start + 16);
           const batch = await Promise.all(Array.from({ length: Math.min(16, count - start) }, async (_, offset) => {
             const index = cursor + start + offset;
-            // A model ref names this exact node, not a selector that can resolve to
-            // a different node after the page changes. Query without waiting for a
-            // vanished positional candidate to reappear.
-            const locator = await frame.$(`${selector} >> nth=${index}`).catch(() => null);
-            if (!locator) return undefined;
+            const handle = await candidates.getProperty(String(index));
+            const locator = handle.asElement() as ElementHandle<SVGElement | HTMLElement> | null;
+            if (!locator) { await handle.dispose(); return undefined; }
             handles.add(locator);
             if (!await locator.isVisible().catch(() => false)) return undefined;
-            const details = await locator.evaluate((element) => {
-              const clean = (value: string | null | undefined): string => (value ?? '').trim().replace(/\s+/g, ' ');
-              const text = clean(element.textContent);
-              const input = element as HTMLInputElement;
-              const labelledBy = clean(element.getAttribute('aria-labelledby'))
-                .split(' ')
-                .filter(Boolean)
-                .map((id) => clean(element.ownerDocument?.getElementById(id)?.textContent))
-                .filter(Boolean)
-                .join(' ');
-              const labels = [...(input.labels ?? [])].map((label) => clean(label.textContent)).filter(Boolean).join(' ');
-              const name = [
-                clean(element.getAttribute('aria-label')),
-                labelledBy,
-                labels,
-                clean(element.getAttribute('title')),
-                clean(element.getAttribute('placeholder')),
-                text,
-                input.type === 'password' ? '' : clean(input.value),
-              ].find(Boolean) ?? '';
-              const editable = (element as HTMLElement).isContentEditable;
-              const field = element.tagName === 'INPUT' || element.tagName === 'TEXTAREA';
-              const value = input.type === 'password' ? undefined
-                : editable ? (element as HTMLElement).innerText ?? element.textContent ?? ''
-                  : field ? input.value ?? '' : undefined;
-              // Keep the current editor contents distinct from its accessible
-              // label, and preserve whitespace/newlines. Passwords stay omitted.
-              const boundedValue = value?.slice(0, 1500).replace(/[\uD800-\uDBFF]$/u, '');
-              return {
-                tag: element.tagName.toLowerCase(),
-                role: element.getAttribute('role') ?? '',
-                name,
-                type: element.getAttribute('type') ?? '',
-                disabled: Boolean(input.disabled) || element.getAttribute('aria-disabled') === 'true',
-                ...(boundedValue === undefined ? {} : { value: boundedValue, valueLength: value!.length, valueTruncated: boundedValue.length < value!.length }),
-              };
-            }).catch(() => undefined);
-            return details ? { index, locator, details } : undefined;
+            return { index, locator };
           }));
-          for (const candidate of batch) if (candidate) candidatesWithDetails.push(candidate);
+          const observed = batch.filter((candidate) => candidate !== undefined);
+          const details = await frame.evaluate(browserDOM, { mode: 'describe-many' as const, barriers, elements: observed.map((candidate) => candidate.locator) }) as BrowserControl[];
+          for (const [index, candidate] of observed.entries()) if (details[index]) candidatesWithDetails.push({ ...candidate, details: details[index]! });
         }
-        // Playwright's ARIA text can include password values, even though our refs do not.
-        // Do not read raw ARIA text in that case. Browser reading still exposes page prose.
-        const passwordPresent = (await Promise.all(frames.map((item) => item.locator('input[type=password]').count().catch(() => 1)))).some((count) => count > 0);
-        const aria = passwordPresent ? 'Password fields present: raw accessibility text omitted for privacy. Use the element refs below and browser_read for page prose.'
-          : await frame.locator('body').ariaSnapshot({ timeout: 5000 }).catch(() => '');
+        const observation = await frame.evaluate(browserDOM, { mode: 'page' as const, maxBytes: 12_000, barriers }) as BrowserDOMPage;
+        if (observation.focus && typeof observation.focus.value === 'string') {
+          const bounded = truncateJsonText(observation.focus.value, 1024);
+          observation.focus.value = bounded.text;
+          observation.focus.valueTruncated ||= bounded.truncated;
+        }
+        const controlLines = candidatesWithDetails.map(({ details }) => {
+          const validation = details.validation as { message?: string } | undefined;
+          return `- ${details.role} ${JSON.stringify(details.name)}${details.readOnly ? ' [readonly]' : ''}${!details.actionable ? ' [blocked]' : ''}${validation?.message ? `: ${JSON.stringify(validation.message)}` : ''}`;
+        });
+        const aria = [...controlLines, observation.text].filter(Boolean).join('\n');
         const scroll = await page.evaluate(() => ({ x: Math.round(window.scrollX), y: Math.round(window.scrollY) }))
           .catch(() => ({ x: 0, y: 0 }));
         const state = await pageState(page);
@@ -600,6 +566,8 @@ export class BrowserManager {
           viewport: { ...viewportSize, deviceScaleFactor: 1 },
           geometryGeneration: await this.updateGeometry(page),
           scroll,
+          focus: observation.focus,
+          selection: observation.selection,
           generation,
           referenceRetention: { maxElements: MAX_RETAINED_REFERENCES, eviction: 'least-recently-observed' },
           frame: { index: frameIndex, url: truncateUtf8Text(frame.url(), 2048).text },
@@ -637,22 +605,28 @@ export class BrowserManager {
         for (const [candidateIndex, candidate] of candidatesWithDetails.entries()) {
           if (refs.length >= limit) { firstOmitted = candidate.index; break; }
           const ref = reusedRefs[candidateIndex] ?? `g${generation}e${refs.length + 1}`;
-          const record = {
-            ref,
-            role: candidate.details.role || candidate.details.tag,
-            name: candidate.details.name.slice(0, 160),
-            ...(candidate.details.type ? { type: candidate.details.type } : {}),
-            ...(candidate.details.disabled ? { disabled: true } : {}),
-            ...(candidate.details.value === undefined ? {} : {
-              value: candidate.details.value, valueLength: candidate.details.valueLength, valueTruncated: candidate.details.valueTruncated,
-            }),
-          };
+          const record: Record<string, unknown> = { ref, ...candidate.details };
+          // Variable-size inventories remain readable in full through a targeted
+          // browser_read(mode=control). Preserve semantic flags on small pages.
+          const allowance = Math.max(1024, Math.min(6000, MODEL_TEXT_BUDGET_BYTES - Buffer.byteLength(JSON.stringify({ ...base, refs })) - 256));
+          for (const key of ['options', 'files']) {
+            const items = record[key] as unknown[] | undefined;
+            if (!items) continue;
+            while (items.length && Buffer.byteLength(JSON.stringify(record)) > allowance) {
+              items.pop(); record[`${key}Truncated`] = true; record.metadataTruncated = true;
+            }
+          }
+          if (typeof record.value === 'string' && Buffer.byteLength(JSON.stringify(record)) > allowance) {
+            const excess = Buffer.byteLength(JSON.stringify(record)) - allowance + 64;
+            record.value = truncateJsonText(record.value, Math.max(0, Buffer.byteLength(JSON.stringify(record.value)) - 2 - excess)).text;
+            record.valueTruncated = true;
+          }
           const prospective = {
             ...base,
             refs: [...refs, record],
             truncated: { snapshot: boundedSnapshot.truncated, refs: false },
           };
-          if (!refs.length && record.value !== undefined) {
+          if (!refs.length && typeof record.value === 'string') {
             const excess = Buffer.byteLength(JSON.stringify(prospective)) - (MODEL_TEXT_BUDGET_BYTES - 64);
             if (excess > 0) {
               record.value = truncateJsonText(record.value, Math.max(0, Buffer.byteLength(JSON.stringify(record.value)) - 2 - excess)).text;
@@ -661,6 +635,7 @@ export class BrowserManager {
           }
           if (Buffer.byteLength(JSON.stringify(prospective)) > MODEL_TEXT_BUDGET_BYTES - 64) { firstOmitted = candidate.index; break; }
           refs.push(record);
+          if (record.focused && base.focus) base.focus.ref = ref;
           references.set(ref, this.references.get(ref) ?? candidate.locator);
         }
         if (epoch !== this.referenceEpoch) {
@@ -684,11 +659,12 @@ export class BrowserManager {
           ...base,
           refs,
           truncated: {
-            snapshot: boundedSnapshot.truncated,
+            snapshot: boundedSnapshot.truncated || observation.textTruncated,
             refs: base.scan.nextCursor !== null,
           },
         };
       } finally {
+        await candidates.dispose().catch(() => undefined);
         await Promise.all([...handles].map((handle) => handle.dispose().catch(() => undefined)));
       }
     });
@@ -703,15 +679,20 @@ export class BrowserManager {
     });
   }
 
-  async click(ref: string, button: 'left' | 'right'): Promise<PageActionState> {
-    return (await this.clickWithViewerPointer(ref, button)).result;
+  async click(ref: string, button: 'left' | 'right', options: BrowserClickOptions = {}): Promise<PageActionState> {
+    return (await this.clickWithViewerPointer(ref, button, undefined, options)).result;
   }
 
-  clickWithViewerPointer(ref: string, button: 'left' | 'right', generation?: number): Promise<BrowserViewerResult<PageActionState>> {
+  clickWithViewerPointer(ref: string, button: 'left' | 'right', generation?: number, options: BrowserClickOptions = {}): Promise<BrowserViewerResult<PageActionState>> {
     return this.enqueue(async () => {
       const page = await this.getPage();
       const before = new Set(this.tabIds.keys());
       const locator = await this.referencedElement(ref);
+      const control = await this.assertControl(ref, locator);
+      if (options.checked !== undefined && (button !== 'left' || control.role !== 'checkbox')) {
+        throw new QubiclError('browser_checked_target_invalid', 'Use checked with a left-button checkbox reference.', 409, { dispatch: 'not-started' });
+      }
+      const wasChecked = options.checked === undefined ? undefined : await locator.isChecked();
       // Playwright clicks scroll refs into view. Do that explicitly before
       // sampling the box so the viewer receipt describes the actual target.
       await this.dispatchInput(() => locator.scrollIntoViewIfNeeded({ timeout: 15_000 }));
@@ -725,21 +706,28 @@ export class BrowserManager {
           })
         : undefined;
       const publication = pointer ? await this.beginViewerPointer(pointer, generation) : undefined;
+      let observation: Record<string, unknown> | undefined;
       try {
-        await this.dispatchInput(() => locator.click({ button, timeout: 15_000 }));
+        ({ observation } = await this.observeAction(page, options.observe, async () => {
+          await this.dispatchInput(() => options.checked === undefined ? locator.click({ button, timeout: 15_000 })
+            : locator.setChecked(options.checked, { timeout: 15_000 }));
+        }, this.referenceFrames.get(ref)));
+
         if (publication) await this.finishViewerPointer(publication, generation!, 'confirm');
       } catch (error) {
         if (publication) await this.finishViewerPointer(publication, generation!, 'cancel');
         throw error;
       }
       await this.enforceTabLimit(await this.getContext(), this.activePage);
-      return { result: await this.actionState(page, before), pointerActions: pointer && !publication ? [pointer] : [] };
+      return { result: { ...await this.actionState(page, before), ...(observation ? { observation } : {}),
+        ...(options.checked === undefined ? {} : { checked: options.checked, changed: wasChecked !== options.checked }) }, pointerActions: pointer && !publication ? [pointer] : [] };
     });
   }
 
-  type(ref: string, text: string, submit: boolean, clear: boolean): Promise<PageActionState> {
+  type(ref: string, text: string, submit: boolean, clear: boolean, options: BrowserActionOptions = {}): Promise<PageActionState> {
     return this.act(async (page) => {
       const locator = await this.referencedElement(ref);
+      await this.assertControl(ref, locator, true);
       if (clear) {
         await this.dispatchInput(() => locator.fill(text));
       } else {
@@ -749,39 +737,51 @@ export class BrowserManager {
       }
       if (submit) await this.dispatchInput(() => locator.press('Enter'));
       return page;
-    });
+    }, 0, options, ref);
   }
 
-  select(ref: string, value: string | string[]): Promise<PageActionState> {
+  select(ref: string, value: string | string[], options: BrowserSelectOptions = {}): Promise<PageActionState> {
     return this.act(async (page) => {
       const locator = await this.referencedElement(ref);
+      await this.assertControl(ref, locator, true);
       const values = Array.isArray(value) ? value : [value];
       const labels = await locator.evaluate((node, requested) => {
         const select = node as HTMLSelectElement;
         return { multiple: Boolean(select.multiple), labels: requested.map((label) => Array.from(select.options ?? []).some((option) => option.label === label)) };
       }, values);
       if (values.length > 1 && !labels.multiple) throw new QubiclError('browser_select_not_multiple', 'This select does not accept multiple options. No selection was changed.', 409, { dispatch: 'not-started' });
-      const options = values.map((item, index) => labels.labels[index] ? { label: item } : { value: item });
-      await this.dispatchInput(() => locator.selectOption(Array.isArray(value) ? options : options[0]!));
+      const selected = values.map((item, index) => options.by === 'label' || (options.by !== 'value' && labels.labels[index]) ? { label: item } : { value: item });
+      await this.dispatchInput(() => locator.selectOption(Array.isArray(value) ? selected : selected[0]!));
       return page;
-    });
+    }, 0, options, ref);
   }
 
-  press(key: string, ref?: string): Promise<PageActionState> {
+  press(key: string, ref?: string, options: BrowserActionOptions = {}): Promise<PageActionState> {
     return this.act(async (page) => {
       if (ref) {
         const locator = await this.referencedElement(ref);
+        await this.assertControl(ref, locator);
         await this.dispatchInput(() => locator.press(key));
       } else await this.dispatchInput(() => page.keyboard.press(key));
       return page;
-    });
+    }, 0, options, ref);
   }
 
-  scroll(direction: 'up' | 'down', amount: number): Promise<PageActionState> {
+  scroll(direction: 'up' | 'down' | 'left' | 'right', amount: number, options: BrowserScrollOptions = {}): Promise<PageActionState> {
+    let scroll: unknown;
     return this.act(async (page) => {
-      await this.dispatchInput(() => page.mouse.wheel(0, direction === 'up' ? -amount : amount));
+      const delta = direction === 'up' || direction === 'left' ? -amount : amount;
+      const horizontal = direction === 'left' || direction === 'right';
+      if (options.ref) {
+        const locator = await this.referencedElement(options.ref);
+        const control = await this.assertControl(options.ref, locator);
+        if (!control.scroll) throw new QubiclError('browser_target_not_scrollable', 'This reference has no scrollable overflow.', 409, { dispatch: 'not-started' });
+        await this.dispatchInput(() => locator.evaluate((element, movement) => element.scrollBy({ ...movement, behavior: 'instant' }),
+          { left: horizontal ? delta : 0, top: horizontal ? 0 : delta }));
+        scroll = (await this.describeControl(options.ref, locator)).scroll;
+      } else await this.dispatchInput(() => page.mouse.wheel(horizontal ? delta : 0, horizontal ? 0 : delta));
       return page;
-    });
+    }, 0, options, options.ref).then((result) => ({ ...result, ...(scroll ? { scroll } : {}) }));
   }
 
   history(action: 'back' | 'forward' | 'reload'): Promise<HistoryState> {
@@ -928,28 +928,15 @@ export class BrowserManager {
     return this.computer([{ type: 'scroll', x, y, scroll_x: scrollX, scroll_y: scrollY }]) as Promise<BrowserImage & { actionCount: 1 }>;
   }
 
-  typeFocused(text: string): Promise<BrowserImage & { actionCount: 1 }> {
-    return this.computer([{ type: 'type', text }]) as Promise<BrowserImage & { actionCount: 1 }>;
+  typeFocused(text: string, options: BrowserActionOptions = {}): Promise<BrowserImage & { actionCount: 1 }> {
+    return this.computerWithViewerPointers([{ type: 'type', text }], undefined, undefined, options).then(({ result }) => result as BrowserImage & { actionCount: 1 });
   }
 
   inspectAt(x: number, y: number, geometryGeneration?: number): Promise<Record<string, unknown>> {
     return this.enqueue(async () => {
       const page = await this.getPage();
       await this.assertGeometry(page, geometryGeneration);
-      const elements = await page.evaluate(({ pointX, pointY }) => document.elementsFromPoint(pointX, pointY).slice(0, 12).map((element) => {
-        const rect = element.getBoundingClientRect();
-        const style = window.getComputedStyle(element);
-        const text = (element.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, 240);
-        return {
-          tag: element.tagName.toLowerCase(),
-          id: element.id,
-          classes: Array.from(element.classList).slice(0, 12),
-          role: element.getAttribute('role') ?? '',
-          name: element.getAttribute('aria-label') ?? element.getAttribute('title') ?? text,
-          cursor: style.cursor,
-          box: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
-        };
-      }), { pointX: x, pointY: y });
+      const elements = await page.evaluate(browserDOM, { mode: 'point' as const, x, y });
       const size = browserViewportSize(page);
       return { ...await pageState(page), viewport: { ...size, deviceScaleFactor: 1 }, geometryGeneration: await this.updateGeometry(page), point: { x, y }, elements };
     });
@@ -959,7 +946,7 @@ export class BrowserManager {
     return (await this.computerWithViewerPointers(actions)).result;
   }
 
-  computerWithViewerPointers(actions: BrowserComputerAction[], generation?: number, geometryGeneration?: number): Promise<BrowserViewerResult<BrowserImage & { actionCount: number }>> {
+  computerWithViewerPointers(actions: BrowserComputerAction[], generation?: number, geometryGeneration?: number, options: BrowserActionOptions = {}): Promise<BrowserViewerResult<BrowserImage & { actionCount: number }>> {
     return this.enqueue(async () => {
       if (actions.length < 1 || actions.length > MAX_COMPUTER_ACTIONS) {
         throw new QubiclError('browser_actions_invalid', `Browser computer actions must contain 1 through ${MAX_COMPUTER_ACTIONS} entries.`, 400);
@@ -974,12 +961,15 @@ export class BrowserManager {
       const before = new Set(this.tabIds.keys());
       await this.assertGeometry(page, geometryGeneration);
       const pointerActions: ViewerPointerAction[] = [];
+      let observation: Record<string, unknown> | undefined;
+      const feedback: unknown[] = [];
       for (const action of actions) {
         const dialogSequence = this.dialogSequence;
         const pointer = await browserViewerPointerForAction(page, action);
         const publication = pointer ? await this.beginViewerPointer(pointer, generation) : undefined;
         try {
-          await this.dispatchInput(() => runComputerAction(page, action, (input) => this.dispatchInput(input)));
+          ({ observation } = await this.observeAction(page, options.observe, () => this.dispatchInput(() => runComputerAction(page, action, (input) => this.dispatchInput(input)))));
+          feedback.push(...(observation?.feedback as unknown[] ?? []));
           if (dialogSequence !== this.dialogSequence) throw new QubiclError('browser_batch_interrupted', 'A dialog interrupted the action batch. Observe the page and issue only the remaining actions.', 409, { dispatch: 'started' });
           if (publication) await this.finishViewerPointer(publication, generation!, 'confirm');
         } catch (error) {
@@ -995,7 +985,8 @@ export class BrowserManager {
       page = await this.getPage();
       const image = await page.screenshot({ type: 'png', fullPage: false, animations: 'disabled', timeout: 30_000 });
       return {
-        result: { ...await pageState(page), ...await this.imageResult(page, image), ...this.actionTabs(target, before), actionCount: actions.length },
+        result: { ...await pageState(page), ...await this.imageResult(page, image), ...this.actionTabs(target, before), actionCount: actions.length,
+          ...(observation ? { observation: { ...observation, feedback: feedback.slice(-8) } } : {}) },
         pointerActions,
       };
     });
@@ -1034,14 +1025,55 @@ export class BrowserManager {
     }
   }
 
-  private act(operation: (page: Page) => Promise<Page>, settleMilliseconds = 0): Promise<PageActionState> {
+  private async describeControl(ref: string, element: ElementHandle<SVGElement | HTMLElement>): Promise<BrowserControl> {
+    const frame = this.referenceFrames.get(ref) ?? await element.ownerFrame();
+    if (!frame) throw new QubiclError('stale_browser_ref', 'The referenced frame no longer exists.', 409);
+    return await frame.evaluate(browserDOM, { mode: 'describe' as const, element, barriers: await frameBarriers(frame) }) as BrowserControl;
+  }
+
+  private async assertControl(ref: string, element: ElementHandle<SVGElement | HTMLElement>, editing = false): Promise<BrowserControl> {
+    const control = await this.describeControl(ref, element);
+    if (!control.actionable || (editing && control.readOnly)) {
+      throw new QubiclError('browser_control_unavailable', control.blockedByModal ? 'This control is blocked by a modal dialog.'
+        : editing && control.readOnly ? 'This control is read-only.' : 'This control is hidden, disabled or inert.', 409, { dispatch: 'not-started', control });
+    }
+    return control;
+  }
+
+  /** Observe before tab/pointer settling; never replay an action if observation fails. */
+  private async observeAction<T>(page: Page, enabled: boolean | undefined, operation: () => Promise<T>, targetFrame?: Frame): Promise<{ value: T; observation?: Record<string, unknown> }> {
+    if (!enabled) return { value: await operation() };
+    const frame = targetFrame ?? page.mainFrame();
+    let watcher: JSHandle | undefined;
+    try { watcher = await frame.evaluateHandle(browserDOM, { mode: 'watch' as const }); } catch { /* Navigation can replace the document before observation starts. */ }
+    try {
+      const value = await operation();
+      let observation: Record<string, unknown>;
+      try {
+        const state = await frame.evaluate(browserDOM, { mode: 'page' as const, maxBytes: 6000, barriers: await frameBarriers(frame) }) as BrowserDOMPage;
+        observation = { ...state, tabId: this.tabId(page), frameIndex: browserFrames(page).indexOf(frame), capturedAt: new Date().toISOString() };
+      } catch { observation = { status: 'unavailable', reason: 'The document changed or closed before it could be observed.' }; }
+      try {
+        const feedback = await watcher?.evaluate((value) => (value as { finish(): Record<string, unknown> }).finish());
+        Object.assign(observation, feedback ?? { feedback: [], feedbackComplete: false });
+      } catch { Object.assign(observation, { feedback: [], feedbackComplete: false }); }
+      return { value, observation };
+    } finally {
+      if (watcher) {
+        await watcher.evaluate((value) => (value as { finish(): unknown }).finish()).catch(() => undefined);
+        await watcher.dispose().catch(() => undefined);
+      }
+    }
+  }
+
+  private act(operation: (page: Page) => Promise<Page>, settleMilliseconds = 0, options: BrowserActionOptions = {}, ref?: string): Promise<PageActionState> {
     return this.enqueue(async () => {
       const target = await this.getPage();
       const before = new Set(this.tabIds.keys());
-      const page = await operation(target);
+      const { value: page, observation } = await this.observeAction(target, options.observe, () => operation(target), ref ? this.referenceFrames.get(ref) : undefined);
       if (settleMilliseconds) await page.waitForTimeout(settleMilliseconds);
       await this.enforceTabLimit(await this.getContext(), this.activePage);
-      return this.actionState(page, before);
+      return { ...await this.actionState(page, before), ...(observation ? { observation } : {}) };
     });
   }
 

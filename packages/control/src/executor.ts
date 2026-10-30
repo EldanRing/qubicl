@@ -578,15 +578,15 @@ export class ToolExecutor {
       case 'browser_screenshot':
         return respond(await runBrowser(() => this.browser.screenshot(input.full_page as boolean)));
       case 'browser_click':
-        return respond(respondBrowser(await runBrowser(() => this.browser.clickWithViewerPointer(input.ref as string, input.button as 'left' | 'right', owner!.generation))));
+        return respond(respondBrowser(await runBrowser(() => this.browser.clickWithViewerPointer(input.ref as string, input.button as 'left' | 'right', owner!.generation, input))));
       case 'browser_type':
-        return respond(await runBrowser(() => this.browser.type(input.ref as string, input.text as string, input.submit as boolean, input.clear as boolean)));
+        return respond(await runBrowser(() => this.browser.type(input.ref as string, input.text as string, input.submit as boolean, input.clear as boolean, input)));
       case 'browser_select':
-        return respond(await runBrowser(() => this.browser.select(input.ref as string, input.value as string | string[])));
+        return respond(await runBrowser(() => this.browser.select(input.ref as string, input.value as string | string[], input)));
       case 'browser_press':
-        return respond(await runBrowser(() => this.browser.press(input.key as string, input.ref as string | undefined)));
+        return respond(await runBrowser(() => this.browser.press(input.key as string, input.ref as string | undefined, input)));
       case 'browser_scroll':
-        return respond(await runBrowser(() => this.browser.scroll(input.direction as 'up' | 'down', input.amount as number)));
+        return respond(await runBrowser(() => this.browser.scroll(input.direction as 'up' | 'down' | 'left' | 'right', input.amount as number, input)));
       case 'browser_history':
         return respond(await runBrowser(() => this.browser.history(input.action as 'back' | 'forward' | 'reload')));
       case 'browser_wait':
@@ -621,15 +621,15 @@ export class ToolExecutor {
       case 'browser_click_at':
         return respond(respondBrowser(await runBrowser(() => this.browser.computerWithViewerPointers([{
           type: 'click', x: input.x as number, y: input.y as number, button: input.button as BrowserMouseButton,
-        }], owner!.generation, input.geometry_generation as number | undefined))));
+        }], owner!.generation, input.geometry_generation as number | undefined, input))));
       case 'browser_double_click_at':
         return respond(respondBrowser(await runBrowser(() => this.browser.computerWithViewerPointers([{
           type: 'double_click', x: input.x as number, y: input.y as number, button: input.button as BrowserMouseButton,
-        }], owner!.generation, input.geometry_generation as number | undefined))));
+        }], owner!.generation, input.geometry_generation as number | undefined, input))));
       case 'browser_hover_at':
         return respond(respondBrowser(await runBrowser(() => this.browser.computerWithViewerPointers([{
           type: 'move', x: input.x as number, y: input.y as number,
-        }], owner!.generation, input.geometry_generation as number | undefined))));
+        }], owner!.generation, input.geometry_generation as number | undefined, input))));
       case 'browser_drag':
         return respond(respondBrowser(await runBrowser(() => this.browser.computerWithViewerPointers([{
           type: 'drag',
@@ -637,7 +637,7 @@ export class ToolExecutor {
             { x: input.start_x as number, y: input.start_y as number },
             { x: input.end_x as number, y: input.end_y as number },
           ],
-        }], owner!.generation, input.geometry_generation as number | undefined))));
+        }], owner!.generation, input.geometry_generation as number | undefined, input))));
       case 'browser_scroll_at':
         return respond(respondBrowser(await runBrowser(() => this.browser.computerWithViewerPointers([{
           type: 'scroll',
@@ -645,13 +645,13 @@ export class ToolExecutor {
           y: input.y as number,
           scroll_x: input.scroll_x as number,
           scroll_y: input.scroll_y as number,
-        }], owner!.generation, input.geometry_generation as number | undefined))));
+        }], owner!.generation, input.geometry_generation as number | undefined, input))));
       case 'browser_type_focused':
-        return respond(await runBrowser(() => this.browser.typeFocused(input.text as string)));
+        return respond(await runBrowser(() => this.browser.typeFocused(input.text as string, input)));
       case 'browser_inspect_at':
         return respond(await runBrowser(() => this.browser.inspectAt(input.x as number, input.y as number, input.geometry_generation as number | undefined)));
       case 'browser_computer':
-        return respond(respondBrowser(await runBrowser(() => this.browser.computerWithViewerPointers(input.actions as BrowserComputerAction[], owner!.generation, input.geometry_generation as number | undefined))));
+        return respond(respondBrowser(await runBrowser(() => this.browser.computerWithViewerPointers(input.actions as BrowserComputerAction[], owner!.generation, input.geometry_generation as number | undefined, input))));
       case 'read_clipboard': {
         return respond(await this.desktop.readClipboard());
       }

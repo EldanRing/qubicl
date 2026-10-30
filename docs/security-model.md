@@ -86,6 +86,11 @@ Do not place secrets in a Qubicl home that you would not give to container-root 
   not make GUI effects atomic. Queued desktop input rechecks interactive
   ownership before dispatch. Authenticated `browser_read` captures stay within
   the persistent browser controller and never enter anonymous web extraction.
+  Exact-value reads are explicitly targeted; structured observations omit password
+  values/selections and raw file-input paths. Shared DOM inspection marks modal
+  and inert targets blocked, including through parent frames, and semantic input
+  rejects them before dispatch. These DOM observations remain untrusted page data;
+  they are not an atomic promise that a page will accept an action.
 - Browser-capable images use a dedicated persistent Chromium profile and a
   bounded Playwright controller. Chromium remains the unprivileged `qubicl`
   user and its Linux namespace plus renderer seccomp-BPF sandboxes stay enabled.

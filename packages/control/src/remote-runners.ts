@@ -202,12 +202,12 @@ export class RemoteBrowserManager extends BrowserManager {
   override read(input: Parameters<BrowserManager['read']>[0]): ReturnType<BrowserManager['read']> { return this.invoke('read', [input]); }
   override snapshot(cursor = 0, limit = 200, frameIndex = 0, frameCursor = 0): ReturnType<BrowserManager['snapshot']> { return this.invoke('snapshot', [cursor, limit, frameIndex, frameCursor]); }
   override screenshot(fullPage: boolean): ReturnType<BrowserManager['screenshot']> { return this.invoke('screenshot', [fullPage]); }
-  override click(ref: string, button: 'left' | 'right'): ReturnType<BrowserManager['click']> { return this.invoke('click', [ref, button]); }
-  override clickWithViewerPointer(ref: string, button: 'left' | 'right', generation?: number): ReturnType<BrowserManager['clickWithViewerPointer']> { return this.invoke('clickWithViewerPointer', [ref, button, generation]); }
-  override type(ref: string, text: string, submit: boolean, clear: boolean): ReturnType<BrowserManager['type']> { return this.invoke('type', [ref, text, submit, clear]); }
-  override select(ref: string, value: string | string[]): ReturnType<BrowserManager['select']> { return this.invoke('select', [ref, value]); }
-  override press(key: string, ref?: string): ReturnType<BrowserManager['press']> { return this.invoke('press', [key, ref]); }
-  override scroll(direction: 'up' | 'down', amount: number): ReturnType<BrowserManager['scroll']> { return this.invoke('scroll', [direction, amount]); }
+  override click(ref: string, button: 'left' | 'right', options: Parameters<BrowserManager['click']>[2] = {}): ReturnType<BrowserManager['click']> { return this.invoke('click', [ref, button, options]); }
+  override clickWithViewerPointer(ref: string, button: 'left' | 'right', generation?: number, options: Parameters<BrowserManager['clickWithViewerPointer']>[3] = {}): ReturnType<BrowserManager['clickWithViewerPointer']> { return this.invoke('clickWithViewerPointer', [ref, button, generation, options]); }
+  override type(ref: string, text: string, submit: boolean, clear: boolean, options: Parameters<BrowserManager['type']>[4] = {}): ReturnType<BrowserManager['type']> { return this.invoke('type', [ref, text, submit, clear, options]); }
+  override select(ref: string, value: string | string[], options: Parameters<BrowserManager['select']>[2] = {}): ReturnType<BrowserManager['select']> { return this.invoke('select', [ref, value, options]); }
+  override press(key: string, ref?: string, options: Parameters<BrowserManager['press']>[2] = {}): ReturnType<BrowserManager['press']> { return this.invoke('press', [key, ref, options]); }
+  override scroll(direction: 'up' | 'down' | 'left' | 'right', amount: number, options: Parameters<BrowserManager['scroll']>[2] = {}): ReturnType<BrowserManager['scroll']> { return this.invoke('scroll', [direction, amount, options]); }
   override history(action: 'back' | 'forward' | 'reload'): ReturnType<BrowserManager['history']> { return this.invoke('history', [action]); }
   override wait(milliseconds: number): ReturnType<BrowserManager['wait']> { return this.invoke('wait', [milliseconds]); }
   override tabs(): ReturnType<BrowserManager['tabs']> { return this.invoke('tabs', []); }
@@ -227,10 +227,10 @@ export class RemoteBrowserManager extends BrowserManager {
   override hoverAt(x: number, y: number, geometryGeneration?: number): ReturnType<BrowserManager['hoverAt']> { return this.invoke('hoverAt', [x, y, geometryGeneration]); }
   override drag(startX: number, startY: number, endX: number, endY: number): ReturnType<BrowserManager['drag']> { return this.invoke('drag', [startX, startY, endX, endY]); }
   override scrollAt(x: number, y: number, scrollX: number, scrollY: number): ReturnType<BrowserManager['scrollAt']> { return this.invoke('scrollAt', [x, y, scrollX, scrollY]); }
-  override typeFocused(text: string): ReturnType<BrowserManager['typeFocused']> { return this.invoke('typeFocused', [text]); }
+  override typeFocused(text: string, options: Parameters<BrowserManager['typeFocused']>[1] = {}): ReturnType<BrowserManager['typeFocused']> { return this.invoke('typeFocused', [text, options]); }
   override inspectAt(x: number, y: number, geometryGeneration?: number): ReturnType<BrowserManager['inspectAt']> { return this.invoke('inspectAt', [x, y, geometryGeneration]); }
   override computer(actions: BrowserComputerAction[]): ReturnType<BrowserManager['computer']> { return this.invoke('computer', [actions]); }
-  override computerWithViewerPointers(actions: BrowserComputerAction[], generation?: number, geometryGeneration?: number): ReturnType<BrowserManager['computerWithViewerPointers']> { return this.invoke('computerWithViewerPointers', [actions, generation, geometryGeneration]); }
+  override computerWithViewerPointers(actions: BrowserComputerAction[], generation?: number, geometryGeneration?: number, options: Parameters<BrowserManager['computerWithViewerPointers']>[3] = {}): ReturnType<BrowserManager['computerWithViewerPointers']> { return this.invoke('computerWithViewerPointers', [actions, generation, geometryGeneration, options]); }
   override renderForExtraction(url: string): ReturnType<BrowserManager['renderForExtraction']> { return this.invoke('renderForExtraction', [url]); }
   override async shutdown(): Promise<void> {
     if (!this.active) return;

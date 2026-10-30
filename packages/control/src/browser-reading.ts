@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { ElementHandle, Frame, Page } from 'playwright-core';
 import { QubiclError } from './errors.js';
+import { browserDOM, frameBarriers } from './browser-dom.js';
 
 const MAX_DOCUMENT_BYTES = 8_000_000;
 const MAX_RETAINED_BYTES = 16_000_000;
@@ -14,6 +15,7 @@ export interface BrowserReadInput {
   ref?: string;
   query?: string;
   caseSensitive?: boolean;
+  mode?: 'text' | 'value' | 'control';
 }
 
 interface ReadDocument {
@@ -29,6 +31,7 @@ interface ReadDocument {
   frameIndex: number;
   query?: string;
   caseSensitive: boolean;
+  mode: 'text' | 'value' | 'control';
 }
 
 /** Captured text is immutable; navigation invalidates its document handle. */
@@ -36,13 +39,13 @@ export class BrowserReader {
   private readonly documents = new Map<string, ReadDocument>();
   constructor(private readonly now = Date.now) {}
 
-  async read(page: Page, input: BrowserReadInput, rootRef?: ElementHandle): Promise<Record<string, unknown>> {
+  async read(page: Page, input: BrowserReadInput, rootRef?: ElementHandle<SVGElement | HTMLElement>): Promise<Record<string, unknown>> {
     await this.expire();
     let document: ReadDocument;
     let offset = 0;
     if (input.cursor) {
       if (input.frameIndex !== undefined || input.selector !== undefined || input.ref !== undefined
-          || input.query !== undefined || input.caseSensitive !== undefined) {
+          || input.query !== undefined || input.caseSensitive !== undefined || input.mode !== undefined) {
         throw new QubiclError('browser_read_arguments', 'Continue with cursor and optional maxBytes only; start a new read to change its scope or query.');
       }
       const match = /^([a-f0-9]{24}):(\d{1,8})$/u.exec(input.cursor);
@@ -56,6 +59,7 @@ export class BrowserReader {
       }
     } else {
       if (input.ref && input.selector) throw new QubiclError('browser_read_arguments', 'Choose either ref or selector, not both.');
+      if (input.mode && input.mode !== 'text' && !input.ref && !input.selector) throw new QubiclError('browser_read_arguments', 'Value/control reads require a targeted ref or selector.');
       const frameIndex = input.frameIndex ?? 0;
       const frame = page.frames()[frameIndex];
       if (!frame) throw new QubiclError('browser_frame_not_found', 'Requested browser frame was not found.', 404);
@@ -68,11 +72,9 @@ export class BrowserReader {
         throw staleRead();
       }
       try {
-        const captured = await root.evaluate((element, maximumBytes) => {
-          const text = (element as HTMLElement).innerText ?? element.textContent ?? '';
-          const bytes = new TextEncoder().encode(text).length;
-          return { text: bytes > maximumBytes ? null : text, bytes };
-        }, MAX_DOCUMENT_BYTES);
+        const captured = await frame.evaluate(browserDOM, { mode: input.mode ?? ('text' as const), element: root, maxBytes: MAX_DOCUMENT_BYTES, barriers: await frameBarriers(frame) }) as { text: string | null; bytes: number; error?: string };
+        if (captured.error) throw new QubiclError('browser_read_value_unavailable', captured.error === 'sensitive_value'
+          ? 'Password and file-input values are not exposed. Use control mode for safe file metadata.' : 'The target is not an input, textarea or editable control.', 409);
         if (captured.text === null) {
           throw new QubiclError('browser_read_too_large', `This subtree exceeds ${MAX_DOCUMENT_BYTES} bytes. Select a smaller subtree; no partial document was retained.`, 413);
         }
@@ -81,6 +83,7 @@ export class BrowserReader {
           text: captured.text, bytes: captured.bytes, capturedAt: this.now(),
           url: frame.url().slice(0, 1024), title: (await page.title()).slice(0, 256), frameIndex,
           ...(input.query === undefined ? {} : { query: input.query }), caseSensitive: input.caseSensitive ?? false,
+          mode: input.mode ?? ('text' as const),
         };
         if (!await this.connected(document)) throw staleRead();
         while (this.documents.size >= 4 || this.retainedBytes() + document.bytes > MAX_RETAINED_BYTES) {
@@ -100,6 +103,7 @@ export class BrowserReader {
       expiresAt: new Date(document.capturedAt + RETENTION_MS).toISOString(),
       url: document.url, title: document.title, frameIndex: document.frameIndex,
       source: 'authenticated_browser', consistency: 'captured_document',
+      mode: document.mode,
       totalCharacters: document.text.length, offsetUnit: 'utf16', ...result,
       nextCursor: result.nextOffset === null ? null : `${document.id}:${result.nextOffset}`,
     };

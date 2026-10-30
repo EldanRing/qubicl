@@ -64,7 +64,18 @@ subtree or an observed `ref`, and `frameIndex` to choose a frame. `browser_snaps
 `nextFrameCursor` using `frameCursor` to discover further frames. `query` performs
 literal text search (`caseSensitive` is optional) and returns match offsets and
 short excerpts. Without a query it returns text. `maxBytes` controls the encoded
-content budget (512–16,000 bytes; default 12,000).
+content budget (512–16,000 bytes; default 12,000). Visible text inside open shadow
+roots and slotted content participates in reading and search; hidden content and
+closed disclosure bodies do not. Closed shadow roots remain inaccessible to DOM
+reading.
+
+The default `mode: "text"` reads prose. With a ref or selector,
+`mode: "value"` reads the current input/textarea/editor value exactly, preserving
+whitespace and line breaks. `mode: "control"` reads JSON control metadata with
+full option/file inventories and current values. These modes use the same capture,
+search and continuation contract. Password values and raw file-input paths are
+never returned; file metadata is available in control mode. Choose the mode only
+on the initial call, then continue with cursor and optional maxBytes.
 
 Continue using `nextCursor` and optional `maxBytes` only. All pages come from the
 same captured text, identified by `documentId` and `capturedAt`, even if the live
