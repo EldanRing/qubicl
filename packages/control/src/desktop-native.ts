@@ -9,7 +9,7 @@ export interface DesktopWindow {
   geometryToken: string; transientFor: number | null; modal: boolean; active: boolean;
 }
 export interface DesktopSnapshotInput {
-  windowId: number; cursor?: string; ref?: string; limit?: number; maxBytes?: number; includeHidden?: boolean;
+  windowId: number; cursor?: string; ref?: string; limit?: number; maxBytes?: number; includeHidden?: boolean; textOffset?: number; textCursor?: string;
 }
 export interface DesktopElementAction {
   ref: string; action: 'invoke' | 'focus' | 'set_text'; actionName?: string; text?: string;
@@ -35,7 +35,7 @@ export class NativeDesktopManager {
       case 'windows': return this.windows(input.cursor as number | undefined);
       case 'snapshot': return this.snapshot(input as unknown as DesktopSnapshotInput);
       case 'act': return this.act(input as unknown as DesktopElementAction);
-      case 'windowAction': return this.windowAction(input.windowId as number, input.action as 'focus' | 'close', input.geometryToken as string | undefined);
+      case 'windowAction': return this.windowAction(input.windowId as number, input.action as 'focus' | 'close' | 'fit', input.geometryToken as string | undefined);
       default: throw new QubiclError('invalid_desktop_method', 'Unsupported desktop operation.', 400);
     }
   }
@@ -43,7 +43,7 @@ export class NativeDesktopManager {
   windows(cursor = 0): Promise<Record<string, unknown>> { return this.request('windows', { cursor }); }
   snapshot(input: DesktopSnapshotInput): Promise<Record<string, unknown>> { return this.request('snapshot', input); }
   act(input: DesktopElementAction): Promise<Record<string, unknown>> { return this.interact(() => this.request('act', input)); }
-  windowAction(windowId: number, action: 'focus' | 'close', geometryToken?: string): Promise<Record<string, unknown>> {
+  windowAction(windowId: number, action: 'focus' | 'close' | 'fit', geometryToken?: string): Promise<Record<string, unknown>> {
     return this.interact(() => this.request('window_action', { windowId, action, geometryToken }));
   }
   validate(input: Record<string, unknown>): Promise<Record<string, unknown>> { return this.request('validate', input); }

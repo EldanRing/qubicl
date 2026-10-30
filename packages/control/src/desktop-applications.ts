@@ -23,6 +23,7 @@ export interface DesktopApplicationDefinition {
   allowedPathKind: AllowedPathKind;
   allowedExtensions?: readonly string[];
   isolatedLibreOfficeProfile?: boolean;
+  reusesExistingProcess?: boolean;
   workingDirectory?: string;
   launcher?: { path: string; name: string; icon?: string; arguments: string[] };
 }
@@ -51,6 +52,7 @@ const APPLICATION_DEFINITIONS: Readonly<Record<string, DesktopApplicationDefinit
   },
   'text-editor': {
     executable: '/usr/bin/mousepad',
+    reusesExistingProcess: true,
     fixedArguments: [],
     allowedPathKind: 'file',
     allowedExtensions: ['', '.txt', '.md', '.log', '.json', '.yaml', '.yml', '.xml', '.html', '.css', '.js', '.ts', '.py', '.sh'],
@@ -60,7 +62,7 @@ const APPLICATION_DEFINITIONS: Readonly<Record<string, DesktopApplicationDefinit
   blender: { executable: '/usr/bin/blender', fixedArguments: [], allowedPathKind: 'file' },
   freecad: { executable: '/usr/bin/freecad', fixedArguments: [], allowedPathKind: 'file' },
   kdenlive: { executable: '/usr/bin/kdenlive', fixedArguments: [], allowedPathKind: 'file' },
-  'file-manager': { executable: '/usr/bin/thunar', fixedArguments: [], allowedPathKind: 'directory' },
+  'file-manager': { reusesExistingProcess: true, executable: '/usr/bin/thunar', fixedArguments: [], allowedPathKind: 'directory' },
 };
 
 const BUILTIN_APPLICATIONS_BY_COMPATIBILITY: Readonly<Record<Preset, readonly string[]>> = {
@@ -77,6 +79,7 @@ interface TrackedDesktopApplication {
   finished: Promise<void>;
   completed: boolean;
   runtimeDirectory?: string;
+  reuseCandidateId?: string;
 }
 
 export interface DesktopApplicationManagerOptions {
@@ -91,6 +94,9 @@ export interface DesktopApplicationManagerOptions {
 }
 
 export interface DesktopApplicationRecord {
+  pid?: number;
+  aliases?: string[];
+  disposition?: 'started' | 'reused';
   applicationId: string;
   application: DesktopApplicationName;
   executable: string;
@@ -111,6 +117,7 @@ export interface AvailableDesktopApplication {
 
 export class DesktopApplicationManager {
   private readonly applications = new Map<string, TrackedDesktopApplication>();
+  private readonly aliases = new Map<string, string>();
   private readonly builtinApplications: Set<string>;
   private readonly definitions: Readonly<Record<string, DesktopApplicationDefinition>>;
   private readonly supportsApplications: boolean;
@@ -144,14 +151,15 @@ export class DesktopApplicationManager {
     if (!this.supportsApplications) {
       throw new QubiclError('desktop_application_unsupported', 'This computer does not provide managed desktop applications.', 404);
     }
-    if (this.applications.size + this.pendingApplications >= this.maxApplications) {
-      throw new QubiclError('desktop_application_limit', `This desktop session already has ${this.maxApplications} tracked applications. Close one before opening another.`, 429);
-    }
     this.pendingApplications += 1;
     try {
       const definition = this.builtinApplications.has(application)
         ? this.definitions[application]!
         : await installedApplicationDefinition(application, this.root);
+      const reuseCandidate = definition.reusesExistingProcess ? [...this.applications.values()].find((item) => !item.completed && item.executable === definition.executable) : undefined;
+      if (this.applications.size + this.pendingApplications > this.maxApplications && !reuseCandidate) {
+        throw new QubiclError('desktop_application_limit', `This desktop session already has ${this.maxApplications} tracked applications. Close one before opening another.`, 429);
+      }
       const paths = await Promise.all(requestedPaths.map((path) => this.safeExistingPath(path, definition)));
       const applicationId = randomBytes(12).toString('base64url');
       const runtimeDirectory = definition.isolatedLibreOfficeProfile ? resolve(this.runtimeRoot, applicationId) : undefined;
@@ -197,6 +205,7 @@ export class DesktopApplicationManager {
         openedAt: new Date().toISOString(),
         finished,
         completed: false,
+        ...(reuseCandidate ? { reuseCandidateId: reuseCandidate.applicationId } : {}),
         ...(runtimeDirectory ? { runtimeDirectory } : {}),
       };
       this.applications.set(applicationId, tracked);
@@ -211,17 +220,20 @@ export class DesktopApplicationManager {
       });
       await started;
       child.unref();
+      if (reuseCandidate) await Promise.race([finished, delay(250)]);
+      const canonical = this.applications.get(this.aliases.get(applicationId) ?? '');
+      if (canonical && !canonical.completed) return { ...this.record(canonical), disposition: 'reused' };
       if (tracked.completed) {
         throw new QubiclError('desktop_application_launch_failed', `Desktop application ${application} exited during launch.`, 500);
       }
-      return publicRecord(tracked);
+      return { ...this.record(tracked), disposition: 'started' };
     } finally {
       this.pendingApplications -= 1;
     }
   }
 
   list(): DesktopApplicationRecord[] {
-    return [...this.applications.values()].filter(({ completed }) => !completed).map(publicRecord);
+    return [...this.applications.values()].filter(({ completed }) => !completed).map((tracked) => this.record(tracked));
   }
 
   async available(): Promise<AvailableDesktopApplication[]> {
@@ -237,6 +249,7 @@ export class DesktopApplicationManager {
     lifecycle: 'desktop_session';
     forcedKill: boolean;
   }> {
+    applicationId = this.aliases.get(applicationId) ?? applicationId;
     const tracked = this.applications.get(applicationId);
     if (!tracked || tracked.completed) {
       throw new QubiclError('desktop_application_not_found', `Desktop application ${applicationId} was not found.`, 404);
@@ -306,9 +319,18 @@ export class DesktopApplicationManager {
     return canonicalPath;
   }
 
+  private record(tracked: TrackedDesktopApplication): DesktopApplicationRecord {
+    return { ...publicRecord(tracked), aliases: [...this.aliases].filter(([, id]) => id === tracked.applicationId).map(([alias]) => alias) };
+  }
+
   private complete(tracked: TrackedDesktopApplication, finish: () => void): void {
     if (tracked.completed) return;
     tracked.completed = true;
+    const canonical = tracked.reuseCandidateId ? this.applications.get(tracked.reuseCandidateId) : undefined;
+    if (tracked.child.exitCode === 0 && canonical && !canonical.completed) {
+      this.aliases.set(tracked.applicationId, canonical.applicationId);
+      while (this.aliases.size > 256) this.aliases.delete(this.aliases.keys().next().value!);
+    }
     if (this.applications.get(tracked.applicationId) === tracked) this.applications.delete(tracked.applicationId);
     if (tracked.runtimeDirectory) void rm(tracked.runtimeDirectory, { recursive: true, force: true });
     finish();
@@ -477,6 +499,7 @@ export function desktopLaunchArguments(definition: DesktopApplicationDefinition,
 function publicRecord(tracked: TrackedDesktopApplication): DesktopApplicationRecord {
   return {
     applicationId: tracked.applicationId,
+    ...(tracked.child.pid ? { pid: tracked.child.pid } : {}),
     application: tracked.application,
     executable: tracked.executable,
     state: 'running',

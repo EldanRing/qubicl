@@ -118,6 +118,7 @@ interface TabState extends PageState {
 }
 
 interface BrowserImage extends PageState {
+  screenMapping: Record<string, unknown> | null;
   data: string;
   mimeType: 'image/png';
   viewport: { width: number; height: number; deviceScaleFactor: 1 };
@@ -605,6 +606,7 @@ export class BrowserManager {
           tabId: this.tabId(page),
           activeTabId: this.activePage ? this.tabId(this.activePage) : null,
           viewport: { ...viewportSize, deviceScaleFactor: 1 },
+          screenMapping: await browserScreenMapping(page),
           geometryGeneration: await this.updateGeometry(page),
           scroll,
           focus: observation.focus,
@@ -1215,11 +1217,12 @@ export class BrowserManager {
     }
   }
 
-  private async imageResult(page: Page, image: Buffer): Promise<Pick<BrowserImage, 'data' | 'mimeType' | 'viewport' | 'geometryGeneration'>> {
+  private async imageResult(page: Page, image: Buffer): Promise<Pick<BrowserImage, 'data' | 'mimeType' | 'viewport' | 'geometryGeneration' | 'screenMapping'>> {
     if (image.length > 20_000_000) throw new QubiclError('browser_image_too_large', 'Browser screenshot exceeds the 20 MB result limit.', 413);
     const size = browserViewportSize(page);
     return {
       data: image.toString('base64'),
+      screenMapping: await browserScreenMapping(page),
       mimeType: 'image/png',
       viewport: { ...size, deviceScaleFactor: 1 },
       geometryGeneration: await this.updateGeometry(page),
@@ -1718,6 +1721,26 @@ async function browserViewerPointerForAction(page: Page, action: BrowserComputer
     default:
       return undefined;
   }
+}
+
+async function browserScreenMapping(page: Page): Promise<Record<string, unknown> | null> {
+  try {
+    const metrics = await page.evaluate(() => ({ screenX: window.screenX, screenY: window.screenY,
+      outerWidth: window.outerWidth, outerHeight: window.outerHeight, innerWidth: window.innerWidth, innerHeight: window.innerHeight,
+      devicePixelRatio: window.devicePixelRatio,
+      workArea: { x: (screen as Screen & { availLeft?: number }).availLeft ?? 0, y: (screen as Screen & { availTop?: number }).availTop ?? 0,
+        width: screen.availWidth, height: screen.availHeight },
+    }), { qubiclViewerMetrics: true });
+    const origin = browserViewportToDisplayPoint({ x: 0, y: 0 }, metrics);
+    if (!origin) return null;
+    const scale = metrics.devicePixelRatio;
+    const viewport = { ...origin, width: Math.round(metrics.innerWidth * scale), height: Math.round(metrics.innerHeight * scale) };
+    const area = metrics.workArea ? Object.fromEntries(Object.entries(metrics.workArea).map(([key, value]) => [key, Math.round(value * scale)])) : null;
+    return { accuracy: 'estimated_from_window_chrome', units: 'screen_pixels', viewportToScreen: { offsetX: origin.x, offsetY: origin.y, scale },
+      viewportBounds: viewport, workArea: area,
+      extendsOutsideWorkArea: area ? viewport.x < area.x! || viewport.y < area.y! || viewport.x + viewport.width > area.x! + area.width! || viewport.y + viewport.height > area.y! + area.height! : null,
+      note: 'Window chrome is estimated from inner/outer sizes. Native window geometry is authoritative for fitting; refresh screenshots after fit.' };
+  } catch { return null; }
 }
 
 async function browserViewerPointer(page: Page, action: ViewerPointerAction): Promise<ViewerPointerAction | undefined> {

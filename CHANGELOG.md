@@ -6,6 +6,14 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Reopening a managed single-instance text editor or file manager returns its
+  reused identity; delayed launcher exits retain resolvable aliases for close.
+- Native snapshots expose supplied action keybindings and offer immutable,
+  paginated text captures beyond the inline excerpt, excluding passwords.
+  Desktop key sequences and browser chord conventions are explicit in schemas.
+- Window inventory reports workarea and clipped bounds, native client mapping,
+  and an explicit fit action. Browser observations expose estimated viewport-to-
+  screen mapping; off-screen targeted desktop input is rejected before dispatch.
 - Browser actions correlate newly started downloads with operation/tab IDs.
   Download observations support bounded waits and filters, available event-based
   byte progress, redacted source provenance, MIME type, and completed size/SHA-256.

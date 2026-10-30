@@ -54,6 +54,7 @@ class Node:
 def desktop(root):
     result = helper.Desktop.__new__(helper.Desktop)
     result.captures = collections.OrderedDict()
+    result.text_captures = collections.OrderedDict()
     result.window = lambda wid: {'id': wid, 'title': 'Fixture'}
     result.accessible_window = lambda _: root
     return result
@@ -69,6 +70,35 @@ def pages(subject, first):
 
 
 class Snapshots(unittest.TestCase):
+    def test_text_continuation_is_captured_unicode_and_passwords_are_excluded(self):
+        text = 'line 🧪\n' * 900 + 'END'
+        editor = Node('Editor', 'text', editable=True, text=text)
+        password = Node('Password', 'password text', text='NEVER READ')
+        subject = desktop(Node('Window', 'frame', [editor, password]))
+        snapshot = subject.snapshot({'windowId': 42})
+        ref = next(item['ref'] for item in snapshot['elements'] if item['name'] == 'Editor')
+        part = subject.snapshot({'windowId': 42, 'ref': ref, 'textOffset': 0, 'maxBytes': 2048})
+        self.assertEqual(part['offsetUnit'], 'unicode_code_points')
+        self.assertEqual(part['totalCharacters'], len(text))
+        actual = part['text']
+        editor.text = 'Edited after capture'
+        while part['nextTextCursor']:
+            part = subject.snapshot({'windowId': 42, 'textCursor': part['nextTextCursor'], 'maxBytes': 2048})
+            actual += part['text']
+        self.assertEqual(actual, text)
+        private = next(item['ref'] for item in snapshot['elements'] if item['name'] == 'Password')
+        with self.assertRaises(helper.Failure) as error:
+            subject.snapshot({'windowId': 42, 'ref': private, 'textOffset': 0})
+        self.assertEqual(error.exception.code, 'desktop_sensitive_text')
+
+    def test_provided_keybinding_is_separate_from_name_and_unknown_is_null(self):
+        node = Node('Save', 'menu item')
+        node.get_action_iface = lambda: types.SimpleNamespace(get_n_actions=lambda: 1, get_action_name=lambda _: 'click', get_key_binding=lambda _: ';;<Control>s')
+        subject = desktop(Node('Window', 'frame', [node]))
+        item = subject.snapshot({'windowId': 42})['elements'][0]
+        self.assertEqual(item['name'], 'Save')
+        self.assertEqual(item['keyBindings'], [{'action': 'click', 'binding': ';;<Control>s'}])
+
     def test_editor_and_dialog_precede_hidden_and_structural_clutter(self):
         hidden = [Node(f'Hidden {i}', 'button', showing=False) for i in range(120)]
         structure = [Node(f'Container {i}') for i in range(120)]

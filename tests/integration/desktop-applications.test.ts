@@ -7,6 +7,65 @@ import { buildComputerManifest, manifestSha256 } from '@qubicl/core';
 import { DesktopApplicationManager } from '@qubicl/control/desktop-applications';
 import { ToolExecutor } from '@qubicl/control/executor';
 import { ProcessManager } from '@qubicl/control/processes';
+import { NativeDesktopManager } from '@qubicl/control/desktop-native';
+
+test('single-instance launch handoffs reuse the canonical app and retain delayed aliases', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-app-handoff-'));
+  const script = join(root, 'editor.cjs');
+  await writeFile(script, `const fs=require('fs');const marker=${JSON.stringify(join(root, 'started'))};if(fs.existsSync(marker)){setTimeout(()=>process.exit(0),process.argv.some(value=>value.endsWith('/late.txt'))?450:10)}else{fs.writeFileSync(marker,'ready');setInterval(()=>{},1000)}`);
+  const closes: number[] = [];
+  const manager = new DesktopApplicationManager('computer', { root, maxApplications: 1,
+    definitions: { 'text-editor': { executable: process.execPath, fixedArguments: [script], allowedPathKind: 'file', reusesExistingProcess: true } },
+    requestClose: async (pid) => { closes.push(pid); return { requested: true }; },
+  });
+  context.after(async () => { await manager.shutdown(); await rm(root, { recursive: true, force: true }); });
+  const first = await manager.open('text-editor', []);
+  // Wait for the fixture's explicit ready marker, not arbitrary GUI startup.
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (await readFile(join(root, 'started')).then(() => true, () => false)) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const second = await manager.open('text-editor', []);
+  assert.equal(second.applicationId, first.applicationId);
+  assert.equal(second.disposition, 'reused');
+  assert.equal(manager.list().length, 1);
+  await manager.close(second.applicationId, false, 'request');
+  assert.equal(closes[0], first.pid);
+  await writeFile(join(root, 'late.txt'), '');
+  const late = await manager.open('text-editor', ['late.txt']);
+  assert.notEqual(late.applicationId, first.applicationId);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(manager.list().length, 1);
+  assert.ok(manager.list()[0]!.aliases?.includes(late.applicationId));
+  assert.equal((await manager.close(late.applicationId, false, 'request')).applicationId, first.applicationId);
+});
+
+test('real Mousepad reopens another file with a canonical closable application identity', {
+  skip: process.env.QUBICL_TEST_NATIVE_DESKTOP !== '1' && 'Run in a disposable X11/AT-SPI guest.', timeout: 15_000,
+}, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-mousepad-reuse-'));
+  await writeFile(join(root, 'first.txt'), 'First');
+  await writeFile(join(root, 'second.txt'), 'Second');
+  const desktop = new NativeDesktopManager({ script: join(process.cwd(), 'packages/control/src/desktop-helper.py') });
+  const manager = new DesktopApplicationManager('computer', { root, requestClose: (pid) => desktop.closeProcessWindows(pid) });
+  context.after(async () => { await manager.shutdown(); desktop.shutdown(); await rm(root, { recursive: true, force: true }); });
+  const first = await manager.open('text-editor', ['first.txt']);
+  const waitForWindow = async (present: boolean): Promise<void> => {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const windows = (await desktop.windows()).windows as Array<{ pid: number }>;
+      if (windows.some((window) => window.pid === first.pid) === present) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.fail(`Expected managed Mousepad window present=${present}`);
+  };
+  await waitForWindow(true);
+  const second = await manager.open('text-editor', ['second.txt']);
+  assert.equal(second.applicationId, first.applicationId);
+  assert.equal(second.disposition, 'reused');
+  assert.equal(manager.list().length, 1);
+  assert.equal((await manager.close(second.applicationId)).state, 'close_requested');
+  await waitForWindow(false);
+});
 
 test('native desktop actions return observations, strip lease secrets and fence queued input at takeover', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'qubicl-native-contract-'));

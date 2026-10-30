@@ -31,16 +31,38 @@ class Desktop:
         self.x = display.Display()
         self.root = self.x.screen().root
         self.captures = collections.OrderedDict()
+        self.text_captures = collections.OrderedDict()
 
     def prop(self, window, name):
         value = window.get_full_property(self.x.intern_atom(name), X.AnyPropertyType)
         return None if value is None else value.value
+
+    @staticmethod
+    def intersection(left, right):
+        x, y = max(left['x'], right['x']), max(left['y'], right['y'])
+        return {'x': x, 'y': y,
+                'width': max(0, min(left['x'] + left['width'], right['x'] + right['width']) - x),
+                'height': max(0, min(left['y'] + left['height'], right['y'] + right['height']) - y)}
+
+    def desktop_bounds(self):
+        geometry = self.root.get_geometry()
+        screen = {'x': 0, 'y': 0, 'width': geometry.width, 'height': geometry.height}
+        areas = self.prop(self.root, '_NET_WORKAREA')
+        current = self.prop(self.root, '_NET_CURRENT_DESKTOP')
+        index = int(current[0]) * 4 if current is not None and len(current) else 0
+        if areas is not None and len(areas) >= index + 4:
+            area = dict(zip(('x', 'y', 'width', 'height'), map(int, areas[index:index + 4])))
+            area = self.intersection(screen, area)
+            if area['width'] > 0 and area['height'] > 0:
+                return {'desktopBounds': screen, 'workArea': area, 'workAreaSource': 'window_manager'}
+        return {'desktopBounds': screen, 'workArea': screen, 'workAreaSource': 'screen_fallback'}
 
     def inventory(self):
         ids = self.prop(self.root, '_NET_CLIENT_LIST_STACKING')
         if ids is None:
             ids = self.prop(self.root, '_NET_CLIENT_LIST')
         active = self.prop(self.root, '_NET_ACTIVE_WINDOW')
+        bounds = self.desktop_bounds()
         result = []
         for wid in list(ids if ids is not None else [])[:4096]:
             try:
@@ -66,7 +88,14 @@ class Desktop:
                     'windowTypes': [bounded(self.x.get_atom_name(int(atom)).removeprefix('_NET_WM_WINDOW_TYPE_').lower(), 80)
                                     for atom in list(kinds if kinds is not None else [])[:8]],
                 }
-                identity = [record[k] for k in ('id', 'pid', 'className', 'geometry')]
+                record.update(bounds)
+                extents = self.prop(w, '_NET_FRAME_EXTENTS')
+                record['frameExtents'] = dict(zip(('left', 'right', 'top', 'bottom'), map(int, extents[:4]))) if extents is not None and len(extents) >= 4 else None
+                record['visibleBounds'] = self.intersection(record['geometry'], bounds['workArea'])
+                record['clippedToWorkArea'] = record['visibleBounds'] != record['geometry']
+                record['clientToScreen'] = {'offsetX': pos.x, 'offsetY': pos.y, 'scale': 1, 'units': 'screen_pixels'}
+                record['contentToScreen'] = None  # App chrome is not exposed by X11 geometry.
+                identity = [record[k] for k in ('id', 'pid', 'className', 'geometry', 'workArea')]
                 record['geometryToken'] = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
                 result.append(record)
             except Exception:
@@ -90,7 +119,7 @@ class Desktop:
             page.append(window)
         end = start + len(page)
         return {'windows': page, 'total': len(windows), 'nextCursor': end if end < len(windows) else None,
-                'observedAt': time.time(), 'order': 'bottom_to_top', 'cursorConsistency': 'live_inventory'}
+                'observedAt': time.time(), 'order': 'bottom_to_top', 'cursorConsistency': 'live_inventory', **self.desktop_bounds()}
 
     def validate(self, args):
         window = self.window(args['windowId'])
@@ -102,6 +131,9 @@ class Desktop:
         for point in args.get('points', []):
             x, y = point
             g = window['geometry']
+            screen = window['desktopBounds']
+            if not (0 <= x < screen['width'] and 0 <= y < screen['height']):
+                raise Failure('desktop_point_off_screen', 'Input point is outside the desktop; fit the window or choose a visible point.')
             if not (g['x'] <= x < g['x'] + g['width'] and g['y'] <= y < g['y'] + g['height']):
                 raise Failure('desktop_point_outside_window', 'Input point is outside the observed client window.')
             top = next((w for w in reversed(self.inventory()) if w['visible'] and
@@ -113,6 +145,21 @@ class Desktop:
 
     def window_action(self, args):
         window = self.validate({**args, 'requireVisible': False})['window']
+        if args['action'] == 'fit':
+            area = window['workArea']
+            extents = window['frameExtents'] or dict.fromkeys(('left', 'right', 'top', 'bottom'), 0)
+            width = max(1, area['width'] - extents['left'] - extents['right'])
+            height = max(1, area['height'] - extents['top'] - extents['bottom'])
+            for states in [('_NET_WM_STATE_MAXIMIZED_VERT', '_NET_WM_STATE_MAXIMIZED_HORZ'), ('_NET_WM_STATE_FULLSCREEN',)]:
+                atoms = [self.x.intern_atom(state) for state in states]
+                self.root.send_event(protocol.event.ClientMessage(window=window['id'], client_type=self.x.intern_atom('_NET_WM_STATE'),
+                    data=(32, [0, atoms[0], atoms[1] if len(atoms) > 1 else 0, 2, 0])), event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+            self.root.send_event(protocol.event.ClientMessage(window=window['id'], client_type=self.x.intern_atom('_NET_MOVERESIZE_WINDOW'),
+                data=(32, [1 | (15 << 8) | (2 << 12), area['x'], area['y'], width, height])), event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+            self.x.sync()
+            return {'windowId': window['id'], 'action': 'fit', 'dispatch': 'completed', 'verified': False,
+                    'requestedClientSize': {'width': width, 'height': height}, 'workArea': area,
+                    'note': 'Explicit fit request sent to the window manager. Observe new geometry before coordinate input.'}
         name = '_NET_CLOSE_WINDOW' if args['action'] == 'close' else '_NET_ACTIVE_WINDOW'
         values = [X.CurrentTime, 2, 0, 0, 0] if args['action'] == 'close' else [2, X.CurrentTime, 0, 0, 0]
         self.root.send_event(protocol.event.ClientMessage(window=window['id'], client_type=self.x.intern_atom(name),
@@ -145,9 +192,10 @@ class Desktop:
         return {'requestedWindowIds': [w['id'] for w in primary], 'dispatch': 'completed', 'verified': False}
 
     def expire(self):
-        for key, capture in list(self.captures.items()):
-            if time.monotonic() - capture['created'] > 300:
-                del self.captures[key]
+        for captures in (self.captures, self.text_captures):
+            for key, capture in list(captures.items()):
+                if time.monotonic() - capture['created'] > 300:
+                    del captures[key]
 
     @staticmethod
     def fingerprint(obj):
@@ -209,6 +257,13 @@ class Desktop:
         action = obj.get_action_iface()
         if action:
             result['actions'] = [bounded(action.get_action_name(i), 80) for i in range(min(action.get_n_actions(), 16))]
+            result['keyBindings'] = []
+            for i, name in enumerate(result['actions']):
+                try:
+                    binding = bounded(action.get_key_binding(i), 256) or None
+                except Exception:
+                    binding = None
+                result['keyBindings'].append({'action': name, 'binding': binding})
         component = obj.get_component_iface()
         if component:
             rect = component.get_extents(Atspi.CoordType.SCREEN)
@@ -282,6 +337,8 @@ class Desktop:
     def snapshot(self, args):
         self.expire()
         window = self.window(args['windowId'])
+        if 'textOffset' in args or args.get('textCursor'):
+            return self.read_text(args, window)
         cursor = args.get('cursor')
         if cursor:
             key, _, offset = cursor.partition(':')
@@ -326,6 +383,8 @@ class Desktop:
             priority, obj, ref, parent, depth = capture['queue'][0]
             try:
                 item, fingerprint = self.describe(obj, ref, parent, depth)
+                if 'textLength' in item:
+                    item['textRead'] = {'windowId': window['id'], 'ref': ref, 'textOffset': 0}
             except Exception:
                 capture['queue'].popleft()
                 capture['unreadable'] += 1
@@ -342,6 +401,7 @@ class Desktop:
                 item['textTruncated'] = True
                 item['name'] = bounded(item['name'], 128)
                 item.pop('actions', None)
+                if item.pop('keyBindings', None) is not None: item['keyBindingsTruncated'] = True
             capture['queue'].popleft()
             capture['refs'][ref] = (obj, fingerprint)
             elements.append(item)
@@ -357,6 +417,54 @@ class Desktop:
                 'includeHidden': capture['includeHidden'], 'hiddenElementsOmitted': capture['hidden'],
                 'order': 'visible_controls_first',
                 'note': 'Ordering is captured; element content is live. Parent refs may appear later or be hidden. Refs last at most five minutes; refresh to discover new elements or use ref for a smaller subtree when scopeLimitReached.'}
+
+    def read_text(self, args, window):
+        if args.get('cursor'):
+            raise Failure('invalid_desktop_cursor', 'Text and element continuation are separate.')
+        cursor = args.get('textCursor')
+        if cursor:
+            if 'textOffset' in args or args.get('ref'):
+                raise Failure('invalid_desktop_cursor', 'Continue a text capture with windowId, textCursor and maxBytes only.')
+            key, _, raw_offset = cursor.partition(':')
+            capture = self.text_captures.get(key)
+            if not capture or capture['windowId'] != window['id']:
+                raise Failure('stale_desktop_text', 'Text capture expired; start a new targeted text read.')
+            offset = int(raw_offset)
+        else:
+            if not args.get('ref'):
+                raise Failure('desktop_text_ref_required', 'Text reading requires an observed native ref.')
+            obj, source = self.resolve(args['ref'])
+            if source['windowId'] != window['id']:
+                raise Failure('desktop_ref_window_mismatch', 'Reference belongs to a different window.')
+            if obj.get_role() == Atspi.Role.PASSWORD_TEXT:
+                raise Failure('desktop_sensitive_text', 'Password text is not exposed.')
+            iface = obj.get_text_iface()
+            if not iface:
+                raise Failure('desktop_text_unavailable', 'This element exposes no native text interface.')
+            count = iface.get_character_count()
+            if count > 8000000:
+                raise Failure('desktop_text_too_large', 'Text capture exceeds 8 MB; use the application document/file interface.')
+            text = Atspi.Text.get_text(iface, 0, count)
+            size = len(text.encode('utf-8'))
+            if size > 8000000:
+                raise Failure('desktop_text_too_large', 'Text capture exceeds 8 MB; use the application document/file interface.')
+            while self.text_captures and (len(self.text_captures) >= 4 or sum(item['bytes'] for item in self.text_captures.values()) + size > 16000000):
+                self.text_captures.popitem(last=False)
+            key = secrets.token_hex(12)
+            capture = {'windowId': window['id'], 'text': text, 'bytes': size, 'created': time.monotonic(), 'capturedAt': time.time()}
+            self.text_captures[key] = capture
+            offset = args.get('textOffset', 0)
+        text = capture['text']
+        if offset < 0 or offset > len(text):
+            raise Failure('desktop_text_offset_invalid', 'Offset is outside the captured text.')
+        budget = min(args.get('maxBytes', 16000), 18000)
+        end = min(len(text), offset + budget)
+        while len(json.dumps(text[offset:end], ensure_ascii=False).encode()) > budget:
+            end = offset + max(1, (end - offset) * 3 // 4)
+        return {'windowId': window['id'], 'text': text[offset:end], 'captureId': key,
+                'capturedAt': capture['capturedAt'], 'consistency': 'captured_text', 'offsetUnit': 'unicode_code_points',
+                'offset': offset, 'nextOffset': end, 'totalCharacters': len(text), 'totalBytes': capture['bytes'],
+                'textTruncated': end < len(text), 'nextTextCursor': f'{key}:{end}' if end < len(text) else None}
 
     def act(self, args):
         if args['action'] == 'set_text' and 'text' not in args:

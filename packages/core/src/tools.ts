@@ -59,7 +59,7 @@ const keypresses = z.array(keypress).min(1).max(256).superRefine((keys, context)
       message: 'A bare modifier in a multi-entry sequence is released before the next entry. Express simultaneous input as one chord, for example ["ctrl+End", "Return"], not ["ctrl", "End"].',
     });
   }
-}).describe('Ordered keypresses. Each entry is one key or simultaneous chord; entries run sequentially.');
+}).describe('Ordered keypresses: ["ctrl+End", "Return"] means a chord then Return. ["ctrl", "End"] is not a chord and is rejected. Use + within an entry for simultaneous modifiers; entries run sequentially. Common names: ctrl, alt, shift, super, Return, Tab, Escape, arrows, Home, End and F1-F35.');
 const browserUrl = z.url({ protocol: /^https?$/ }).max(8192).describe('Complete HTTP or HTTPS URL without embedded credentials.');
 const browserRef = z.string().min(1).max(64).regex(/^g\d+e\d+$/).describe('Retained element ref from browser_snapshot. Refresh after stale_browser_ref.');
 const browserPoint = z.strictObject({
@@ -86,7 +86,7 @@ const browserComputerAction = z.discriminatedUnion('type', [
     scroll_y: z.number().int().min(-10_000).max(10_000).default(600),
     keys: browserModifiers,
   }),
-  z.strictObject({ type: z.literal('keypress'), keys: z.array(browserKey).min(1).max(20) }),
+  z.strictObject({ type: z.literal('keypress'), keys: z.array(browserKey).min(1).max(20).describe('One simultaneous browser chord, e.g. ["Control","End"]. Use separate actions for sequential keypresses; desktop control_computer uses + within each sequence entry instead.') }),
   z.strictObject({ type: z.literal('type'), text: z.string().max(50_000) }),
   z.strictObject({ type: z.literal('wait'), milliseconds: z.number().int().min(0).max(10_000).default(2000) }),
 ]);
@@ -415,7 +415,7 @@ export const toolDefinitions = {
     lease: false,
   },
   control_computer: {
-    description: 'Dispatch desktop input in screen coordinates. Targeted mouse input requires observed window geometry; optional observation returns resulting state without claiming success.',
+    description: 'Dispatch desktop input in screen coordinates. For keypress, action.keys is a sequence: ["ctrl+End","Return"] sends a chord then Return; ["ctrl","End"] is invalid. Targeted mouse input requires observed window geometry; optional observation returns resulting state without claiming success.',
     input: leaseOnly.extend({ action: controlAction, observe: desktopObservation }),
     lease: true,
   },
@@ -424,11 +424,12 @@ export const toolDefinitions = {
     input: observationOnly.extend({ cursor: z.number().int().min(0).max(4096).default(0) }), lease: false,
   },
   desktop_snapshot: {
-    description: 'Inspect native AT-SPI elements, prioritizing visible editable and dialog controls over structure. Hidden elements are omitted unless includeHidden is true. Continue with cursor; use ref for a subtree. Reports a screenshot fallback when accessibility is unavailable.',
+    description: 'Inspect native AT-SPI elements, prioritizing visible editable and dialog controls over structure. Hidden elements are omitted unless includeHidden is true. Continue with cursor; use ref for a subtree. Use ref plus textOffset=0 to capture complete native text; follow nextTextCursor with textCursor. Text offsets count Unicode code points. Passwords are excluded. Reports a screenshot fallback when accessibility is unavailable.',
     input: observationOnly.extend({
       windowId: z.number().int().positive().max(0xffff_ffff),
       cursor: z.string().regex(/^[a-df0-9x]{24}:\d{1,5}$/).optional(), ref: desktopRef.optional(),
       includeHidden: z.boolean().optional(),
+      textOffset: z.number().int().min(0).max(8000000).optional(), textCursor: z.string().regex(/^[a-f0-9]{24}:\d{1,8}$/).optional(),
       limit: z.number().int().min(1).max(200).default(100), maxBytes: z.number().int().min(2048).max(18000).default(16000),
     }), lease: false,
   },
@@ -437,8 +438,8 @@ export const toolDefinitions = {
     input: leaseOnly.extend({ ref: desktopRef, action: z.enum(['invoke', 'focus', 'set_text']), actionName: z.string().min(1).max(80).optional(), text: z.string().max(50000).optional(), observe: desktopObservation }), lease: true,
   },
   desktop_window_action: {
-    description: 'Request window focus or normal close through the window manager. Close leaves Save/Discard/Cancel dialogs to the application; it never terminates a process.',
-    input: leaseOnly.extend({ windowId: z.number().int().positive().max(0xffff_ffff), action: z.enum(['focus', 'close']), geometryToken: desktopGeometryToken, observe: desktopObservation }), lease: true,
+    description: 'Request focus, explicit fit to usable workarea, or normal close through the window manager. Close leaves Save/Discard/Cancel dialogs to the application; it never terminates a process.',
+    input: leaseOnly.extend({ windowId: z.number().int().positive().max(0xffff_ffff), action: z.enum(['focus', 'close', 'fit']), geometryToken: desktopGeometryToken, observe: desktopObservation }), lease: true,
   },
   browser_navigate: {
     description: 'Open an HTTP or HTTPS URL in the persistent visible browser.',

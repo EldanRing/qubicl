@@ -1,7 +1,7 @@
 # Native desktop observation and control
 
-These additions are implemented on the development branch for 0.8. Published
-0.7 images retain their existing tools. Browser, computer and workstation source
+Native inspection shipped in 0.8. This guide also describes the pending 0.8.1
+text, geometry and launcher improvements. Browser, computer and workstation
 images expose native inspection; managed app launching remains available on
 computer and workstation.
 
@@ -13,6 +13,12 @@ the gateway and add the new native tools to the saved policy.
 geometry, stacking order, visibility, window types, modal/transient relationships
 and a `geometryToken`. Follow `nextCursor` to read more windows. This is a live
 inventory, so refresh after applications open, close or reorder windows.
+Inventory includes `desktopBounds`, `workArea` and its source (window-manager
+data or screen fallback), frame extents when provided, and client `visibleBounds`
+clipped to the workarea. This clipping is not an occlusion test. `clientToScreen`
+maps native client pixels to screen pixels; app content mapping is null when
+chrome offsets are unknown. Browser screenshots/snapshots separately expose
+`screenMapping`, explicitly estimated from browser inner/outer window metrics.
 
 `desktop_snapshot` accepts `windowId`, optional `ref` for a subtree, and bounded
 `limit`/`maxBytes` budgets. It returns AT-SPI roles, names, states, text, geometry
@@ -22,6 +28,10 @@ first, followed by other controls and text, then structural containers. Set
 `includeHidden: true` to also return hidden elements after the visible elements.
 Visibility is the application's accessibility state, not proof that another
 window does not cover it.
+`keyBindings` keeps each action's actual AT-SPI keybinding string separate from
+its name; null means the app did not provide one. The native string may contain
+mnemonic/menu/accelerator components separated by semicolons. Qubicl does not
+invent a shortcut from a menu label.
 
 Follow `nextCursor` with the same window ID; cursors retain the initial visibility
 selection and cannot be replayed after consumption. Omit `includeHidden` on
@@ -47,6 +57,18 @@ that could not be inspected, for example because an app removed them mid-read.
 from very large or unresponsive application trees; adjust them based on concrete
 missed-control evidence rather than treating them as product goals.
 
+An element with text includes `textRead` arguments. Call `desktop_snapshot` with
+its `windowId`, `ref` and `textOffset: 0` (or another Unicode code-point offset)
+to capture the full text. Follow `nextTextCursor` using `windowId`, `textCursor`
+and optional `maxBytes`. This is independent of the element `nextCursor`.
+`captureId`, `capturedAt`, `consistency: captured_text`, `totalCharacters` and
+`totalBytes` describe the immutable captured string; edits after capture do not
+change later pages. Offsets count Unicode code points, unlike browser UTF-16
+offsets. Passwords cannot be captured. Captures last five minutes; four captures
+share 16 MB, with an explicit 8 MB per-capture bound. Expired/evicted captures or
+closed windows require a new read. Large document files can be read through the
+document/file interfaces rather than silently losing a native text tail.
+
 Applications may expose incomplete or no accessibility information. The result
 then names `take_screenshot` as a fallback, including for sparse startup trees.
 Do not infer that an empty native tree means the application has no controls.
@@ -66,6 +88,11 @@ its client area or covered by another window. Targeted scrolling requires x/y;
 drag endpoints must both belong to the target window. Keyboard actions retain
 the existing optional window targeting and also accept a geometry token. These
 checks reduce wrong-window input; they cannot make a changing desktop atomic.
+For desktop `keypress`, `action.keys` is a sequence: `["ctrl+End", "Return"]`
+sends one chord and then Return. `["ctrl", "End"]` is rejected; combine modifiers
+with `+` within an entry. Browser `browser_press` uses a single chord string such
+as `Control+End`; `browser_computer` keypress arrays instead describe one chord
+(`keys: ["Control", "End"]`), with separate actions for sequential keypresses.
 
 Desktop input and native actions accept `observe: windows|snapshot|screenshot`
 to return resulting state in the same call. The default is `none`. Observations
@@ -76,8 +103,11 @@ observations remain untrusted application data and require the interactive
 credential scope, but do not claim the input lease. Queued input rechecks
 ownership before dispatch, including after human takeover.
 
-`desktop_window_action` requests focus or normal close through the window
-manager. `close_desktop_application` now defaults to normal close of a tracked
+`desktop_window_action` requests focus, normal close, or explicit `action: "fit"`
+through the window manager. Fit exits maximized/fullscreen state and requests a
+size/position within the current workarea, accounting for known frame extents.
+It does not run automatically; `verified: false` means observe the resulting
+geometry before coordinate input. `close_desktop_application` defaults to normal close of a tracked
 app's windows and returns `close_requested`. Handle Save/Discard/Cancel dialogs
 using fresh observations. Termination requires `mode: terminate` and
 `discardUnsavedChanges: true`; this retains the process-group TERM/KILL path.
@@ -116,6 +146,12 @@ than silently changed. Built-in aliases and explicit executable names remain
 available. A launcher may hand off to an existing application and exit; use
 `list_desktop_windows` to observe the resulting documents and windows rather
 than equating a launcher process with an application window.
+For tracked single-instance text-editor/file-manager handoffs, open returns the
+canonical `applicationId` with `disposition: reused` when handoff completes in the
+short launch window. A later successful handoff retains the returned launcher ID
+as an alias of the running app; inventory exposes aliases and close resolves them.
+New processes report `started`. A reused ID represents the app, not just the newly
+opened document, so a normal close may present save dialogs for its other tabs.
 
 `take_screenshot` accepts either a `region` (`x`, `y`, `width`, `height` in screen
 pixels), or a `windowId` and its observed `geometryToken`. Window capture rejects
