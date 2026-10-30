@@ -10,6 +10,10 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
   short loading wait, avoiding 30-second stalls when loading events never arrive.
   Same-document history entries no longer fail merely because they have no HTTP
   response; timed-out actions are never automatically repeated.
+- Native desktop snapshots prioritize visible editable and dialog controls over
+  structural containers. Hidden elements no longer consume output pages by
+  default and remain available with `includeHidden: true`; continuation retains
+  that selection and preserves exact references.
 
 ## 0.8.0 - 2026-10-29
 

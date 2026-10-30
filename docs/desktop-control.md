@@ -16,8 +16,21 @@ inventory, so refresh after applications open, close or reorder windows.
 
 `desktop_snapshot` accepts `windowId`, optional `ref` for a subtree, and bounded
 `limit`/`maxBytes` budgets. It returns AT-SPI roles, names, states, text, geometry
-and named actions. Follow `nextCursor` with the same window ID; cursors advance a
-live traversal and cannot be replayed after consumption. Native refs retain
+and named actions. By default only elements with both AT-SPI `visible` and
+`showing` states are returned. Editable/focused elements and dialog controls come
+first, followed by other controls and text, then structural containers. Set
+`includeHidden: true` to also return hidden elements after the visible elements.
+Visibility is the application's accessibility state, not proof that another
+window does not cover it.
+
+Follow `nextCursor` with the same window ID; cursors retain the initial visibility
+selection and cannot be replayed after consumption. Omit `includeHidden` on
+continuation or repeat its initial value. The bounded candidate order is captured
+on the first call; element content is read live as pages are returned. Take a new
+snapshot to discover newly added or newly visible controls. Hidden parents are
+still traversed because some toolkits expose visible children beneath them.
+Parent refs can refer to records returned later or omitted by the visibility
+filter, and remain usable for subtree inspection. Native refs retain
 actual accessibility objects across pages and snapshots.
 They expire after five minutes or eviction from the four retained snapshots.
 Changed, detached or defunct elements are rejected before actions.
@@ -25,10 +38,12 @@ Changed, detached or defunct elements are rejected before actions.
 Snapshots return at most 200 elements and 18 KB of encoded element content per
 call, plus bounded window metadata. Text per element is capped at 1,500
 characters with an explicit truncation flag; password text is omitted. A
-snapshot retains at most 2,000 refs and bounds depth and pending traversal work.
+snapshot scans at most 2,000 nodes, retains at most 2,000 refs, and bounds depth
+and pending traversal work. Only returned elements need full text/geometry reads.
 `scopeLimitReached` distinguishes that bound from ordinary page continuation.
 Inspect a smaller subtree when available. `unreadableElements` reports nodes
-that could not be inspected, for example because an app removed them mid-read. These limits protect the controller
+that could not be inspected, for example because an app removed them mid-read.
+`hiddenElementsOmitted` reports the visibility filter's omissions. These limits protect the controller
 from very large or unresponsive application trees; adjust them based on concrete
 missed-control evidence rather than treating them as product goals.
 

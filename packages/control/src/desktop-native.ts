@@ -9,7 +9,7 @@ export interface DesktopWindow {
   geometryToken: string; transientFor: number | null; modal: boolean; active: boolean;
 }
 export interface DesktopSnapshotInput {
-  windowId: number; cursor?: string; ref?: string; limit?: number; maxBytes?: number;
+  windowId: number; cursor?: string; ref?: string; limit?: number; maxBytes?: number; includeHidden?: boolean;
 }
 export interface DesktopElementAction {
   ref: string; action: 'invoke' | 'focus' | 'set_text'; actionName?: string; text?: string;

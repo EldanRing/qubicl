@@ -424,10 +424,11 @@ export const toolDefinitions = {
     input: observationOnly.extend({ cursor: z.number().int().min(0).max(4096).default(0) }), lease: false,
   },
   desktop_snapshot: {
-    description: 'Inspect a bounded native AT-SPI tree with exact element refs, states and actions. Continue with cursor; use ref for a subtree. Reports a screenshot fallback when accessibility is unavailable.',
+    description: 'Inspect native AT-SPI elements, prioritizing visible editable and dialog controls over structure. Hidden elements are omitted unless includeHidden is true. Continue with cursor; use ref for a subtree. Reports a screenshot fallback when accessibility is unavailable.',
     input: observationOnly.extend({
       windowId: z.number().int().positive().max(0xffff_ffff),
       cursor: z.string().regex(/^[a-df0-9x]{24}:\d{1,5}$/).optional(), ref: desktopRef.optional(),
+      includeHidden: z.boolean().optional(),
       limit: z.number().int().min(1).max(200).default(100), maxBytes: z.number().int().min(2048).max(18000).default(16000),
     }), lease: false,
   },

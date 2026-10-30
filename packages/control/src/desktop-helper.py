@@ -219,6 +219,66 @@ class Desktop:
             result.update(text=bounded(Atspi.Text.get_text(text, 0, min(count, 1500)), 1500), textLength=count, textTruncated=count > 1500)
         return result, fingerprint
 
+    @staticmethod
+    def snapshot_priority(states, role, in_dialog):
+        visible = 'visible' in states and 'showing' in states
+        if not visible:
+            return 4
+        structural = role in ('application', 'frame', 'window', 'filler', 'panel', 'viewport',
+                              'scroll pane', 'root pane', 'layered pane', 'tool bar', 'menu bar', 'separator', 'unknown')
+        if 'editable' in states or 'focused' in states or role in ('dialog', 'alert') or (in_dialog and not structural):
+            return 0
+        if structural:
+            return 3
+        return 2 if role in ('label', 'static', 'text', 'paragraph', 'heading', 'section') else 1
+
+    def collect_snapshot(self, capture, key):
+        # Inspect bounded, lightweight metadata before paging. Output budgets
+        # must not let earlier hidden widgets/containers bury the editor. Read
+        # text, geometry and actions only for the elements actually returned.
+        pending = collections.deque([(capture['root'], None, 0, False)])
+        candidates = []
+        while pending and len(capture['seen']) < 2000:
+            obj, parent, depth, in_dialog = pending.popleft()
+            if obj in capture['seen']:
+                continue
+            capture['seen'].add(obj)
+            try:
+                fingerprint = self.fingerprint(obj)
+                state = obj.get_state_set()
+                states = [name.lower() for name in ('VISIBLE', 'SHOWING', 'FOCUSED', 'EDITABLE', 'MODAL')
+                          if state.contains(getattr(Atspi.StateType, name))]
+                children = obj.get_child_count()
+            except Exception:
+                capture['unreadable'] += 1
+                continue
+            ref = f"{key}e{len(capture['refs'])}"
+            capture['refs'][ref] = (obj, fingerprint)
+            in_dialog = in_dialog or 'modal' in states or fingerprint[1] in ('dialog', 'alert')
+            priority = self.snapshot_priority(states, fingerprint[1], in_dialog)
+            if priority < 4 or capture['includeHidden']:
+                candidates.append((priority, obj, ref, parent, depth))
+            else:
+                capture['hidden'] += 1
+            # Some toolkits omit visibility on structural parents while their
+            # children are showing. Never prune a subtree solely on that state.
+            for ci in range(min(children, 2000)):
+                if len(pending) + len(capture['seen']) >= 4000 or depth >= 64:
+                    capture['limited'] = True
+                    break
+                try:
+                    child = obj.get_child_at_index(ci)
+                    if child is not None:
+                        pending.append((child, ref, depth + 1, in_dialog))
+                except Exception:
+                    capture['unreadable'] += 1
+            if children > 2000:
+                capture['limited'] = True
+        capture['limited'] |= bool(pending)
+        # Stable sort retains tree order within each priority. Parent refs are
+        # retained even when their records appear on a later page or are hidden.
+        capture['queue'] = collections.deque(sorted(candidates, key=lambda item: item[0]))
+
     def snapshot(self, args):
         self.expire()
         window = self.window(args['windowId'])
@@ -230,6 +290,8 @@ class Desktop:
                 raise Failure('stale_desktop_cursor', 'Snapshot cursor expired or was already consumed. Start another snapshot.')
             if args.get('ref'):
                 raise Failure('invalid_desktop_cursor', 'Continue with windowId, cursor and budgets only.')
+            if 'includeHidden' in args and args['includeHidden'] != capture['includeHidden']:
+                raise Failure('invalid_desktop_cursor', 'Visibility selection cannot change during pagination. Start another snapshot.')
         else:
             inspection_error = None
             if args.get('ref'):
@@ -247,8 +309,10 @@ class Desktop:
                         'fallback': {'tool': 'take_screenshot', 'reason': inspection_error or 'No unambiguous AT-SPI window was exposed by this application.'}}
             # Hex identifiers deliberately exclude e, the ref delimiter.
             key = secrets.token_hex(12).replace('e', 'x')
-            capture = {'windowId': window['id'], 'root': root, 'queue': collections.deque([(root, None, 0)]),
-                       'refs': {}, 'seen': set(), 'created': time.monotonic(), 'offset': 0, 'limited': False, 'unreadable': 0}
+            capture = {'windowId': window['id'], 'root': root, 'queue': collections.deque(),
+                       'refs': {}, 'seen': set(), 'created': time.monotonic(), 'offset': 0, 'limited': False,
+                       'unreadable': 0, 'hidden': 0, 'includeHidden': args.get('includeHidden', False), 'useful': False}
+            self.collect_snapshot(capture, key)
             self.captures[key] = capture
             while len(self.captures) > 4:
                 self.captures.popitem(last=False)
@@ -259,16 +323,16 @@ class Desktop:
         budget = min(args.get('maxBytes', 16000), 18000,
                      22000 - len(json.dumps(window, ensure_ascii=False).encode()))
         while capture['queue'] and len(elements) < limit:
-            obj, parent, depth = capture['queue'][0]
-            if obj in capture['seen']:
-                capture['queue'].popleft()
-                continue
-            ref = f"{key}e{len(capture['refs'])}"
+            priority, obj, ref, parent, depth = capture['queue'][0]
             try:
                 item, fingerprint = self.describe(obj, ref, parent, depth)
             except Exception:
                 capture['queue'].popleft()
                 capture['unreadable'] += 1
+                continue
+            if not capture['includeHidden'] and not {'visible', 'showing'}.issubset(item['states']):
+                capture['queue'].popleft()
+                capture['hidden'] += 1
                 continue
             if len(json.dumps(elements + [item], ensure_ascii=False).encode()) > budget:
                 if elements:
@@ -279,33 +343,20 @@ class Desktop:
                 item['name'] = bounded(item['name'], 128)
                 item.pop('actions', None)
             capture['queue'].popleft()
-            capture['seen'].add(obj)
             capture['refs'][ref] = (obj, fingerprint)
             elements.append(item)
-            for ci in range(min(item['children'], 2000)):
-                if len(capture['queue']) + len(capture['refs']) >= 4000 or depth >= 64:
-                    capture['limited'] = True
-                    break
-                try:
-                    child = obj.get_child_at_index(ci)
-                    if child is not None:
-                        capture['queue'].append((child, ref, depth + 1))
-                except Exception:
-                    continue
-            if item['children'] > 2000:
-                capture['limited'] = True
-            if len(capture['refs']) >= 2000:
-                capture['queue'].clear()
-                capture['limited'] = True
+            capture['useful'] |= priority < 3
         capture['offset'] += len(elements)
-        useful = len(capture['refs']) > 1 or bool(capture['queue'])
+        useful = capture['useful'] or any(item[0] < 3 for item in capture['queue'])
         return {'window': window, 'accessibility': 'at-spi', 'elements': elements,
                 'usefulTree': useful,
                 **({} if useful else {'fallback': {'tool': 'take_screenshot', 'reason': 'Application exposes only a sparse native tree. Inspect a screenshot or retry after startup.'}}),
                 'nextCursor': f"{key}:{capture['offset']}" if capture['queue'] else None,
                 'truncated': capture['limited'] or bool(capture['queue']), 'scopeLimitReached': capture['limited'],
                 'unreadableElements': capture['unreadable'],
-                'note': 'Native tree is live. Refs last at most five minutes; use ref to inspect a smaller subtree when scopeLimitReached.'}
+                'includeHidden': capture['includeHidden'], 'hiddenElementsOmitted': capture['hidden'],
+                'order': 'visible_controls_first',
+                'note': 'Ordering is captured; element content is live. Parent refs may appear later or be hidden. Refs last at most five minutes; refresh to discover new elements or use ref for a smaller subtree when scopeLimitReached.'}
 
     def act(self, args):
         if args['action'] == 'set_text' and 'text' not in args:
