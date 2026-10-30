@@ -45,6 +45,15 @@ actual accessibility objects across pages and snapshots.
 They expire after five minutes or eviction from the four retained snapshots.
 Changed, detached or defunct elements are rejected before actions.
 
+`take_screenshot` with a window ID and observed geometry token captures the
+intersection of its client bounds and the screen, including oversized or partly
+off-screen windows. The result reports `windowBounds`, `visibleBounds`, actual
+`origin`, `clipped`/`offscreen` and `capture: visible_screen_region`; overlapping
+windows may appear (`occlusion: not_checked`). Use `clipToScreen: false` to require
+the full window to fit. A fully off-screen window yields an explicit error. Both
+pre/post capture checks reject stale geometry, and capture never moves or resizes
+windows. Explicit `region` coordinates remain strictly screen-bounded.
+
 Snapshots return at most 200 elements and 18 KB of encoded element content per
 call, plus bounded window metadata. Text per element is capped at 1,500
 characters with an explicit truncation flag; password text is omitted. A
@@ -72,14 +81,34 @@ document/file interfaces rather than silently losing a native text tail.
 Applications may expose incomplete or no accessibility information. The result
 then names `take_screenshot` as a fallback, including for sparse startup trees.
 Do not infer that an empty native tree means the application has no controls.
+`usefulTree` evaluates returned text/actions as well as control roles in the
+requested window or subtree (`usefulnessScope`). A useful single text element
+does not receive a sparse-tree warning. Usefulness is distinct from content
+coverage: `contentCoverage: partial` and `coverageGaps` identify directory panes
+whose inspected tree exposes no named file/icon items. This does not establish
+that a directory is empty. Thunar's current icon-view toolkit can expose only
+an empty panel even through AT-SPI Collection; use the reported screenshot
+fallback. When the toolkit supplies item names/actions, they retain normal refs.
+`exposed_tree` means no such gap was detected, not proof of complete application
+content. Budget truncation and unreadable elements remain separately reported.
 Blender's custom UI generally needs screenshot control. Qt and office dialogs
 can differ from their main windows; inspect the currently visible window.
+The workstation includes LibreOffice's GTK bridge for native Office inspection
+and Noto CJK fallback fonts. Japanese sample rendering is checked; this does not
+promise every language or every explicitly selected font has full coverage.
 
 `desktop_element_action` supports `invoke` with an observed `actionName`,
 `focus`, and `set_text` with explicit `text`. A single available action may be
 invoked without its name. Disabled or stale elements reject the action. API
 acceptance is reported separately from `verified: false`: it does not establish
 that the user's intended task succeeded.
+For `set_text`, `undoGrouping: application_defined` and
+`singleUndoGuaranteed: false` describe the AT-SPI limitation:
+[EditableText](https://docs.gtk.org/atspi2/iface.EditableText.html) provides no
+transaction/grouping API. Mousepad may separate deletion and insertion
+into distinct Undo steps. Inspect each Undo result; one step can leave an empty
+buffer. Qubicl does not issue compensating edits or alter the clipboard to emulate
+an application undo stack.
 
 `control_computer` retains screen-coordinate input. Mouse actions can specify
 `targetWindowId` and must then include the observed `geometryToken`. Qubicl
@@ -88,6 +117,12 @@ its client area or covered by another window. Targeted scrolling requires x/y;
 drag endpoints must both belong to the target window. Keyboard actions retain
 the existing optional window targeting and also accept a geometry token. These
 checks reduce wrong-window input; they cannot make a changing desktop atomic.
+Typing normalizes CRLF and lone CR to LF and sends each newline as a Return
+event, retaining tabs and Unicode in ordinary multiline editors. International
+text uses normal xdotool pacing for temporary X11 key mappings. Clipboard text,
+file lists and binary formats are untouched. These are keyboard events: an app
+can handle Return as submit or apply indentation/formatting. Read or save/reopen
+the resulting content when exact text matters; dispatch is not insertion proof.
 For desktop `keypress`, `action.keys` is a sequence: `["ctrl+End", "Return"]`
 sends one chord and then Return. `["ctrl", "End"]` is rejected; combine modifiers
 with `+` within an entry. Browser `browser_press` uses a single chord string such

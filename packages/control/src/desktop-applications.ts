@@ -3,7 +3,7 @@ import { WORKSTATION_APPLICATION_CAPABILITIES } from './workstation-applications
 import { randomBytes } from 'node:crypto';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, chown, copyFile, lstat, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises';
+import { access, chmod, chown, copyFile, lstat, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { DesktopApplicationName, Preset } from '@qubicl/core';
@@ -169,8 +169,22 @@ export class DesktopApplicationManager {
       if (runtimeDirectory) {
         const profile = resolve(runtimeDirectory, 'profile');
         const profileUser = resolve(profile, 'user');
-        await mkdir(profileUser, { recursive: true, mode: 0o700 });
+        let created = false;
         try {
+          // Keep the registry parent owned by the manager, with search-only
+          // access for the workload group. Each isolated profile remains 0700.
+          await mkdir(this.runtimeRoot, { recursive: true, mode: 0o700 });
+          const parent = await lstat(this.runtimeRoot);
+          if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== process.getuid?.()) {
+            throw new Error('The managed profile parent must be a directory owned by the runtime user.');
+          }
+          if (this.spawnUid !== undefined && this.spawnUid !== process.getuid?.()) {
+            await chown(this.runtimeRoot, parent.uid, this.spawnGid!);
+            await chmod(this.runtimeRoot, 0o710);
+          } else await chmod(this.runtimeRoot, 0o700);
+          await mkdir(runtimeDirectory, { mode: 0o700 });
+          created = true;
+          await mkdir(profileUser, { recursive: true, mode: 0o700 });
           await copyFile(
             '/etc/skel/.config/libreoffice/4/user/registrymodifications.xcu',
             resolve(profileUser, 'registrymodifications.xcu'),
@@ -184,7 +198,7 @@ export class DesktopApplicationManager {
             ]);
           }
         } catch (error) {
-          await rm(runtimeDirectory, { recursive: true, force: true });
+          if (created) await rm(runtimeDirectory, { recursive: true, force: true });
           throw new QubiclError('desktop_application_launch_failed', `The fixed LibreOffice desktop-session profile could not be prepared: ${(error as Error).message}`, 500);
         }
       }

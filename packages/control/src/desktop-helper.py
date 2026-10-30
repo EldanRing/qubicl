@@ -295,10 +295,25 @@ class Desktop:
         # Inspect bounded, lightweight metadata before paging. Output budgets
         # must not let earlier hidden widgets/containers bury the editor. Read
         # text, geometry and actions only for the elements actually returned.
-        pending = collections.deque([(capture['root'], None, 0, False)])
+        # A targeted child of a directory pane must retain that content context.
+        ancestor = capture['root']
+        directory_scope = False
+        for _ in range(64):
+            if ancestor is None:
+                break
+            try:
+                if ancestor.get_role_name() == 'directory pane':
+                    directory_scope = capture['root'].get_role_name() in ('directory pane', 'panel', 'filler', 'viewport', 'scroll pane', 'page tab')
+                    break
+                ancestor = ancestor.get_parent()
+            except Exception:
+                capture['unreadable'] += 1
+                break
+        directories = {}
+        pending = collections.deque([(capture['root'], None, 0, False, None)])
         candidates = []
         while pending and len(capture['seen']) < 2000:
-            obj, parent, depth, in_dialog = pending.popleft()
+            obj, parent, depth, in_dialog, directory = pending.popleft()
             if obj in capture['seen']:
                 continue
             capture['seen'].add(obj)
@@ -313,6 +328,11 @@ class Desktop:
                 continue
             ref = f"{key}e{len(capture['refs'])}"
             capture['refs'][ref] = (obj, fingerprint)
+            if fingerprint[1] == 'directory pane' or (depth == 0 and directory_scope):
+                directory = ref
+                directories[directory] = 0
+            if directory and fingerprint[1] in ('icon', 'table cell', 'tree item', 'list item') and fingerprint[2]:
+                directories[directory] += 1
             in_dialog = in_dialog or 'modal' in states or fingerprint[1] in ('dialog', 'alert')
             priority = self.snapshot_priority(states, fingerprint[1], in_dialog)
             if priority < 4 or capture['includeHidden']:
@@ -328,12 +348,15 @@ class Desktop:
                 try:
                     child = obj.get_child_at_index(ci)
                     if child is not None:
-                        pending.append((child, ref, depth + 1, in_dialog))
+                        pending.append((child, ref, depth + 1, in_dialog, directory))
                 except Exception:
                     capture['unreadable'] += 1
             if children > 2000:
                 capture['limited'] = True
         capture['limited'] |= bool(pending)
+        capture['coverageGaps'] = [{'ref': ref, 'reason': 'no_directory_items_exposed',
+            'contentPresence': 'unknown', 'fallback': 'take_screenshot'}
+            for ref, count in directories.items() if not count][:8]
         # Stable sort retains tree order within each priority. Parent refs are
         # retained even when their records appear on a later page or are hidden.
         capture['queue'] = collections.deque(sorted(candidates, key=lambda item: item[0]))
@@ -372,7 +395,8 @@ class Desktop:
             key = secrets.token_hex(12).replace('e', 'x')
             capture = {'windowId': window['id'], 'root': root, 'queue': collections.deque(),
                        'refs': {}, 'seen': set(), 'created': time.monotonic(), 'offset': 0, 'limited': False,
-                       'unreadable': 0, 'hidden': 0, 'includeHidden': args.get('includeHidden', False), 'useful': False}
+                       'unreadable': 0, 'hidden': 0, 'includeHidden': args.get('includeHidden', False), 'useful': False,
+                       'scope': 'subtree' if args.get('ref') else 'window'}
             self.collect_snapshot(capture, key)
             self.captures[key] = capture
             while len(self.captures) > 4:
@@ -409,12 +433,16 @@ class Desktop:
             capture['queue'].popleft()
             capture['refs'][ref] = (obj, fingerprint)
             elements.append(item)
-            capture['useful'] |= priority < 3
+            capture['useful'] |= priority < 3 or bool(item.get('textLength')) or bool(item.get('actions')) or 'editable' in item['states']
         capture['offset'] += len(elements)
         useful = capture['useful'] or any(item[0] < 3 for item in capture['queue'])
         return {'window': window, 'accessibility': 'at-spi', 'elements': elements,
                 'usefulTree': useful,
-                **({} if useful else {'fallback': {'tool': 'take_screenshot', 'reason': 'Application exposes only a sparse native tree. Inspect a screenshot or retry after startup.'}}),
+                'usefulnessScope': capture['scope'],
+                'contentCoverage': 'partial' if capture['coverageGaps'] or capture['unreadable'] or capture['limited'] else 'exposed_tree',
+                'coverageGaps': capture['coverageGaps'],
+                **({'fallback': {'tool': 'take_screenshot', 'reason': 'Directory items were not exposed in this inspected scope. The directory may be empty or its toolkit may omit visible content; inspect a screenshot. Scope limits are reported separately.'}}
+                   if capture['coverageGaps'] else {} if useful else {'fallback': {'tool': 'take_screenshot', 'reason': 'Application exposes only a sparse native tree. Inspect a screenshot or retry after startup.'}}),
                 'nextCursor': f"{key}:{capture['offset']}" if capture['queue'] else None,
                 'truncated': capture['limited'] or bool(capture['queue']), 'scopeLimitReached': capture['limited'],
                 'unreadableElements': capture['unreadable'],
@@ -494,6 +522,8 @@ class Desktop:
             accepted = iface.do_action(names.index(name))
         return {'ref': args['ref'], 'windowId': capture['windowId'], 'dispatch': 'completed',
                 'acceptedByAccessibilityApi': bool(accepted), 'verified': False,
+                **({'undoGrouping': 'application_defined', 'singleUndoGuaranteed': False,
+                    'undoNote': 'AT-SPI EditableText does not expose an edit transaction. Replacement may require multiple Undo operations; inspect the result of each.'} if args['action'] == 'set_text' else {}),
                 'note': 'API acceptance does not prove the intended application effect. Observe the resulting state.'}
 
     def call(self, method, args):

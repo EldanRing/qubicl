@@ -190,8 +190,10 @@ RUN apt-get update \
       swh-plugins \
       iproute2 \
       libreoffice-calc \
+      libreoffice-gtk3 \
       libreoffice-impress \
       libreoffice-writer \
+      fonts-noto-cjk \
       netcat-openbsd \
  && rm -rf /var/lib/apt/lists/* \
  && install -d -m 0755 /etc/skel/.config/libreoffice/4/user

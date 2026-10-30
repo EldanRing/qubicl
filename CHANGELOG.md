@@ -6,6 +6,22 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Fixed
 
+- Native typing sends LF/CRLF as explicit Return events and preserves tabs and
+  Unicode without replacing clipboard formats. Unicode uses normal X11 typing
+  pacing to avoid dropped characters in Qt; literal leading options remain text.
+- Workstation images include Japanese-capable Noto CJK fallback fonts and the
+  LibreOffice GTK accessibility plugin. Office aliases provision a traversable,
+  manager-owned profile parent with private per-application profiles, fixing
+  launch stalls when the control runtime starts apps as the workload user.
+- Both native viewer launchers disable MIT-SHM reads, allowing the separate
+  viewer user to capture workload-owned Xvfb without shared-memory access errors.
+- Window screenshots clip oversized/off-screen windows to their visible screen
+  area by default and report clipping, bounds and origin. Strict clipping opt-out
+  and stale-geometry checks remain; windows are never resized implicitly.
+- Native snapshots distinguish useful targeted text from sparse trees and flag
+  directory content missing from toolkit accessibility, including Thunar icon
+  view, with an explicit visual fallback. Semantic replacement receipts disclose
+  application-defined Undo grouping; AT-SPI cannot guarantee single-step Undo.
 - Port inspection reports available process/session metadata and managed task,
   terminal or desktop-app ownership, using the workload identity for readable
   socket ownership and explicit unknowns when attribution is unavailable.

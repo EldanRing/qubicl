@@ -406,16 +406,17 @@ export const toolDefinitions = {
     lease: true,
   },
   take_screenshot: {
-    description: 'Capture the desktop or a bounded screen region/window as native PNG. Crops return their screen origin for coordinate mapping.',
+    description: 'Capture the desktop or a bounded screen region/window as native PNG. Window capture clips to visible screen bounds by default and reports original/visible geometry and clipping; it never resizes the window. Crops return their screen origin.',
     input: observationOnly.extend({
       region: z.strictObject({ x: z.number().int().min(0), y: z.number().int().min(0), width: z.number().int().min(1).max(16384), height: z.number().int().min(1).max(16384) }).optional(),
       windowId: z.number().int().min(1).max(0xffff_ffff).optional(),
       geometryToken: desktopGeometryToken,
+      clipToScreen: z.boolean().optional().describe('For window captures, defaults to true. False rejects partially off-screen windows. Explicit region bounds remain strict.'),
     }),
     lease: false,
   },
   control_computer: {
-    description: 'Dispatch desktop input in screen coordinates. For keypress, action.keys is a sequence: ["ctrl+End","Return"] sends a chord then Return; ["ctrl","End"] is invalid. Targeted mouse input requires observed window geometry; optional observation returns resulting state without claiming success.',
+    description: 'Dispatch desktop input in screen coordinates. Typing sends LF/CRLF as Return events and leaves clipboard formats untouched. For keypress, action.keys is a sequence: ["ctrl+End","Return"] sends a chord then Return; ["ctrl","End"] is invalid. Targeted mouse input requires observed window geometry; optional observation returns resulting state without claiming success.',
     input: leaseOnly.extend({ action: controlAction, observe: desktopObservation }),
     lease: true,
   },
@@ -434,7 +435,7 @@ export const toolDefinitions = {
     }), lease: false,
   },
   desktop_element_action: {
-    description: 'Invoke a named native action, focus an element, or replace editable text using an observed ref (set_text requires text). API acceptance is distinct from verified application effect.',
+    description: 'Invoke a named native action, focus an element, or replace editable text using an observed ref (set_text requires text). Undo grouping is application-defined; one Undo is not guaranteed to restore the old text. API acceptance is distinct from verified application effect.',
     input: leaseOnly.extend({ ref: desktopRef, action: z.enum(['invoke', 'focus', 'set_text']), actionName: z.string().min(1).max(80).optional(), text: z.string().max(50000).optional(), observe: desktopObservation }), lease: true,
   },
   desktop_window_action: {

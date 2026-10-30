@@ -1378,6 +1378,7 @@ export interface DesktopScreenshotOptions {
   region?: { x: number; y: number; width: number; height: number };
   windowId?: number;
   geometryToken?: string;
+  clipToScreen?: boolean;
 }
 
 export function boundedScreenshotRegion(region: NonNullable<DesktopScreenshotOptions['region']>, screen: { width: number; height: number }): string {
@@ -1394,13 +1395,21 @@ export async function takeScreenshot(options: DesktopScreenshotOptions = {}): Pr
     throw new QubiclError('desktop_screenshot_target_invalid', 'Choose a screen region or a window ID with its observed geometry token.', 400);
   }
   let region = options.region;
+  let windowGeometry: NonNullable<DesktopScreenshotOptions['region']> | undefined;
   if (options.windowId) {
     const observed = await nativeDesktop.validate({ windowId: options.windowId, geometryToken: options.geometryToken });
     region = (observed.window as { geometry: NonNullable<DesktopScreenshotOptions['region']> }).geometry;
+    windowGeometry = region;
   }
   const captureArguments = ['--silent'];
   if (region) {
     const dimensions = (await run('xdotool', ['getdisplaygeometry'])).stdout.trim().split(/\s+/u).map(Number);
+    if (windowGeometry && options.clipToScreen !== false) {
+      const x = Math.max(0, region.x), y = Math.max(0, region.y);
+      region = { x, y, width: Math.min(dimensions[0]!, region.x + region.width) - x,
+        height: Math.min(dimensions[1]!, region.y + region.height) - y };
+      if (region.width <= 0 || region.height <= 0) throw new QubiclError('desktop_window_off_screen', 'The window has no visible screen area. Observe or explicitly reposition it before capturing.', 409);
+    }
     captureArguments.push('--autoselect', boundedScreenshotRegion(region, { width: dimensions[0]!, height: dimensions[1]! }));
   }
   const directory = await mkdtemp(join(tmpdir(), 'qubicl-screenshot-'));
@@ -1410,7 +1419,11 @@ export async function takeScreenshot(options: DesktopScreenshotOptions = {}): Pr
     if (options.windowId) await nativeDesktop.validate({ windowId: options.windowId, geometryToken: options.geometryToken });
     const data = await readFile(target);
     return { mimeType: 'image/png', width: data.readUInt32BE(16), height: data.readUInt32BE(20), data: data.toString('base64'),
-      ...(region ? { origin: { x: region.x, y: region.y }, coordinateSpace: 'screen', ...(options.windowId ? { windowId: options.windowId, geometryToken: options.geometryToken } : {}) } : {}) };
+      ...(region ? { origin: { x: region.x, y: region.y }, coordinateSpace: 'screen', ...(options.windowId ? {
+        windowId: options.windowId, geometryToken: options.geometryToken, windowBounds: windowGeometry, visibleBounds: region,
+        clipped: JSON.stringify(region) !== JSON.stringify(windowGeometry), offscreen: JSON.stringify(region) !== JSON.stringify(windowGeometry),
+        capture: 'visible_screen_region', occlusion: 'not_checked',
+      } : {}) } : {}) };
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1450,7 +1463,15 @@ async function dispatchDesktop(action: ControlAction, runner: DesktopCommandRunn
       await drag(action, runner);
       break;
     case 'type':
-      await runner('xdotool', ['type', '--clearmodifiers', '--delay', '1', action.text ?? '']);
+      // xdotool type drops LF. Send newline runs as explicit Return events;
+      // never borrow CLIPBOARD (which may contain file lists or binary data).
+      for (const part of (action.text ?? '').replace(/\r\n?/gu, '\n').split(/(\n+)/u)) {
+        if (!part) continue;
+        if (part[0] === '\n') await runner('xdotool', ['key', '--clearmodifiers', '--delay', '12', '--repeat-delay', '12', '--repeat', String(part.length), 'Return']);
+        // Unicode may require temporary X11 key mappings. Qt can miss mapping
+        // changes at 1 ms; retain xdotool's normal 12 ms pacing for those runs.
+        else await runner('xdotool', ['type', '--clearmodifiers', '--delay', /\P{ASCII}/u.test(part) ? '12' : '1', '--', part]);
+      }
       break;
     case 'keypress':
       {

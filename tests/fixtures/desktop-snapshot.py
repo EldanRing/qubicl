@@ -70,6 +70,28 @@ def pages(subject, first):
 
 
 class Snapshots(unittest.TestCase):
+    def test_targeted_text_is_useful_and_directory_gaps_are_explicit(self):
+        text = Node('Document', 'panel', text='A complete editable document of 40 chars.')
+        pane = Node('Icon view', 'directory pane', [Node('')])
+        subject = desktop(Node('Window', 'frame', [text, pane]))
+        snapshot = subject.snapshot({'windowId': 42})
+        self.assertEqual(snapshot['contentCoverage'], 'partial')
+        self.assertEqual(snapshot['coverageGaps'][0]['contentPresence'], 'unknown')
+        ref = next(item['ref'] for item in snapshot['elements'] if item['name'] == 'Document')
+        targeted = subject.snapshot({'windowId': 42, 'ref': ref})
+        self.assertTrue(targeted['usefulTree'])
+        self.assertNotIn('fallback', targeted)
+        self.assertEqual(targeted['usefulnessScope'], 'subtree')
+        self.assertEqual(targeted['elements'][0]['text'], text.text)
+        self.assertFalse(targeted['elements'][0]['textTruncated'])
+        child = next(item['ref'] for item in snapshot['elements'] if item['parent'] and item['name'] == '')
+        self.assertEqual(subject.snapshot({'windowId': 42, 'ref': child})['contentCoverage'], 'partial')
+        file = Node('example.txt', 'icon')
+        subject = desktop(Node('Icon view', 'directory pane', [file]))
+        exposed = subject.snapshot({'windowId': 42})
+        self.assertEqual(exposed['coverageGaps'], [])
+        self.assertTrue(any(item['name'] == 'example.txt' for item in exposed['elements']))
+
     def test_text_continuation_is_captured_unicode_and_passwords_are_excluded(self):
         text = 'line 🧪\n' * 900 + 'END'
         editor = Node('Editor', 'text', editable=True, text=text)
