@@ -72,6 +72,79 @@ def pages(subject, first):
 
 
 class Snapshots(unittest.TestCase):
+    def test_compact_windows_preserve_targeting_and_full_geometry_is_addressable(self):
+        subject = desktop(Node('Window'))
+        bounds = {'x': 0, 'y': 0, 'width': 1440, 'height': 900}
+        full = {'id': 42, 'pid': 10, 'title': 'Editor', 'active': True, 'visible': True,
+                'modal': False, 'transientFor': None, 'geometry': bounds,
+                'geometryToken': 'a' * 24, 'desktopBounds': bounds, 'workArea': bounds,
+                'frameExtents': {'top': 30, 'left': 0, 'right': 0, 'bottom': 0},
+                'clientToScreen': {'offsetX': 0, 'offsetY': 0, 'scale': 1}}
+        subject.inventory = lambda: [full, {**full, 'id': 43, 'active': False}]
+        subject.desktop_bounds = lambda: {'desktopBounds': bounds, 'workArea': bounds}
+        subject.window = lambda _: full
+        compact = subject.windows({'detail': 'compact'})
+        self.assertEqual(compact['windows'][0]['geometry'], full['geometry'])
+        self.assertEqual(compact['windows'][0]['geometryToken'], full['geometryToken'])
+        self.assertNotIn('clientToScreen', compact['windows'][0])
+        self.assertNotIn('workArea', compact['windows'][0])
+        self.assertEqual(compact['workArea'], bounds)
+        self.assertEqual(subject.windows({'windowId': 42})['windows'], [full])
+        self.assertEqual(subject.windows({'windowId': 99})['windows'], [])
+        subject.validate({'windowId': 42, 'geometryToken': compact['windows'][0]['geometryToken']})
+        full['geometryToken'] = 'b' * 24
+        with self.assertRaises(helper.Failure) as error:
+            subject.validate({'windowId': 42, 'geometryToken': compact['windows'][0]['geometryToken']})
+        self.assertEqual(error.exception.code, 'stale_desktop_geometry')
+
+    def test_target_observation_is_small_live_exact_and_does_not_replace_refs(self):
+        text = ('line 界\n' * 600) + 'tail'
+        editor = Node('Editor', 'text', editable=True, text=text)
+        editor.states.add('FOCUSED')
+        password = Node('Password', 'password text', text='private')
+        subject = desktop(Node('Window', 'frame', [editor, password, *[Node('Menu') for _ in range(60)]]))
+        subject.inventory = lambda: [{'id': 42, 'title': 'Editor'}, {'id': 43, 'title': 'Save', 'transientFor': 42}]
+        subject.desktop_bounds = lambda: {}
+        snapshot = subject.snapshot({'windowId': 42})
+        ref = next(item['ref'] for item in snapshot['elements'] if item['name'] == 'Editor')
+        refs = list(subject.captures)
+        result = subject.observe({'ref': ref, 'maxBytes': 2048})
+        self.assertEqual(result['element']['ref'], ref)
+        self.assertIn('focused', result['element']['states'])
+        self.assertTrue(result['element']['textTruncated'])
+        self.assertLessEqual(len(json.dumps(result['element'], ensure_ascii=False).encode()), 2048)
+        self.assertEqual(result['relatedWindows'][0]['id'], 43)
+        self.assertNotIn('elements', result)
+        self.assertEqual(list(subject.captures), refs)
+        condition = {'state': 'text', 'ref': ref, 'text': text}
+        self.assertTrue(subject.observe({'waitFor': condition})['conditionMatched'])
+        editor.text = text[:-4] + 'DIFFERENT TAIL'
+        self.assertFalse(subject.observe({'waitFor': condition})['conditionMatched'])
+        secret = next(item['ref'] for item in snapshot['elements'] if item['name'] == 'Password')
+        self.assertNotIn('text', subject.observe({'ref': secret})['element'])
+        with self.assertRaises(helper.Failure) as error:
+            subject.observe({'waitFor': {'state': 'text', 'ref': secret, 'text': 'private'}})
+        self.assertEqual(error.exception.code, 'desktop_sensitive_text')
+        value = types.SimpleNamespace(get_current_value=lambda: 3, get_minimum_value=lambda: 1,
+                                      get_maximum_value=lambda: 10, get_minimum_increment=lambda: 1)
+        editor.get_value_iface = lambda: value
+        self.assertTrue(subject.observe({'waitFor': {'state': 'value', 'ref': ref, 'value': 3}})['conditionMatched'])
+        self.assertFalse(subject.observe({'waitFor': {'state': 'value', 'ref': ref, 'value': 4}})['conditionMatched'])
+        subject.captures.clear()
+        missing = subject.observe({'waitFor': condition})
+        self.assertEqual(missing['targetStatus'], 'unavailable')
+        self.assertFalse(missing['conditionMatched'])
+
+    def test_window_closed_predicate_checks_beyond_first_inventory_page(self):
+        subject = desktop(Node('Window'))
+        inventory = [{'id': i, 'title': f'Window {i}'} for i in range(1, 80)]
+        subject.inventory = lambda: inventory
+        subject.desktop_bounds = lambda: {}
+        request = {'waitFor': {'state': 'window_closed', 'windowId': 79}}
+        self.assertFalse(subject.observe(request)['conditionMatched'])
+        inventory.pop()
+        self.assertTrue(subject.observe(request)['conditionMatched'])
+
     def test_closed_popup_children_are_hidden_without_pruning_generic_structural_parents(self):
         ghost = Node('Autodetect', 'list item')
         ghost.states.add('FOCUSED')

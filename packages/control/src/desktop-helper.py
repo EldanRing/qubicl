@@ -117,8 +117,20 @@ class Desktop:
             raise Failure('stale_desktop_window', 'Window no longer exists. Refresh list_desktop_windows.')
         return found
 
-    def windows(self, args):
-        windows = self.inventory()
+    @staticmethod
+    def window_record(window, detail='full'):
+        if detail != 'compact':
+            return window
+        keys = ('id', 'pid', 'title', 'className', 'active', 'visible', 'modal', 'transientFor',
+                'windowTypes', 'geometry', 'geometryToken')
+        return {key: window[key] for key in keys if key in window}
+
+    def windows(self, args, inventory=None):
+        windows = self.inventory() if inventory is None else inventory
+        if args.get('windowId'):
+            windows = [window for window in windows if window['id'] == args['windowId']]
+        detail = args.get('detail', 'full')
+        windows = [self.window_record(window, detail) for window in windows]
         start = args.get('cursor', 0)
         page = []
         # Long app-controlled titles must not make an observation unbounded.
@@ -128,7 +140,7 @@ class Desktop:
             page.append(window)
         end = start + len(page)
         return {'windows': page, 'total': len(windows), 'nextCursor': end if end < len(windows) else None,
-                'observedAt': time.time(), 'order': 'bottom_to_top', 'cursorConsistency': 'live_inventory', **self.desktop_bounds()}
+                'detail': detail, 'observedAt': time.time(), 'order': 'bottom_to_top', 'cursorConsistency': 'live_inventory', **self.desktop_bounds()}
 
     def validate(self, args):
         window = self.window(args['windowId'])
@@ -545,6 +557,7 @@ class Desktop:
     def snapshot(self, args):
         self.expire()
         window = self.window(args['windowId'])
+        output_window = self.window_record(window, args.get('detail', 'full'))
         if 'textOffset' in args or args.get('textCursor'):
             return self.read_text(args, window)
         cursor = args.get('cursor')
@@ -570,7 +583,7 @@ class Desktop:
             if args.get('ref') and self.resolve(args['ref'])[1]['windowId'] != window['id']:
                 raise Failure('desktop_ref_window_mismatch', 'Reference belongs to a different window.')
             if root is None:
-                return {'window': window, 'accessibility': 'unavailable', 'elements': [], 'nextCursor': None,
+                return {'window': output_window, 'accessibility': 'unavailable', 'elements': [], 'nextCursor': None,
                         'windowMatch': getattr(self, 'last_window_match', None),
                         'fallback': {'tool': 'take_screenshot', 'reason': inspection_error or 'No unambiguous AT-SPI window was exposed by this application.'}}
             if args.get('tableRange') and not self.table_iface(root):
@@ -627,7 +640,7 @@ class Desktop:
             capture['useful'] |= priority < 3 or bool(item.get('textLength')) or bool(item.get('actions')) or 'editable' in item['states']
         capture['offset'] += len(elements)
         useful = capture['useful'] or any(item[0] < 3 for item in capture['queue'])
-        return {'window': window, 'accessibility': 'at-spi', 'elements': elements,
+        return {'window': output_window, 'accessibility': 'at-spi', 'elements': elements,
                 'usefulTree': useful,
                 'usefulnessScope': capture['scope'],
                 'contentCoverage': 'partial' if capture['coverageGaps'] or capture['unreadable'] or capture['limited'] or any(not table['complete'] for table in capture['tables'].values()) else 'exposed_tree',
@@ -689,6 +702,69 @@ class Desktop:
                 'capturedAt': capture['capturedAt'], 'consistency': 'captured_text', 'offsetUnit': 'unicode_code_points',
                 'offset': offset, 'nextOffset': end, 'totalCharacters': len(text), 'totalBytes': capture['bytes'],
                 'textTruncated': end < len(text), 'nextTextCursor': f'{key}:{end}' if end < len(text) else None}
+
+    def observe(self, args):
+        condition = args.get('waitFor')
+        inventory = self.inventory()
+        detail = args.get('detail', 'compact')
+        if condition and condition['state'] == 'window_closed':
+            result = self.windows({'detail': detail}, inventory)
+            result['conditionMatched'] = not any(window['id'] == condition['windowId'] for window in inventory)
+            return result
+        ref = condition.get('ref') if condition else args.get('ref')
+        if not ref:
+            return self.windows({'detail': detail}, inventory)
+        try:
+            obj, capture = self.resolve(ref)
+            window = next((item for item in inventory if item['id'] == capture['windowId']), None)
+            if window is None:
+                raise Failure('stale_desktop_window', 'Observed window closed.')
+            item, _ = self.describe(obj, ref, None, 0)
+            # Keep value/focus feedback small; discovery and action inventories
+            # remain available through the existing snapshot/ref interfaces.
+            item = {key: value for key, value in item.items() if key in
+                    ('ref', 'name', 'role', 'states', 'text', 'textLength', 'textTruncated', 'value')}
+            if 'textLength' in item:
+                item['textRead'] = {'windowId': window['id'], 'ref': ref, 'textOffset': 0}
+            budget = max(2048, min(args.get('maxBytes', 4000), 18000))
+            while len(json.dumps(item, ensure_ascii=False).encode()) > budget:
+                if item.get('text'):
+                    item['text'] = item['text'][:len(item['text']) * 3 // 4]
+                    item['textTruncated'] = True
+                else:
+                    item['name'] = bounded(item['name'], 128)
+                    break
+            related = [candidate for candidate in inventory
+                       if candidate['id'] != window['id'] and candidate.get('transientFor') == window['id']]
+            result = {'window': self.window_record(window, detail), 'element': item,
+                      'targetStatus': 'observed', 'observedAt': time.time(), 'relatedWindows': [],
+                      'relatedWindowCount': len(related), 'relatedWindowsTruncated': False}
+            for candidate in related[:16]:
+                compact = self.window_record(candidate, 'compact')
+                if len(json.dumps(result, ensure_ascii=False).encode()) + len(json.dumps(compact, ensure_ascii=False).encode()) > 22000:
+                    break
+                result['relatedWindows'].append(compact)
+            result['relatedWindowsTruncated'] = len(result['relatedWindows']) < len(related)
+            if condition:
+                if condition['state'] == 'text':
+                    if obj.get_role() == Atspi.Role.PASSWORD_TEXT:
+                        raise Failure('desktop_sensitive_text', 'Password text cannot be observed or compared.')
+                    iface = obj.get_text_iface()
+                    expected = condition['text']
+                    # Exact comparison, including text beyond the bounded receipt.
+                    result['conditionMatched'] = bool(iface and iface.get_character_count() == len(expected)
+                                                       and Atspi.Text.get_text(iface, 0, len(expected)) == expected)
+                else:
+                    result['conditionMatched'] = item.get('value', {}).get('current') == condition['value']
+            return result
+        except Failure as error:
+            if error.code not in ('stale_desktop_ref', 'stale_desktop_window'):
+                raise
+            result = self.windows({'detail': detail}, inventory)
+            result.update(targetStatus='unavailable', targetError=error.code)
+            if condition:
+                result['conditionMatched'] = False
+            return result
 
     def gtk_button_activate(self, obj, capture):
         # GTK3 invokes button callbacks synchronously inside the AT-SPI D-Bus
@@ -790,7 +866,7 @@ class Desktop:
                 break
             context.iteration(False)
         handlers = {'windows': self.windows, 'validate': self.validate, 'window_action': self.window_action,
-                    'snapshot': self.snapshot, 'act': self.act, 'close_process': self.close_process, 'clipboard_status': self.clipboard_status}
+                    'snapshot': self.snapshot, 'observe': self.observe, 'act': self.act, 'close_process': self.close_process, 'clipboard_status': self.clipboard_status}
         if method not in handlers:
             raise Failure('invalid_desktop_method', 'Unsupported native desktop operation.')
         return handlers[method](args)

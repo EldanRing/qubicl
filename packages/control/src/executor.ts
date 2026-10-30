@@ -1,6 +1,7 @@
 import { clipboardReader, type ClipboardReadInput } from './clipboard.js';
 import type { WebSearchInput } from './web.js';
-import { nativeDesktop, type NativeDesktopMethod } from './desktop-native.js';
+import { nativeDesktop, type NativeDesktopMethod, type DesktopActionObservation } from './desktop-native.js';
+import { waitForDesktopObservation } from './desktop-observation.js';
 import { OfficePreviewManager } from './office-preview.js';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -147,6 +148,7 @@ export class ToolExecutor {
   readonly desktop: DesktopController;
   private desktopOperationQueue: Promise<unknown> = Promise.resolve();
   private pendingDesktopOperations = 0;
+  private pendingDesktopObservation: Promise<unknown> | undefined;
   readonly previews: PreviewManager;
   readonly broker: RemoteBrokerManager | undefined;
   readonly web: WebController | undefined;
@@ -558,7 +560,7 @@ export class ToolExecutor {
       case 'desktop_window_action': {
         return respond(await runDesktop(async () => {
           const result = await this.nativeDesktopCall(name === 'desktop_element_action' ? 'act' : 'windowAction', input);
-          return this.observeDesktop(result, input.observe as string, result.windowId as number);
+          return this.observeDesktop(result, input as DesktopActionObservation, result.windowId as number);
         }));
       }
       case 'control_computer':
@@ -569,7 +571,7 @@ export class ToolExecutor {
             try {
               const result = await this.desktop.control(action);
               if (pointer) this.viewerPointers.confirm(pointer.actionId);
-              return this.observeDesktop(result, input.observe as string, action.targetWindowId);
+              return this.observeDesktop(result, input as DesktopActionObservation, action.targetWindowId);
             } catch (error) {
               if (pointer) this.viewerPointers.cancel(pointer.actionId);
               throw error;
@@ -919,6 +921,10 @@ export class ToolExecutor {
     if (this.pendingDesktopOperations >= 32) throw new QubiclError('desktop_busy', 'Desktop request queue is full. Wait for the pending observation or action.', 429);
     this.pendingDesktopOperations += 1;
     const next = this.desktopOperationQueue.then(async () => {
+      // An expected-state deadline may return before its read-only native probe
+      // finishes. Do not queue input behind that probe until ownership can be
+      // checked again at its actual dispatch boundary.
+      await this.pendingDesktopObservation;
       if (owner) beforeDispatch(() => this.leases.verifyInteractive(owner));
       return afterDispatch(async () => {
         const result = await operation();
@@ -1002,19 +1008,45 @@ export class ToolExecutor {
 
   private nativeDesktopCall(method: NativeDesktopMethod, input: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (!this.desktop.native) throw new QubiclError('desktop_inspection_unavailable', 'Native desktop inspection is unavailable.', 503);
-    return this.desktop.native(method, Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'lease' && key !== 'observe')));
+    return this.desktop.native(method, Object.fromEntries(Object.entries(input).filter(([key]) => !['lease', 'observe', 'observationOptions'].includes(key) && (key !== 'waitFor' || method === 'observe'))));
   }
 
-  private async observeDesktop(result: unknown, observe: string | undefined, windowId?: number): Promise<unknown> {
-    if (!observe || observe === 'none') return result;
-    const actionResult = result as Record<string, unknown>;
+  private async observeDesktop(result: unknown, input: DesktopActionObservation, windowId?: number): Promise<unknown> {
+    const { observe, observationOptions: options = {}, waitFor } = input;
+    if ((!observe || observe === 'none') && !waitFor) return result;
+    let actionResult = result as Record<string, unknown>;
     try {
+      if (waitFor) {
+        // Wait predicates are passed only to this read-only helper operation,
+        // never to dispatch. Keep the last sample and never infer task success.
+        const waited = await waitForDesktopObservation(waitFor, () => {
+          const probe = this.nativeDesktopCall('observe', { ...options, waitFor, detail: options.detail ?? 'compact' });
+          const drain = probe.catch(() => undefined);
+          this.pendingDesktopObservation = drain;
+          void drain.then(() => { if (this.pendingDesktopObservation === drain) this.pendingDesktopObservation = undefined; });
+          return probe;
+        });
+        actionResult = { ...actionResult, wait: waited.wait };
+        if (!observe || ['none', 'target'].includes(observe) || waited.wait.status !== 'observed'
+          || (observe === 'windows' && waitFor.state === 'window_closed')) {
+          return { ...actionResult, ...(waited.observation ? { observation: waited.observation } : {}),
+            observationKind: waitFor.state === 'window_closed' ? 'windows' : 'target' };
+        }
+      }
+      if (observe === 'target') {
+        return { ...actionResult, observationKind: 'target', observation: await this.nativeDesktopCall('observe', {
+          ...options, ref: options.ref ?? actionResult.ref, detail: options.detail ?? 'compact',
+        }) };
+      }
       if (observe === 'screenshot') return { ...actionResult, ...await this.desktop.screenshot() as object, observation: { kind: 'screenshot' } };
-      const windows = await this.nativeDesktopCall('windows', {});
+      // A targeted snapshot needs no inventory round trip. Window discovery is
+      // needed only when the input had no target or explicitly requested it.
+      if (observe === 'snapshot' && windowId) return { ...actionResult, observation: await this.nativeDesktopCall('snapshot', { ...options, windowId }) };
+      const windows = await this.nativeDesktopCall('windows', { detail: options.detail ?? 'full' });
       if (observe === 'windows') return { ...actionResult, observation: windows };
-      const target = windowId ?? (windows.windows as Array<{ id: number; active: boolean }>).find((window) => window.active)?.id;
+      const target = (windows.windows as Array<{ id: number; active: boolean }>).find((window) => window.active)?.id;
       if (!target) return { ...actionResult, observation: windows };
-      return { ...actionResult, observation: await this.nativeDesktopCall('snapshot', { windowId: target }) };
+      return { ...actionResult, observation: await this.nativeDesktopCall('snapshot', { ...options, windowId: target }) };
     } catch (error) {
       return { ...actionResult, observationError: { code: error instanceof QubiclError ? error.code : 'desktop_observation_failed', message: (error as Error).message }, note: 'Action already dispatched; observation failed. Inspect before retrying the action.' };
     }

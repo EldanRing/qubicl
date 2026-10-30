@@ -37,7 +37,21 @@ const targetWindowId = z.number().int().positive().max(0xffff_ffff).optional().d
 const desktopGeometryToken = z.string().regex(/^[a-f0-9]{24}$/).optional().describe('geometryToken from list_desktop_windows or desktop_snapshot. Required for window-targeted mouse input; stale geometry rejects dispatch.');
 const desktopTarget = { targetWindowId, geometryToken: desktopGeometryToken };
 const desktopRef = z.string().regex(/^[a-df0-9x]{24}e\d{1,4}$/);
-const desktopObservation = z.enum(['none', 'windows', 'snapshot', 'screenshot']).default('none');
+const desktopObservation = z.enum(['none', 'windows', 'snapshot', 'screenshot', 'target']).default('none');
+const desktopWindowDetail = z.enum(['full', 'compact']);
+const desktopObservationOptions = z.strictObject({
+  detail: desktopWindowDetail.optional(),
+  ref: desktopRef.optional().describe('Optional subtree for observe=snapshot; otherwise target observations use the acted-on ref.'),
+  limit: z.number().int().min(1).max(200).optional(),
+  maxBytes: z.number().int().min(2048).max(18000).optional().describe('Element/text JSON payload budget; window/envelope and transport metadata are additional.'),
+}).optional();
+const desktopWaitTimeout = z.number().int().min(1).max(10000).default(2000);
+const desktopWaitFor = z.discriminatedUnion('state', [
+  z.strictObject({ state: z.literal('window_closed'), windowId: z.number().int().positive().max(0xffff_ffff), timeoutMs: desktopWaitTimeout }),
+  z.strictObject({ state: z.literal('text'), ref: desktopRef, text: z.string().max(50000), timeoutMs: desktopWaitTimeout }),
+  z.strictObject({ state: z.literal('value'), ref: desktopRef, value: z.number().finite(), timeoutMs: desktopWaitTimeout }),
+]).optional().describe('After dispatch, observe until this exact state appears or the bounded deadline expires. not_observed_yet is not action failure; input is never replayed. Password text cannot be observed.');
+const desktopActionObservation = { observe: desktopObservation, observationOptions: desktopObservationOptions, waitFor: desktopWaitFor };
 export const DesktopApplicationNameSchema = z.string().min(1).max(4096).refine(
   (value) => /^desktop:[A-Za-z0-9][A-Za-z0-9._+-]*\.desktop$/u.test(value) || /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u.test(value) || (value.startsWith('/') && !/\p{Cc}/u.test(value)),
   'must be a desktop:entry.desktop ID, executable name or absolute executable path',
@@ -417,31 +431,31 @@ export const toolDefinitions = {
   },
   control_computer: {
     description: 'Dispatch desktop input in screen coordinates. Typing sends LF/CRLF as Return events and leaves clipboard formats untouched. For keypress, action.keys is a sequence: ["ctrl+End","Return"] sends a chord then Return; ["ctrl","End"] is invalid. Targeted mouse input requires observed window geometry; optional observation returns resulting state without claiming success.',
-    input: leaseOnly.extend({ action: controlAction, observe: desktopObservation }),
+    input: leaseOnly.extend({ action: controlAction, ...desktopActionObservation }),
     lease: true,
   },
   list_desktop_windows: {
-    description: 'List native windows in stacking order with IDs, titles, client geometry, geometry tokens and modal relationships. Cursor pages through the live inventory.',
-    input: observationOnly.extend({ cursor: z.number().int().min(0).max(4096).default(0) }), lease: false,
+    description: 'List native windows in stacking order with IDs, titles and modal relationships. detail=compact keeps client geometry/tokens but omits repeated coordinate metadata; full is the compatible default. Use windowId for one exact window. Cursor pages through the live inventory.',
+    input: observationOnly.extend({ cursor: z.number().int().min(0).max(4096).default(0), detail: desktopWindowDetail.default('full'), windowId: z.number().int().positive().max(0xffff_ffff).optional() }), lease: false,
   },
   desktop_snapshot: {
     description: 'Inspect native AT-SPI elements, prioritizing visible editable and dialog controls over structure. Hidden elements are omitted unless includeHidden is true. Continue with cursor; use ref for a subtree. Use ref plus textOffset=0 to capture complete native text; follow nextTextCursor with textCursor. Text offsets count Unicode code points. Passwords are excluded. Reports a screenshot fallback when accessibility is unavailable.',
     input: observationOnly.extend({
       windowId: z.number().int().positive().max(0xffff_ffff),
       cursor: z.string().regex(/^[a-df0-9x]{24}:\d{1,5}$/).optional(), ref: desktopRef.optional(),
-      includeHidden: z.boolean().optional(),
+      includeHidden: z.boolean().optional(), detail: desktopWindowDetail.optional(),
       tableRange: z.strictObject({ row: z.number().int().min(0), column: z.number().int().min(0), rows: z.number().int().min(1).max(200).default(12), columns: z.number().int().min(1).max(200).default(8) }).refine(range => range.rows * range.columns <= 200, 'at most 200 table cells per range').optional().describe('Zero-based native table range. Use the table ref and table.nextTableRange to inspect virtual cells without walking every child.'),
       textOffset: z.number().int().min(0).max(8000000).optional(), textCursor: z.string().regex(/^[a-f0-9]{24}:\d{1,8}$/).optional(),
-      limit: z.number().int().min(1).max(200).default(100), maxBytes: z.number().int().min(2048).max(18000).default(16000),
+      limit: z.number().int().min(1).max(200).default(100), maxBytes: z.number().int().min(2048).max(18000).default(16000).describe('Element-list or text JSON budget; window/envelope and transport metadata are additional.'),
     }), lease: false,
   },
   desktop_element_action: {
-    description: 'Invoke a named native action, focus an element, replace editable text (set_text requires text), or set an AT-SPI numeric model value (set_value requires value) using an observed ref. Numeric values report limits and readback; text replacement alone need not commit the numeric value of a spin control. Undo grouping is application-defined; one Undo is not guaranteed to restore the old text. API acceptance is distinct from verified application effect.',
-    input: leaseOnly.extend({ ref: desktopRef, action: z.enum(['invoke', 'focus', 'set_text', 'set_value']), actionName: z.string().min(1).max(80).optional(), text: z.string().max(50000).optional(), value: z.number().finite().optional(), observe: desktopObservation }), lease: true,
+    description: 'Invoke a named native action, focus an element, replace editable text (set_text requires text), or set an AT-SPI numeric model value (set_value requires value) using an observed ref. Numeric values report limits and readback; text replacement alone need not commit the numeric value of a spin control. Undo grouping is application-defined; one Undo is not guaranteed to restore the old text. API acceptance is distinct from verified application effect. observe=target returns only the affected value/states and related windows; waitFor optionally observes an exact state without replaying input.',
+    input: leaseOnly.extend({ ref: desktopRef, action: z.enum(['invoke', 'focus', 'set_text', 'set_value']), actionName: z.string().min(1).max(80).optional(), text: z.string().max(50000).optional(), value: z.number().finite().optional(), ...desktopActionObservation }), lease: true,
   },
   desktop_window_action: {
     description: 'Request focus, explicit fit to usable workarea, or normal close through the window manager. Close leaves Save/Discard/Cancel dialogs to the application; it never terminates a process.',
-    input: leaseOnly.extend({ windowId: z.number().int().positive().max(0xffff_ffff), action: z.enum(['focus', 'close', 'fit']), geometryToken: desktopGeometryToken, observe: desktopObservation }), lease: true,
+    input: leaseOnly.extend({ windowId: z.number().int().positive().max(0xffff_ffff), action: z.enum(['focus', 'close', 'fit']), geometryToken: desktopGeometryToken, ...desktopActionObservation }), lease: true,
   },
   browser_navigate: {
     description: 'Open an HTTP or HTTPS URL in the persistent visible browser.',

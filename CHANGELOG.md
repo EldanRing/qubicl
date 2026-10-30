@@ -4,8 +4,20 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ## Unreleased
 
+### Added
+
+- Desktop window inventories offer compact metadata and single-window reads.
+  Actions can return only the affected element's value/focus and related windows,
+  with optional snapshot bounds. Existing full observations remain available.
+- Desktop actions can wait for a declared window disappearance or exact text/
+  numeric value with a bounded deadline. Receipts distinguish observed state
+  from `not_observed_yet` without replaying input or treating timeout as failure.
+
 ### Fixed
 
+- Targeted desktop post-action snapshots avoid a redundant window-list round trip.
+  Native snapshot documentation and schemas clarify that byte budgets cover
+  element/text payloads, with window, status and transport metadata additional.
 - PDF merge and split preserve interactive form fields and resources, verify the
   saved field/widget structure, and report deterministic field-name collisions.
   Deleted PowerPoint slides lose incoming links and unreachable package content

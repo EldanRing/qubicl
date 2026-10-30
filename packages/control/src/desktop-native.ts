@@ -10,12 +10,19 @@ export interface DesktopWindow {
   geometryToken: string; transientFor: number | null; modal: boolean; active: boolean;
 }
 export interface DesktopSnapshotInput {
-  windowId: number; cursor?: string; ref?: string; limit?: number; maxBytes?: number; includeHidden?: boolean; textOffset?: number; textCursor?: string; tableRange?: { row: number; column: number; rows?: number; columns?: number };
+  windowId: number; detail?: 'full' | 'compact'; cursor?: string; ref?: string; limit?: number; maxBytes?: number; includeHidden?: boolean; textOffset?: number; textCursor?: string; tableRange?: { row: number; column: number; rows?: number; columns?: number };
 }
 export interface DesktopElementAction {
   ref: string; action: 'invoke' | 'focus' | 'set_text' | 'set_value'; actionName?: string; text?: string; value?: number;
 }
-export type NativeDesktopMethod = 'windows' | 'snapshot' | 'act' | 'windowAction';
+export interface DesktopObservationOptions { detail?: 'full' | 'compact'; ref?: string; limit?: number; maxBytes?: number }
+export type DesktopWaitFor = { timeoutMs: number } & (
+  { state: 'window_closed'; windowId: number } | { state: 'text'; ref: string; text: string } | { state: 'value'; ref: string; value: number }
+);
+export interface DesktopActionObservation {
+  observe?: string; observationOptions?: DesktopObservationOptions; waitFor?: DesktopWaitFor;
+}
+export type NativeDesktopMethod = 'windows' | 'snapshot' | 'observe' | 'act' | 'windowAction';
 interface NativeOptions { script?: string; uid?: number; gid?: number; environment?: NodeJS.ProcessEnv }
 
 /** A private, workload-user helper retains the actual AT-SPI objects behind refs. */
@@ -33,7 +40,8 @@ export class NativeDesktopManager {
 
   invoke(method: NativeDesktopMethod, input: Record<string, unknown>): Promise<Record<string, unknown>> {
     switch (method) {
-      case 'windows': return this.windows(input.cursor as number | undefined);
+      case 'windows': return this.request('windows', input);
+      case 'observe': return this.request('observe', input);
       case 'snapshot': return this.snapshot(input as unknown as DesktopSnapshotInput);
       case 'act': return this.act(input as unknown as DesktopElementAction);
       case 'windowAction': return this.windowAction(input.windowId as number, input.action as 'focus' | 'close' | 'fit', input.geometryToken as string | undefined);

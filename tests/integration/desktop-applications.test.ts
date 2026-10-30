@@ -165,6 +165,90 @@ test('native desktop actions return observations, strip lease secrets and fence 
   assert.equal(calls.filter(({ method }) => method === 'windowAction').length, 1, 'queued close must never reach the session');
 });
 
+test('desktop focused observations and expected-state waits preserve one dispatch and explicit timeout receipts', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-native-observe-'));
+  const manifest = buildComputerManifest('workstation', 'test', 'revision');
+  const ref = 'a'.repeat(24) + 'e0';
+  const calls: Array<{ method: string; input: Record<string, unknown> }> = [];
+  let probes = 0;
+  let match = false;
+  const executor = new ToolExecutor({ manifest, sha256: manifestSha256(manifest) }, {
+    processes: new ProcessManager({ outputDirectory: join(root, 'output') }),
+    desktop: {
+      native: async (method, input) => {
+        calls.push({ method, input });
+        if (method === 'act') return { ref, windowId: 42, dispatch: 'completed', verified: false, acceptedByAccessibilityApi: null };
+        if (method === 'observe' && input.waitFor) {
+          probes++;
+          return { conditionMatched: match && probes > 1, windows: match && probes > 1 ? [] : [{ id: 42 }] };
+        }
+        if (method === 'observe') return { element: { ref, text: 'Two\nlines', states: ['focused'] } };
+        return { window: { id: 42 }, elements: [{ ref }] };
+      },
+      screenshot: async () => ({}), control: async () => ({}),
+      readClipboard: async () => ({ text: '' }), writeClipboard: async () => ({ written: true }),
+    },
+  });
+  context.after(async () => { await executor.shutdown(); await rm(root, { recursive: true, force: true }); });
+  const lease = executor.leases.acquire(60);
+  const focused = await executor.call('desktop_element_action', { lease, ref, action: 'set_text', text: 'Two\nlines', observe: 'target', observationOptions: { maxBytes: 2048 } }) as Record<string, unknown>;
+  assert.deepEqual(focused.observation, { element: { ref, text: 'Two\nlines', states: ['focused'] } });
+  assert.equal(focused.verified, false);
+  assert.deepEqual(calls.map(call => call.method), ['act', 'observe']);
+  assert.equal(calls[1]!.input.detail, 'compact');
+  assert.equal(calls[1]!.input.maxBytes, 2048);
+  assert.equal(calls[1]!.input.ref, ref);
+  await executor.call('desktop_element_action', { lease, ref, action: 'focus', observe: 'snapshot', observationOptions: { ref, limit: 2, maxBytes: 2048, detail: 'compact' } });
+  assert.deepEqual(calls.at(-1), { method: 'snapshot', input: { ref, windowId: 42, limit: 2, maxBytes: 2048, detail: 'compact' } });
+  assert.ok(!calls.some(call => call.method === 'windows'), 'targeted snapshots need no redundant window inventory');
+  const waitFor = { state: 'window_closed', windowId: 42, timeoutMs: 20 };
+  const timeout = await executor.call('desktop_element_action', { lease, ref, action: 'invoke', observe: 'windows', waitFor }) as Record<string, unknown>;
+  assert.equal((timeout.wait as Record<string, unknown>).status, 'not_observed_yet');
+  assert.equal(timeout.dispatch, 'completed');
+  assert.equal(timeout.verified, false);
+  assert.equal(timeout.acceptedByAccessibilityApi, null);
+  assert.equal(calls.filter(call => call.method === 'act').length, 3);
+  match = true; probes = 0;
+  const done = await executor.call('desktop_element_action', { lease, ref, action: 'invoke', observe: 'windows', waitFor: { ...waitFor, timeoutMs: 2000 } }) as Record<string, unknown>;
+  assert.equal((done.wait as Record<string, unknown>).status, 'observed');
+  assert.deepEqual(done.observation, { windows: [] });
+  assert.equal(done.verified, false);
+  assert.equal(calls.filter(call => call.method === 'act').length, 4, 'wait must never repeat input');
+  assert.ok(calls.every(call => !('lease' in call.input) && !('observationOptions' in call.input)));
+  assert.ok(calls.filter(call => call.method === 'act').every(call => !('waitFor' in call.input)));
+  await assert.rejects(executor.call('desktop_element_action', { lease, ref, action: 'invoke', waitFor: { ...waitFor, timeoutMs: 10001 } }), /10000|too_big|invalid/i);
+  assert.equal(calls.filter(call => call.method === 'act').length, 4, 'invalid wait cannot dispatch');
+});
+
+test('a timed-out native observation cannot hide queued input from takeover fencing', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-native-wait-fence-'));
+  const manifest = buildComputerManifest('workstation', 'test', 'revision');
+  let completeRead: ((value: Record<string, unknown>) => void) | undefined;
+  let dispatches = 0;
+  const executor = new ToolExecutor({ manifest, sha256: manifestSha256(manifest) }, {
+    processes: new ProcessManager({ outputDirectory: join(root, 'output') }),
+    desktop: {
+      native: async (method) => {
+        if (method === 'observe') return new Promise((resolve) => { completeRead = resolve; });
+        dispatches++;
+        return { windowId: 42, dispatch: 'completed', verified: false };
+      },
+      screenshot: async () => ({}), control: async () => ({}),
+      readClipboard: async () => ({ text: '' }), writeClipboard: async () => ({ written: true }),
+    },
+  });
+  context.after(async () => { completeRead?.({ conditionMatched: false }); await executor.shutdown(); await rm(root, { recursive: true, force: true }); });
+  const lease = executor.leases.acquire(60);
+  const first = await executor.call('desktop_window_action', { lease, windowId: 42, action: 'close', waitFor: { state: 'window_closed', windowId: 42, timeoutMs: 20 } }) as Record<string, unknown>;
+  assert.equal((first.wait as Record<string, unknown>).status, 'not_observed_yet');
+  const queued = executor.call('desktop_window_action', { lease, windowId: 43, action: 'focus' });
+  const rejected = assert.rejects(queued, /human|stale|lease/i);
+  await executor.takeHumanControl();
+  completeRead!({ conditionMatched: true, windows: [] });
+  await rejected;
+  assert.equal(dispatches, 1, 'no input may be queued in a busy helper before ownership is rechecked');
+});
+
 test('allowlisted desktop-session applications survive takeover while generic commands are fenced', async (context) => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'qubicl-desktop-applications-')));
   const outside = await realpath(await mkdtemp(join(tmpdir(), 'qubicl-desktop-outside-')));

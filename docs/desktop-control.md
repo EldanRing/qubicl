@@ -13,6 +13,14 @@ the gateway and add the new native tools to the saved policy.
 geometry, stacking order, visibility, window types, modal/transient relationships
 and a `geometryToken`. Follow `nextCursor` to read more windows. This is a live
 inventory, so refresh after applications open, close or reorder windows.
+Use `detail: "compact"` for small inventories: client geometry and its unchanged
+stale-geometry token remain, along with identity, focus, visibility and modal
+relationships. Desktop/workarea bounds appear once in the envelope; per-window
+coordinate mappings, frame extents and size constraints are omitted. The
+compatible default remains `detail: "full"`. Request `{windowId, detail: "full"}`
+for one window's exact extended metadata without repeating the other windows.
+An absent window returns an empty list. `desktop_snapshot` also accepts `detail`
+for its window metadata; element discovery and refs are unchanged.
 `sizeConstraints` reports minimum/maximum client sizes from `WM_NORMAL_HINTS`
 when supplied, with null for absent bounds. Application limits can exceed the
 display; they are reported rather than overridden.
@@ -25,7 +33,11 @@ chrome offsets are unknown. Browser screenshots/snapshots separately expose
 
 `desktop_snapshot` accepts `windowId`, optional `ref` for a subtree, and bounded
 `limit`/`maxBytes` budgets. It returns AT-SPI roles, names, states, text, geometry
-and named actions. By default only elements with both AT-SPI `visible` and
+and named actions. `maxBytes` budgets the JSON element list (or captured text
+for text reads), not the complete response: window metadata, pagination/status,
+trust framing and transport wrappers add bytes. It is not a total wire-size cap.
+Use compact window metadata, a subtree `ref`, and a smaller `limit` to reduce
+that overhead. By default only elements with both AT-SPI `visible` and
 `showing` states are returned. Editable/focused elements and dialog controls come
 first, followed by other controls and text, then structural containers. Set
 `includeHidden: true` to also return hidden elements after the visible elements.
@@ -174,10 +186,64 @@ with `+` within an entry. Browser `browser_press` uses a single chord string suc
 as `Control+End`; `browser_computer` keypress arrays instead describe one chord
 (`keys: ["Control", "End"]`), with separate actions for sequential keypresses.
 
-Desktop input and native actions accept `observe: windows|snapshot|screenshot`
-to return resulting state in the same call. The default is `none`. Observations
-are immediate and may precede an app's asynchronous update. An observation error
-does not undo an already dispatched action; inspect before retrying. MCP returns
+Desktop input and native actions accept
+`observe: target|windows|snapshot|screenshot` to return state in the same call.
+The compatible default is `none`; existing observation modes retain their scope.
+For an element edit, prefer `observe: "target"`: it reads the same retained ref's
+current bounded text/value and states (including `focused`), plus related dialog
+windows, without collecting menus or creating another snapshot. Its window
+metadata is compact by default. `textRead` gives the existing full-text pagination
+entry point if `textTruncated` is true. If the ref or window disappears, the
+receipt reports `targetStatus: "unavailable"` with the remaining compact windows.
+Window/coordinate actions without an element ref return a compact inventory.
+
+`observationOptions` accepts `detail`, `maxBytes`, `limit`, and `ref`.
+`observe: "snapshot"` uses `ref` as a subtree and forwards both existing budgets;
+`observe: "target"` can select that ref instead of the acted-on ref. Its single
+element has a 4,000-byte default budget; `limit` applies only to snapshots.
+Window lists accept `detail`; screenshots retain their existing image size.
+The byte budget excludes the surrounding envelope as described above.
+Targeted snapshots do not first fetch a redundant window inventory.
+
+Observations are immediate unless `waitFor` declares an expected state:
+
+```json
+{
+  "ref": "<observed discard-button ref>",
+  "action": "invoke",
+  "observe": "windows",
+  "waitFor": {"state": "window_closed", "windowId": 12345, "timeoutMs": 2000}
+}
+```
+
+Include the normal lease proof with action calls. Supported conditions are
+`window_closed` with an X11 `windowId`, `text` with a native `ref` and exact `text`,
+and `value` with a native `ref` and numeric `value`. Text comparison covers the
+whole value, including line breaks and content beyond the shortened receipt;
+password comparison is refused. Window disappearance checks the inventory beyond
+the returned first page. `timeoutMs` defaults to 2,000 and is bounded to 1–10,000.
+The first observation is immediate; subsequent checks stop on the expected state
+or deadline, including when an accessibility read stalls. There is no fixed wait
+before a successful first observation.
+
+The returned `wait.status` is `observed` or `not_observed_yet`. The latter includes
+`reason: deadline|target_unavailable|observation_unavailable` and the last sample
+when available. It is a successful dispatch receipt with incomplete observation,
+not an action error. `verified` remains false: seeing the declared state does not
+prove the entire user task succeeded, nor that this action caused that state.
+Qubicl never replays input while waiting. A late provider read cannot revise the
+returned status. A stalled read can finish internally after the deadline; subsequent
+desktop requests queue behind it and recheck input ownership before dispatch.
+Inspect the state before deciding whether any new action is needed.
+
+For `observe: "target"`/`"none"`, and `"windows"` with `window_closed`, Qubicl
+reuses the wait's final sample. On timeout/unavailable it also returns that sample
+without another read; `observationKind` identifies `target` or `windows`. After a
+successful condition, an explicitly requested snapshot/screenshot (or a window
+list after a value check) is a separate final observation; its normal read time
+is additional to the condition-wait budget. No wait is an atomic desktop lock.
+An observation error does not undo an already dispatched action; inspect before
+retrying. MCP returns
 screenshot content as a native image without repeating base64 in text. Native
 observations remain untrusted application data and require the interactive
 credential scope, but do not claim the input lease. Queued input rechecks
