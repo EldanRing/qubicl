@@ -559,7 +559,9 @@ export class ToolExecutor {
       case 'desktop_element_action':
       case 'desktop_window_action': {
         return respond(await runDesktop(async () => {
-          const result = await this.nativeDesktopCall(name === 'desktop_element_action' ? 'act' : 'windowAction', input);
+          const result = name === 'desktop_element_action' && input.textMethod === 'application'
+            ? await this.replaceDesktopText(input, owner!)
+            : await this.nativeDesktopCall(name === 'desktop_element_action' ? 'act' : 'windowAction', input);
           return this.observeDesktop(result, input as DesktopActionObservation, result.windowId as number);
         }));
       }
@@ -1009,6 +1011,24 @@ export class ToolExecutor {
   private nativeDesktopCall(method: NativeDesktopMethod, input: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (!this.desktop.native) throw new QubiclError('desktop_inspection_unavailable', 'Native desktop inspection is unavailable.', 503);
     return this.desktop.native(method, Object.fromEntries(Object.entries(input).filter(([key]) => !['lease', 'observe', 'observationOptions'].includes(key) && (key !== 'waitFor' || method === 'observe'))));
+  }
+
+  private async replaceDesktopText(input: Record<string, unknown>, owner: LeaseProof): Promise<Record<string, unknown>> {
+    const deadline = Date.now() + 10_000;
+    this.leases.verifyInteractive(owner);
+    let step = await this.nativeDesktopCall('textEdit', { ref: input.ref, text: input.text });
+    while (!step.done && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      // Each helper step performs at most one input action. Takeover fences the
+      // next step, including the final Replace All commit; never replay it.
+      this.leases.verifyInteractive(owner);
+      step = await this.nativeDesktopCall('textEdit', { token: step.token });
+    }
+    if (!step.done) throw new QubiclError('desktop_text_edit_incomplete',
+      step.documentDispatched ? 'Mousepad replacement was dispatched but readback did not complete. Inspect the document; do not replay automatically.'
+        : 'Mousepad replacement preparation did not complete; the document was not committed. Inspect the open dialog.',
+      409, { documentDispatched: step.documentDispatched === true });
+    return step.result as Record<string, unknown>;
   }
 
   private async observeDesktop(result: unknown, input: DesktopActionObservation, windowId?: number): Promise<unknown> {

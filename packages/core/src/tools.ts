@@ -450,12 +450,21 @@ export const toolDefinitions = {
     }), lease: false,
   },
   desktop_element_action: {
-    description: 'Invoke a named native action, focus an element, replace editable text (set_text requires text), or set an AT-SPI numeric model value (set_value requires value) using an observed ref. Numeric values report limits and readback; text replacement alone need not commit the numeric value of a spin control. Undo grouping is application-defined; one Undo is not guaranteed to restore the old text. API acceptance is distinct from verified application effect. observe=target returns only the affected value/states and related windows; waitFor optionally observes an exact state without replaying input.',
-    input: leaseOnly.extend({ ref: desktopRef, action: z.enum(['invoke', 'focus', 'set_text', 'set_value']), actionName: z.string().min(1).max(80).optional(), text: z.string().max(50000).optional(), value: z.number().finite().optional(), ...desktopActionObservation }), lease: true,
+    description: 'Invoke a named native action, focus an element, replace editable text (set_text requires text), or set an AT-SPI numeric model value (set_value requires value) using an observed ref. Numeric values report limits and readback; text replacement alone need not commit the numeric value of a spin control. Default accessibility replacement has application-defined Undo grouping. textMethod=application uses bundled Mousepad’s native transaction for a single undoable edit; it does not claim support for other apps. API acceptance is distinct from verified application effect. observe=target returns only the affected value/states and related windows; waitFor optionally observes an exact state without replaying input.',
+    input: leaseOnly.extend({ ref: desktopRef, action: z.enum(['invoke', 'focus', 'set_text', 'set_value']), actionName: z.string().min(1).max(80).optional(), text: z.string().max(50000).optional(), value: z.number().finite().optional(),
+      textMethod: z.enum(['accessibility', 'application']).optional().describe('For set_text: accessibility is compatible AT-SPI replacement; application explicitly uses bundled Mousepad Replace All for one undoable document edit, preserving clipboard data. Only a visible Mousepad document with no open dialogs is supported. Search dialog preferences change; ownership is checked between steps.'),
+      ...desktopActionObservation }).superRefine((input, context) => {
+      if (input.textMethod && (input.action !== 'set_text' || input.text === undefined)) context.addIssue({ code: 'custom', message: 'textMethod requires set_text and explicit text' });
+    }), lease: true,
   },
   desktop_window_action: {
-    description: 'Request focus, explicit fit to usable workarea, or normal close through the window manager. Close leaves Save/Discard/Cancel dialogs to the application; it never terminates a process.',
-    input: leaseOnly.extend({ windowId: z.number().int().positive().max(0xffff_ffff), action: z.enum(['focus', 'close', 'fit']), geometryToken: desktopGeometryToken, ...desktopActionObservation }), lease: true,
+    description: 'Focus, fit, or normally close a window. reveal moves only this window to expose a region in window-relative client pixels, requiring current geometryToken; useful when its minimum size exceeds the desktop. file_details explicitly switches a Thunar window to its accessible Details view without guessing its directory or changing clipboard data. Observe fresh state before dependent input. Close permits save dialogs and never terminates a process.',
+    input: leaseOnly.extend({ windowId: z.number().int().positive().max(0xffff_ffff), action: z.enum(['focus', 'close', 'fit', 'reveal', 'file_details']), geometryToken: desktopGeometryToken,
+      region: z.strictObject({ x: z.number().int().min(0), y: z.number().int().min(0), width: z.number().int().min(1).max(16384), height: z.number().int().min(1).max(16384) }).optional().describe('For reveal only: rectangle inside the observed client window, in window-relative pixels.'),
+      ...desktopActionObservation }).superRefine((input, context) => {
+      if (input.action === 'reveal' && (!input.region || !input.geometryToken)) context.addIssue({ code: 'custom', message: 'reveal requires region and geometryToken' });
+      if (input.action !== 'reveal' && input.region) context.addIssue({ code: 'custom', message: 'region is only supported for reveal' });
+    }), lease: true,
   },
   browser_navigate: {
     description: 'Open an HTTP or HTTPS URL in the persistent visible browser.',

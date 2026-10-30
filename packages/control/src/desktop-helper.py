@@ -34,6 +34,7 @@ class Desktop:
         self.root = self.x.screen().root
         self.captures = collections.OrderedDict()
         self.text_captures = collections.OrderedDict()
+        self.text_edits = {}
 
     def prop(self, window, name):
         value = window.get_full_property(self.x.intern_atom(name), X.AnyPropertyType)
@@ -166,6 +167,41 @@ class Desktop:
 
     def window_action(self, args):
         window = self.validate({**args, 'requireVisible': False})['window']
+        if args['action'] == 'file_details':
+            root = self.accessible_window(window)
+            app = root.get_application() if root else None
+            if ('thunar' not in window['className'].lower().split() or not app or (app.get_name() or '').lower() != 'thunar'):
+                raise Failure('desktop_view_unsupported', 'file_details supports an observed Thunar window only; no directory is inferred from its title.')
+            self.focused_chord(window, ['Control_L', '2'])
+            return {'windowId': window['id'], 'action': 'file_details', 'application': 'thunar',
+                    'requestedView': 'details', 'dispatch': 'completed', 'dispatchMethod': 'focused_keyboard', 'verified': False,
+                    'note': 'Requested Thunar Details view with Ctrl+2. Read a new snapshot for actual accessible file cells and refs; clipboard and directory were not changed.'}
+        if args['action'] == 'reveal':
+            if not args.get('geometryToken'):
+                raise Failure('desktop_geometry_required', 'Reveal requires current observed window geometry.')
+            region = args.get('region')
+            geometry, area = window['geometry'], window['workArea']
+            if (not isinstance(region, dict) or any(not isinstance(region.get(key), int) or isinstance(region[key], bool) for key in ('x', 'y', 'width', 'height'))
+                    or min(region['x'], region['y']) < 0 or min(region['width'], region['height']) < 1
+                    or region['x'] + region['width'] > geometry['width'] or region['y'] + region['height'] > geometry['height']):
+                raise Failure('desktop_region_invalid', 'Choose a positive rectangle inside the observed client window, using window-relative pixels.')
+            if region['width'] > area['width'] or region['height'] > area['height']:
+                raise Failure('desktop_region_too_large', 'Choose a smaller region that fits the work area; reveal moves this window without resizing the display.')
+            position = {}
+            for axis, size in (('x', 'width'), ('y', 'height')):
+                start = geometry[axis] + region[axis]
+                position[axis] = (geometry[axis] if area[axis] <= start and start + region[size] <= area[axis] + area[size]
+                                  else area[axis] + (area[size] - region[size]) // 2 - region[axis])
+            # Static gravity specifies the client origin. Only position changes;
+            # retain the application's minimum size and every other window.
+            self.root.send_event(protocol.event.ClientMessage(window=window['id'], client_type=self.x.intern_atom('_NET_MOVERESIZE_WINDOW'),
+                data=(32, [10 | (3 << 8) | (2 << 12), position['x'] & 0xffffffff, position['y'] & 0xffffffff, 0, 0])),
+                event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+            self.x.sync()
+            return {'windowId': window['id'], 'action': 'reveal', 'dispatch': 'completed', 'verified': False,
+                    'region': region, 'coordinateSpace': 'window_client', 'requestedClientOrigin': position,
+                    'previousGeometry': geometry, 'displayChanged': False,
+                    'note': 'Moved only this window to reveal the requested client region. Observe fresh geometry before coordinate input.'}
         if args['action'] == 'fit':
             area = window['workArea']
             extents = window['frameExtents'] or dict.fromkeys(('left', 'right', 'top', 'bottom'), 0)
@@ -645,6 +681,10 @@ class Desktop:
                 'usefulnessScope': capture['scope'],
                 'contentCoverage': 'partial' if capture['coverageGaps'] or capture['unreadable'] or capture['limited'] or any(not table['complete'] for table in capture['tables'].values()) else 'exposed_tree',
                 'coverageGaps': capture['coverageGaps'],
+                **({'recoveryActions': [{'tool': 'desktop_window_action',
+                    'input': {'windowId': window['id'], 'action': 'file_details', 'observe': 'snapshot'},
+                    'effect': 'Switch this Thunar window to Details view so the toolkit exposes file cells; requires interactive ownership.'}]}
+                   if capture['coverageGaps'] and 'thunar' in window.get('className', '').lower().split() else {}),
                 'tableRanges': [{'ref': ref, **metadata} for ref, metadata in list(capture['tables'].items())[:8]],
                 **({'fallback': {'tool': 'take_screenshot', 'reason': 'Some native content is not exposed in this scope; inspect coverageGaps and a screenshot. Scope limits are reported separately.'}}
                    if capture['coverageGaps'] else {} if useful else {'fallback': {'tool': 'take_screenshot', 'reason': 'Application exposes only a sparse native tree. Inspect a screenshot or retry after startup.'}}),
@@ -766,39 +806,175 @@ class Desktop:
                 result['conditionMatched'] = False
             return result
 
-    def gtk_button_activate(self, obj, capture):
-        # GTK3 invokes button callbacks synchronously inside the AT-SPI D-Bus
-        # handler. A callback running Dialog.run() then blocks that same bridge.
-        # Space on a verified focused GtkButton runs through GTK's input loop,
-        # so the newly opened modal remains accessible. Never replay DoAction.
-        window = self.validate({'windowId': capture['windowId']})['window']
+    def focused_chord(self, window, keysyms, obj=None):
+        window = self.validate({'windowId': window['id'], 'geometryToken': window.get('geometryToken')})['window']
         if any(item['modal'] and item['transientFor'] == window['id'] for item in self.inventory()):
             raise Failure('desktop_window_blocked', 'A modal blocks the requested window; inspect that dialog before input.')
         self.window_action({'windowId': window['id'], 'action': 'focus'})
-        component = obj.get_component_iface()
-        if not component or not component.grab_focus():
-            raise Failure('desktop_focus_unavailable', 'The GTK button could not receive focus; no activation was sent.')
+        component = obj.get_component_iface() if obj else None
+        if obj and (not component or not component.grab_focus()):
+            raise Failure('desktop_focus_unavailable', 'The target could not receive focus; no input was sent.')
         deadline = time.monotonic() + .5
         while True:
-            obj.clear_cache()
-            focused = obj.get_state_set().contains(Atspi.StateType.FOCUSED)
+            if obj: obj.clear_cache()
+            focused = obj is None or obj.get_state_set().contains(Atspi.StateType.FOCUSED)
             active = self.window(window['id'])['active']
             if focused and active:
                 break
             if time.monotonic() >= deadline:
-                raise Failure('desktop_focus_changed', 'The GTK button is not focused in the active window; no activation was sent.')
+                raise Failure('desktop_focus_changed', 'The target is not focused in the active window; no input was sent.')
             time.sleep(.01)
         modifiers = self.root.query_pointer().mask
         if modifiers & (X.ShiftMask | X.ControlMask | X.Mod1Mask | X.Mod4Mask | X.Mod5Mask):
             raise Failure('desktop_modifier_active', 'A keyboard modifier is held; no activation was sent.')
-        keycode = self.x.keysym_to_keycode(XK.string_to_keysym('space'))
-        if not keycode:
-            raise Failure('desktop_key_unavailable', 'The display has no Space key mapping; no activation was sent.')
-        if self.x.query_keymap()[keycode // 8] & (1 << (keycode % 8)):
-            raise Failure('desktop_key_held', 'Space is already held; no activation was sent.')
-        xtest.fake_input(self.x, X.KeyPress, keycode)
-        xtest.fake_input(self.x, X.KeyRelease, keycode)
-        self.x.sync()
+        keycodes = [self.x.keysym_to_keycode(XK.string_to_keysym(key)) for key in keysyms]
+        if not all(keycodes):
+            raise Failure('desktop_key_unavailable', 'The display lacks a required key mapping; no input was sent.')
+        held = self.x.query_keymap()
+        if any(held[code // 8] & (1 << (code % 8)) for code in keycodes):
+            raise Failure('desktop_key_held', 'A required key is already held; no input was sent.')
+        pressed = []
+        try:
+            for code in keycodes:
+                xtest.fake_input(self.x, X.KeyPress, code)
+                pressed.append(code)
+        finally:
+            for code in reversed(pressed): xtest.fake_input(self.x, X.KeyRelease, code)
+            self.x.sync()
+
+    def gtk_button_activate(self, obj, capture):
+        # DoAction callbacks running Dialog.run() block GTK's AT-SPI bridge.
+        # One focused Space goes through its input loop; never replay DoAction.
+        self.focused_chord(self.window(capture['windowId']), ['space'], obj)
+
+    @staticmethod
+    def edit_text_value(obj, limit=50000):
+        obj.clear_cache()
+        iface = obj.get_text_iface()
+        if not iface or iface.get_character_count() > limit or obj.get_role() == Atspi.Role.PASSWORD_TEXT:
+            raise Failure('desktop_text_edit_unsupported', 'Application replacement requires non-sensitive text of at most 50000 characters.')
+        return Atspi.Text.get_text(iface, 0, iface.get_character_count())
+
+    def text_edit(self, args):
+        """Mousepad's own Replace All transaction, one mutation per bridge call.
+
+        The controller checks interactive ownership before EVERY step. Do not
+        fold this into a helper-side loop or retry the committed application action.
+        """
+        if not args.get('token'):
+            obj, capture = self.resolve(args['ref'])
+            window = self.window(capture['windowId'])
+            app = obj.get_application()
+            states = obj.get_state_set()
+            if ('mousepad' not in window['className'].lower().split() or not app or (app.get_name() or '').lower() != 'mousepad'
+                    or window['transientFor'] or obj.get_role_name() != 'text'
+                    or any(not states.contains(state) for state in (Atspi.StateType.EDITABLE, Atspi.StateType.SHOWING, Atspi.StateType.ENABLED, Atspi.StateType.SENSITIVE))):
+                raise Failure('desktop_text_edit_unsupported', 'textMethod=application supports the visible Mousepad document editor only; other applications retain accessibility replacement.')
+            if any(w['pid'] == window['pid'] and ('dialog' in w['windowTypes'] or w['modal']) for w in self.inventory()):
+                raise Failure('desktop_text_edit_dialog_open', 'Close existing Mousepad dialogs before application replacement; their settings will not be overwritten.')
+            old = self.edit_text_value(obj)
+            text = args.get('text')
+            if not isinstance(text, str) or len(text) > 50000 or '\x00' in text:
+                raise Failure('desktop_text_required', 'Application replacement requires text without NUL, at most 50000 characters.')
+            if text == old:
+                return {'done': True, 'result': {'ref': args['ref'], 'windowId': window['id'], 'dispatch': 'not_needed', 'changed': False, 'textReadbackMatches': True, 'verified': False}}
+            if not old:
+                # Mousepad does not replace a zero-width regex in an empty
+                # document. A single insertion has no preceding deletion and
+                # produces one undoable GtkSourceBuffer edit (checked live).
+                accepted = obj.get_editable_text_iface().insert_text(0, text, -1)
+                return {'done': True, 'result': {'ref': args['ref'], 'windowId': window['id'], 'dispatch': 'completed',
+                        'dispatchMethod': 'mousepad_empty_insert', 'acceptedByAccessibilityApi': bool(accepted),
+                        'undoGrouping': 'application_transaction', 'textReadbackMatches': self.edit_text_value(obj) == text, 'verified': False}}
+            token = secrets.token_hex(12)
+            self.text_edits = {token: {'created': time.monotonic(), 'source': obj, 'ref': args['ref'], 'windowId': window['id'],
+                                      'pid': window['pid'], 'old': old, 'text': text, 'phase': 0}}
+            self.focused_chord(window, ['Control_L', 'r'], obj)
+            return {'token': token, 'done': False, 'documentDispatched': False}
+        edit = self.text_edits.get(args['token'])
+        if not edit or time.monotonic() - edit['created'] > 15:
+            raise Failure('desktop_text_edit_expired', 'Application replacement expired; inspect the document and dialog before another edit.')
+        def status():
+            return {'token': args['token'], 'done': False, 'documentDispatched': edit['phase'] >= 8}
+        if 'controls' not in edit:
+            dialogs = [w for w in self.inventory() if w['pid'] == edit['pid'] and w['transientFor'] == edit['windowId'] and w['title'] == 'Find and Replace']
+            if len(dialogs) != 1:
+                return status()
+            snap = self.snapshot({'windowId': dialogs[0]['id'], 'limit': 200, 'maxBytes': 18000})
+            controls = snap['elements']
+            fields = sorted((n for n in controls if n['role'] == 'text' and 'editable' in n['states']), key=lambda n: n['geometry']['y'])
+            if len(fields) != 2 or snap.get('nextCursor'):
+                raise Failure('desktop_text_edit_unsupported', 'Mousepad replacement dialog differs from the supported layout; document was not changed.')
+            edit.update(dialog=dialogs[0]['id'], controls=controls, fields=fields)
+        controls, fields = edit['controls'], edit['fields']
+        pattern = r'\A[\s\S]*\z'
+        replacement = edit['text'].replace('\\', '\\\\').replace('\n', r'\n').replace('\r', r'\r').replace('\t', r'\t')
+        checks = [('Regular expression', True), ('Match whole word', False), ('Replace all in:', True)]
+        phase = edit['phase']
+        if phase < 2:
+            self.act({'ref': fields[phase]['ref'], 'action': 'set_text', 'text': (pattern, replacement)[phase]})
+        elif phase < 5:
+            name, required = checks[phase - 2]
+            matches = [n for n in controls if n['role'] == 'check box' and n['name'] == name]
+            if len(matches) != 1:
+                raise Failure('desktop_text_edit_unsupported', 'Mousepad replacement options could not be identified; document was not changed.')
+            obj, _ = self.resolve(matches[0]['ref'])
+            if obj.get_state_set().contains(Atspi.StateType.CHECKED) != required:
+                self.act({'ref': matches[0]['ref'], 'action': 'invoke'})
+        elif phase == 5:
+            # The scope is part of the operation, never inherit All Documents or
+            # Selection from a previous human search. GTK's combo has a menu child.
+            scope = next((n for n in controls if n['role'] == 'combo box' and n['name'] in ('Document', 'Selection', 'All Documents')), None)
+            if not scope:
+                raise Failure('desktop_text_edit_unsupported', 'Cannot identify replacement scope; document was not changed.')
+            obj, _ = self.resolve(scope['ref'])
+            if obj.get_name() != 'Document':
+                selection = obj.get_selection_iface()
+                menu = obj.get_child_at_index(0) if obj.get_child_count() else None
+                options = [menu.get_child_at_index(i) for i in range(min(menu.get_child_count(), 16))] if menu else []
+                index = next((i for i, option in enumerate(options) if option.get_name() == 'Document'), None)
+                if selection is None or index is None or not selection.select_child(index):
+                    raise Failure('desktop_text_edit_unsupported', 'Could not select Document scope; document was not changed.')
+        elif phase == 6:
+            # Refresh refs after option changes (Replace becomes Replace All).
+            snap = self.snapshot({'windowId': edit['dialog'], 'limit': 200, 'maxBytes': 18000})
+            fresh = snap['elements']
+            if snap.get('nextCursor') or not any(n['role'] == 'combo box' and n['name'] == 'Document' and 'enabled' in n['states'] for n in fresh):
+                raise Failure('desktop_text_edit_scope_changed', 'Replacement must target Document only; document was not changed.')
+            for name, required in checks:
+                if not any(n['role'] == 'check box' and n['name'] == name and ('checked' in n['states']) == required for n in fresh):
+                    raise Failure('desktop_text_edit_options_changed', 'Replacement options changed; document was not changed.')
+            actual_fields = sorted((n for n in fresh if n['role'] == 'text' and 'editable' in n['states']), key=lambda n: n['geometry']['y'])
+            if [n.get('text') for n in actual_fields] != [pattern, replacement]:
+                # Use exact values below as snapshots may be bounded.
+                if len(actual_fields) != 2 or [self.edit_text_value(self.resolve(n['ref'])[0], 200000) for n in actual_fields] != [pattern, replacement]:
+                    raise Failure('desktop_text_edit_options_changed', 'Replacement text changed; document was not changed.')
+            buttons = [n for n in fresh if n['role'] == 'button' and n['name'] == 'Replace All' and 'enabled' in n['states']]
+            if len(buttons) != 1:
+                return status()  # Search readiness is asynchronous; no mutation.
+            edit['commitRef'] = buttons[0]['ref']
+        elif phase == 7:
+            if self.edit_text_value(edit['source']) != edit['old'] or not edit['source'].get_state_set().contains(Atspi.StateType.SHOWING):
+                raise Failure('desktop_text_edit_source_changed', 'Document changed during preparation; replacement was not dispatched.')
+            edit['phase'] = 8  # Mark before sending: never replay on uncertainty.
+            self.act({'ref': edit['commitRef'], 'action': 'invoke'})
+            return status()
+        elif phase == 8:
+            if self.edit_text_value(edit['source']) != edit['text']:
+                return status()
+        else:
+            try:
+                self.window_action({'windowId': edit['dialog'], 'action': 'close'})
+                dialog_close = 'requested'
+            except Failure:
+                dialog_close = 'unavailable'
+            self.text_edits.pop(args['token'], None)
+            return {'done': True, 'result': {'ref': edit['ref'], 'windowId': edit['windowId'], 'dispatch': 'completed',
+                    'dispatchMethod': 'mousepad_replace_all', 'undoGrouping': 'application_transaction',
+                    'textReadbackMatches': True, 'dialogClose': dialog_close, 'verified': False,
+                    'note': 'Mousepad Replace All performed one document edit; one Undo restores it in the bundled Mousepad. Clipboard was untouched. Other toolkits are not covered.'}}
+        edit['phase'] += 1
+        return status()
 
     def act(self, args):
         if args['action'] == 'set_text' and 'text' not in args:
@@ -866,7 +1042,7 @@ class Desktop:
                 break
             context.iteration(False)
         handlers = {'windows': self.windows, 'validate': self.validate, 'window_action': self.window_action,
-                    'snapshot': self.snapshot, 'observe': self.observe, 'act': self.act, 'close_process': self.close_process, 'clipboard_status': self.clipboard_status}
+                    'snapshot': self.snapshot, 'observe': self.observe, 'act': self.act, 'text_edit': self.text_edit, 'close_process': self.close_process, 'clipboard_status': self.clipboard_status}
         if method not in handlers:
             raise Failure('invalid_desktop_method', 'Unsupported native desktop operation.')
         return handlers[method](args)

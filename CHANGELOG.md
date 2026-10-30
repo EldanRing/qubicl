@@ -6,6 +6,14 @@ All notable Qubicl changes are recorded here. Supported releases will follow Sem
 
 ### Added
 
+- Native window `reveal` exposes a chosen client rectangle by moving only its
+  window, making oversized Kdenlive controls accessible without resizing the display.
+- Thunar snapshots with missing icon entries offer an explicit `file_details`
+  action that switches to accessible file/directory cells in Details view.
+- Native text replacement offers an explicit Mousepad application mode using
+  Replace All as one undoable document edit, with per-step ownership checks,
+  exact readback and unchanged clipboard data.
+
 - Desktop application inventory accepts `view: running` to omit launcher discovery
   during routine observations. The default full catalog remains compatible.
 - PowerPoint outlines identify hidden slides; rendering receipts declare their

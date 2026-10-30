@@ -187,6 +187,31 @@ test('native desktop actions return observations, strip lease secrets and fence 
   assert.equal(calls.filter(({ method }) => method === 'windowAction').length, 1, 'queued close must never reach the session');
 });
 
+test('application text replacement checks ownership before every preparation and commit step', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'qubicl-edit-fence-'));
+  const manifest = buildComputerManifest('workstation', 'test', 'revision');
+  let steps = 0;
+  const executor = new ToolExecutor({ manifest, sha256: manifestSha256(manifest) }, {
+    processes: new ProcessManager({ outputDirectory: join(root, 'output') }),
+    desktop: {
+      native: async (method) => {
+        assert.equal(method, 'textEdit');
+        steps++;
+        if (steps === 2) await executor.takeHumanControl();
+        return { token: 'opaque', done: false, documentDispatched: false };
+      },
+      screenshot: async () => ({}), control: async () => ({}),
+      readClipboard: async () => ({ text: '' }), writeClipboard: async () => ({ written: true }),
+    },
+  });
+  context.after(async () => { await executor.shutdown(); await rm(root, { recursive: true, force: true }); });
+  const lease = executor.leases.acquire(60);
+  await assert.rejects(executor.call('desktop_element_action', {
+    lease, ref: 'a'.repeat(24) + 'e1', action: 'set_text', text: 'replacement', textMethod: 'application',
+  }), /human|stale|lease|ownership/i);
+  assert.equal(steps, 2, 'takeover must prevent the subsequent edit/commit step');
+});
+
 test('desktop focused observations and expected-state waits preserve one dispatch and explicit timeout receipts', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'qubicl-native-observe-'));
   const manifest = buildComputerManifest('workstation', 'test', 'revision');

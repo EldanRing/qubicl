@@ -120,7 +120,14 @@ coverage: `contentCoverage: partial` and `coverageGaps` identify directory panes
 whose inspected tree exposes no named file/icon items. This does not establish
 that a directory is empty. Thunar's current icon-view toolkit can expose only
 an empty panel even through AT-SPI Collection; use the reported screenshot
-fallback. When the toolkit supplies item names/actions, they retain normal refs.
+fallback or the explicit `recoveryActions` entry:
+`desktop_window_action({windowId, action: "file_details", observe: "snapshot"})`
+switches that Thunar window to Details view, which exposes real file/directory
+table cells with normal refs in the bundled toolkit. It verifies the application
+and target focus, sends one Ctrl+2, and does not infer a path from a window title,
+read extra directories or change the clipboard. This changes the application's
+view preference; inspect the resulting cells before invoking one.
+When the toolkit supplies item names/actions, they retain normal refs.
 `exposed_tree` means no such gap was detected, not proof of complete application
 content. Budget truncation and unreadable elements remain separately reported.
 Blender's custom UI generally needs screenshot control. Qt and office dialogs
@@ -157,6 +164,32 @@ transaction/grouping API. Mousepad may separate deletion and insertion
 into distinct Undo steps. Inspect each Undo result; one step can leave an empty
 buffer. Qubicl does not issue compensating edits or alter the clipboard to emulate
 an application undo stack.
+
+For the bundled Mousepad document editor, opt into
+`desktop_element_action({ref, action: "set_text", text: "...", textMethod: "application"})`.
+Qubicl uses Mousepad's own Find and Replace / Replace All operation to make one
+undoable document edit (a single insertion when the document is empty). It supports multiline text, Unicode, literal backslashes,
+clearing the document, and leaving the original file unsaved. It opens and
+configures the replacement dialog, verifies Document-only scope and unchanged
+source text, commits once, checks text readback, and requests dialog close.
+Interactive ownership is checked before each step, including commit. Existing
+dialogs or unsupported layouts/apps reject preparation; partial preparation may
+leave its dialog open for inspection. Search preferences change (regex and
+Replace All/Document); clipboard formats and ownership stay untouched. The receipt
+reports `dispatchMethod: mousepad_replace_all` and
+`undoGrouping: application_transaction` (`mousepad_empty_insert` for an empty
+source). One Undo was verified with the bundled
+Mousepad; this is not a transaction guarantee for other toolkits or subsequent edits.
+
+For an oversized window, use `desktop_window_action` with `action: "reveal"`, its
+current `geometryToken`, and `region: {x, y, width, height}` in **window-relative
+client pixels**. The requested rectangle must fit the work area. Qubicl moves
+only that window to expose the region, retaining its size and the display size.
+This makes Kdenlive's clipped right/bottom controls reachable even when its
+minimum width exceeds the desktop. Reveal another rectangle to return to the
+left/top. Observe fresh geometry after movement before clicks; stale geometry
+rejects input. This is access to the application in portions, not a claim that
+the whole oversized window fits simultaneously.
 
 `control_computer` retains screen-coordinate input. Mouse actions can specify
 `targetWindowId` and must then include the observed `geometryToken`. Qubicl

@@ -13,8 +13,10 @@ export interface DesktopSnapshotInput {
   windowId: number; detail?: 'full' | 'compact'; cursor?: string; ref?: string; limit?: number; maxBytes?: number; includeHidden?: boolean; textOffset?: number; textCursor?: string; tableRange?: { row: number; column: number; rows?: number; columns?: number };
 }
 export interface DesktopElementAction {
-  ref: string; action: 'invoke' | 'focus' | 'set_text' | 'set_value'; actionName?: string; text?: string; value?: number;
+  ref: string; action: 'invoke' | 'focus' | 'set_text' | 'set_value'; actionName?: string; text?: string; value?: number; textMethod?: 'accessibility' | 'application';
 }
+export type DesktopWindowAction = 'focus' | 'close' | 'fit' | 'reveal' | 'file_details';
+export interface DesktopWindowRegion { x: number; y: number; width: number; height: number }
 export interface DesktopObservationOptions { detail?: 'full' | 'compact'; ref?: string; limit?: number; maxBytes?: number }
 export type DesktopWaitFor = { timeoutMs: number } & (
   { state: 'window_closed'; windowId: number } | { state: 'text'; ref: string; text: string } | { state: 'value'; ref: string; value: number }
@@ -22,7 +24,7 @@ export type DesktopWaitFor = { timeoutMs: number } & (
 export interface DesktopActionObservation {
   observe?: string; observationOptions?: DesktopObservationOptions; waitFor?: DesktopWaitFor;
 }
-export type NativeDesktopMethod = 'windows' | 'snapshot' | 'observe' | 'act' | 'windowAction';
+export type NativeDesktopMethod = 'windows' | 'snapshot' | 'observe' | 'act' | 'windowAction' | 'textEdit';
 interface NativeOptions { script?: string; uid?: number; gid?: number; environment?: NodeJS.ProcessEnv }
 
 /** A private, workload-user helper retains the actual AT-SPI objects behind refs. */
@@ -44,7 +46,8 @@ export class NativeDesktopManager {
       case 'observe': return this.request('observe', input);
       case 'snapshot': return this.snapshot(input as unknown as DesktopSnapshotInput);
       case 'act': return this.act(input as unknown as DesktopElementAction);
-      case 'windowAction': return this.windowAction(input.windowId as number, input.action as 'focus' | 'close' | 'fit', input.geometryToken as string | undefined);
+      case 'textEdit': return this.interact(() => this.request('text_edit', input));
+      case 'windowAction': return this.windowAction(input.windowId as number, input.action as DesktopWindowAction, input.geometryToken as string | undefined, input.region as DesktopWindowRegion | undefined);
       default: throw new QubiclError('invalid_desktop_method', 'Unsupported desktop operation.', 400);
     }
   }
@@ -52,8 +55,8 @@ export class NativeDesktopManager {
   windows(cursor = 0): Promise<Record<string, unknown>> { return this.request('windows', { cursor }); }
   snapshot(input: DesktopSnapshotInput): Promise<Record<string, unknown>> { return this.request('snapshot', input); }
   act(input: DesktopElementAction): Promise<Record<string, unknown>> { return this.interact(() => this.request('act', input)); }
-  windowAction(windowId: number, action: 'focus' | 'close' | 'fit', geometryToken?: string): Promise<Record<string, unknown>> {
-    return this.interact(() => this.request('window_action', { windowId, action, geometryToken }));
+  windowAction(windowId: number, action: DesktopWindowAction, geometryToken?: string, region?: DesktopWindowRegion): Promise<Record<string, unknown>> {
+    return this.interact(() => this.request('window_action', { windowId, action, geometryToken, region }));
   }
   validate(input: Record<string, unknown>): Promise<Record<string, unknown>> { return this.request('validate', input); }
   clipboardStatus(): Promise<Record<string, unknown>> { return this.request('clipboard_status', {}); }
